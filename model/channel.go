@@ -988,21 +988,25 @@ func channelPluginHasHook(ch *Channel, hook string) bool {
 	return ok && plugin.HasProviderHook(hook)
 }
 
-func EnableChannelByTag(tag string) error {
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
+// EnableChannelByTag enables the channels in scope that carry the tag, and
+// their abilities.
+func EnableChannelByTag(scope ChannelScope, tag string) error {
+	err := scope.Apply(DB.Model(&Channel{}).Where("tag = ?", tag)).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
 		return err
 	}
 	defer BumpSyncTopic(SyncTopicChannels)
-	err = UpdateAbilityStatusByTag(tag, true)
+	err = UpdateAbilityStatusByTag(scope, tag, true)
 	return err
 }
 
-func DisableChannelByTag(tag string) error {
+// DisableChannelByTag disables the channels in scope that carry the tag, and
+// their abilities.
+func DisableChannelByTag(scope ChannelScope, tag string) error {
 	// Explicit tag-level disable also cancels automatic restoration for
 	// channels that were already disabled because all keys were unavailable.
 	var channels []Channel
-	if err := DB.Where("tag = ?", tag).Find(&channels).Error; err != nil {
+	if err := scope.Apply(DB.Where("tag = ?", tag)).Find(&channels).Error; err != nil {
 		return err
 	}
 	for _, channel := range channels {
@@ -1012,16 +1016,18 @@ func DisableChannelByTag(tag string) error {
 			}
 		}
 	}
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusManuallyDisabled).Error
+	err := scope.Apply(DB.Model(&Channel{}).Where("tag = ?", tag)).Update("status", common.ChannelStatusManuallyDisabled).Error
 	if err != nil {
 		return err
 	}
 	defer BumpSyncTopic(SyncTopicChannels)
-	err = UpdateAbilityStatusByTag(tag, false)
+	err = UpdateAbilityStatusByTag(scope, tag, false)
 	return err
 }
 
-func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
+// EditChannelByTag edits the channels in scope that carry the tag; both the
+// in-place ability update and the ability rebuild stay in scope too.
+func EditChannelByTag(scope ChannelScope, tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
 	updatedTag := tag
@@ -1054,13 +1060,13 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
+	err := scope.Apply(DB.Model(&Channel{}).Where("tag = ?", tag)).Updates(updateData).Error
 	if err != nil {
 		return err
 	}
 	defer BumpSyncTopic(SyncTopicChannels)
 	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(AllChannelsScope(), updatedTag, false, false)
+		channels, err := GetChannelsByTag(scope, updatedTag, false, false)
 		if err == nil {
 			for _, channel := range channels {
 				err = channel.UpdateAbilities(nil)
@@ -1070,7 +1076,7 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 			}
 		}
 	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
+		err := UpdateAbilityByTag(scope, tag, newTag, priority, weight)
 		if err != nil {
 			return err
 		}

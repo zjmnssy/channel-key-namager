@@ -34,7 +34,9 @@ func (s ChannelScope) IsAll() bool {
 	return s.all
 }
 
-// Apply limits a query whose only table is channels to the scope.
+// Apply limits a query whose only table is channels to the scope. Use it only
+// on a query without a chained Or: GORM joins a later Where to the last Or
+// branch, as in "a OR b AND scope", so the scope would bind that branch alone.
 func (s ChannelScope) Apply(query *gorm.DB) *gorm.DB {
 	if s.all {
 		return query
@@ -45,10 +47,32 @@ func (s ChannelScope) Apply(query *gorm.DB) *gorm.DB {
 	return query.Where("creator_user_id = ? AND creator_role = ?", s.creatorUserID, common.RoleChannelSupplierUser)
 }
 
+// applyByChannelID limits a query on a table that refers to channels by
+// channel_id, such as abilities, to the channels in the scope. The query of
+// AllChannelsScope is left as it is. Like Apply, it is only for a query
+// without a chained Or.
+func (s ChannelScope) applyByChannelID(query *gorm.DB) *gorm.DB {
+	if s.all {
+		return query
+	}
+	return query.Where("channel_id IN (?)", s.ChannelIDQuery())
+}
+
 // ChannelIDQuery selects the IDs of the channels in the scope, for filtering
 // tables that reference channels by channel_id.
 func (s ChannelScope) ChannelIDQuery() *gorm.DB {
 	return s.Apply(DB.Model(&Channel{}).Select("id"))
+}
+
+// ChannelIDsWithinScope reports whether every ID names an existing channel in
+// the scope. A repeated ID counts once.
+func ChannelIDsWithinScope(scope ChannelScope, ids []int) (bool, error) {
+	uniqueIDs := lo.Uniq(ids)
+	var count int64
+	if err := scope.Apply(DB.Model(&Channel{}).Where("id IN ?", uniqueIDs)).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count == int64(len(uniqueIDs)), nil
 }
 
 // GetEnabledModelsInScope lists the distinct models enabled on the channels in

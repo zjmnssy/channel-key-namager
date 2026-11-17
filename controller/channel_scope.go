@@ -23,6 +23,50 @@ func channelScopeFromContext(c *gin.Context) model.ChannelScope {
 	return model.CreatorChannelsScope(0)
 }
 
+// rejectChannelOutsideScope answers "Channel does not exist" and returns true
+// when the channel is not in the user's scope, whether it belongs to someone
+// else or does not exist at all, so a channel supplier cannot tell the two
+// apart. An administrator is never rejected and costs no query. Call it as
+// soon as the channel ID is parsed, before any lock, read, check or outbound
+// request on that channel.
+func rejectChannelOutsideScope(c *gin.Context, channelID int) bool {
+	scope := channelScopeFromContext(c)
+	if scope.IsAll() {
+		return false
+	}
+	within, err := model.ChannelIDsWithinScope(scope, []int{channelID})
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	if !within {
+		common.ApiErrorT(c, "Channel does not exist")
+		return true
+	}
+	return false
+}
+
+// rejectChannelsOutsideScope answers "One or more channels do not exist" and
+// returns true when any channel of a batch request is not in the user's
+// scope, so the whole batch is refused and a missing ID looks the same as
+// someone else's. An administrator is never rejected and costs no query.
+func rejectChannelsOutsideScope(c *gin.Context, channelIDs []int) bool {
+	scope := channelScopeFromContext(c)
+	if scope.IsAll() {
+		return false
+	}
+	within, err := model.ChannelIDsWithinScope(scope, channelIDs)
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	if !within {
+		common.ApiErrorT(c, "One or more channels do not exist")
+		return true
+	}
+	return false
+}
+
 // buildChannelListQuery selects the channels in scope that match the list
 // filters; a negative typeFilter matches every type.
 func buildChannelListQuery(scope model.ChannelScope, group string, statusFilter int, typeFilter int) *gorm.DB {

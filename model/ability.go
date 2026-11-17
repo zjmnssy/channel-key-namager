@@ -343,11 +343,15 @@ func UpdateAbilityStatus(channelId int, status bool) error {
 	return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", status).Error
 }
 
-func UpdateAbilityStatusByTag(tag string, status bool) error {
-	return DB.Model(&Ability{}).Where("tag = ?", tag).Select("enabled").Update("enabled", status).Error
+// UpdateAbilityStatusByTag sets whether the abilities with the tag of the
+// channels in scope are enabled.
+func UpdateAbilityStatusByTag(scope ChannelScope, tag string, status bool) error {
+	return scope.applyByChannelID(DB.Model(&Ability{}).Where("tag = ?", tag)).Select("enabled").Update("enabled", status).Error
 }
 
-func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uint) error {
+// UpdateAbilityByTag updates the tag, priority and weight of the abilities
+// with the tag of the channels in scope.
+func UpdateAbilityByTag(scope ChannelScope, tag string, newTag *string, priority *int64, weight *uint) error {
 	ability := Ability{}
 	if newTag != nil {
 		ability.Tag = newTag
@@ -358,7 +362,7 @@ func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uin
 	if weight != nil {
 		ability.Weight = *weight
 	}
-	return DB.Model(&Ability{}).Where("tag = ?", tag).Updates(ability).Error
+	return scope.applyByChannelID(DB.Model(&Ability{}).Where("tag = ?", tag)).Updates(ability).Error
 }
 
 var fixLock = sync.Mutex{}

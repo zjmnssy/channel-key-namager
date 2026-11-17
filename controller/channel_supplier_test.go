@@ -10,12 +10,14 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 type channelSupplierFixture struct {
@@ -97,6 +99,8 @@ func deleteChannelWithAbilities(t *testing.T, id int) {
 	require.NoError(t, model.DB.Unscoped().Delete(&model.Channel{}, id).Error)
 }
 
+// channelSupplierRequest runs handler as actor signed in with a dashboard
+// session, the only way a channel supplier reaches the channel routes.
 func channelSupplierRequest(t *testing.T, method, target, body string, actor *model.User, params gin.Params, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 	response := httptest.NewRecorder()
@@ -107,8 +111,50 @@ func channelSupplierRequest(t *testing.T, method, target, body string, actor *mo
 	c.Set("id", actor.Id)
 	c.Set("role", actor.Role)
 	c.Set("username", actor.Username)
+	c.Set("session_id", "dashboard-session")
+	c.Set("auth_version", int64(1))
+	c.Set("session_version", int64(1))
 	handler(c)
 	return response
+}
+
+// storedChannelState is a channel row, key included, and its abilities as the
+// database holds them.
+type storedChannelState struct {
+	Channel   *model.Channel
+	Abilities []model.Ability
+}
+
+func channelState(t *testing.T, id int) storedChannelState {
+	t.Helper()
+	channel, err := model.GetChannelById(id, true)
+	require.NoError(t, err)
+	var abilities []model.Ability
+	require.NoError(t, model.DB.Where("channel_id = ?", id).Order("model").Find(&abilities).Error)
+	return storedChannelState{Channel: channel, Abilities: abilities}
+}
+
+// createdChannelID returns the channel ID a successful create or copy
+// response reports, and deletes that channel when the test ends.
+func createdChannelID(t *testing.T, response *httptest.ResponseRecorder) int {
+	t.Helper()
+	var result struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Id int `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	require.True(t, result.Success, response.Body.String())
+	t.Cleanup(func() { deleteChannelWithAbilities(t, result.Data.Id) })
+	return result.Data.Id
+}
+
+func countChannels(t *testing.T) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Channel{}).Count(&count).Error)
+	return count
 }
 
 // channelSupplierData sends a GET request as actor and returns the data of the
@@ -289,4 +335,227 @@ func TestChannelCreatorNameForDeletedUser(t *testing.T) {
 	assert.Empty(t, items[fixture.otherB.Id].CreatorUsername)
 	// A creator who still exists keeps a name in the same list.
 	assert.Equal(t, "supplier-a", items[fixture.ownA1.Id].CreatorUsername)
+}
+
+// missingChannelID names no channel in the supplier tests.
+const missingChannelID = 999999
+
+func TestSupplierCannotReachOtherChannelsByID(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	// A handler that reached otherB fails at once on this address instead of
+	// calling a real upstream.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.otherB.Id).Update("base_url", "http://127.0.0.1:1").Error)
+	otherBBefore, channelsBefore := channelState(t, fixture.otherB.Id), countChannels(t)
+
+	// {id} stands for the channel ID, which is also the id path parameter.
+	for _, test := range []struct {
+		name, method, target, body string
+		handler                    gin.HandlerFunc
+		memoryCache                bool
+	}{
+		{name: "get", method: http.MethodGet, target: "/api/channel/{id}", handler: GetChannel},
+		{name: "plugin credentials", method: http.MethodGet, target: "/api/channel/{id}/plugin_credentials", handler: GetPluginCredentials},
+		{name: "vllm status", method: http.MethodGet, target: "/api/channel/{id}/vllm/status", handler: GetVLLMChannelStatus},
+		{name: "sglang status", method: http.MethodGet, target: "/api/channel/{id}/sglang/status", handler: GetSGLangChannelStatus},
+		{name: "codex usage", method: http.MethodGet, target: "/api/channel/{id}/codex/usage", handler: GetCodexChannelUsage},
+		{name: "codex reset credits", method: http.MethodGet, target: "/api/channel/{id}/codex/usage/reset-credits", handler: GetCodexChannelRateLimitResetCredits},
+		{name: "codex usage reset", method: http.MethodPost, target: "/api/channel/{id}/codex/usage/reset", handler: ResetCodexChannelUsage},
+		{name: "ollama version", method: http.MethodGet, target: "/api/channel/ollama/version/{id}", handler: OllamaVersion},
+		{name: "test", method: http.MethodGet, target: "/api/channel/test/{id}", handler: TestChannel},
+		{name: "test from memory cache", method: http.MethodGet, target: "/api/channel/test/{id}", handler: TestChannel, memoryCache: true},
+		{name: "update balance", method: http.MethodGet, target: "/api/channel/update_balance/{id}", handler: UpdateChannelBalance},
+		{name: "update balance from memory cache", method: http.MethodGet, target: "/api/channel/update_balance/{id}", handler: UpdateChannelBalance, memoryCache: true},
+		{name: "fetch upstream models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", handler: FetchUpstreamModels},
+		{name: "start plugin login", method: http.MethodPost, target: "/api/channel/{id}/plugin_login", body: `{}`, handler: StartPluginLogin},
+		{name: "continue plugin login", method: http.MethodPost, target: "/api/channel/{id}/plugin_login/continue", body: `{"flow":"unknown"}`, handler: ContinuePluginLogin},
+		{name: "refresh codex credential", method: http.MethodPost, target: "/api/channel/{id}/codex/refresh", handler: RefreshCodexChannelCredential},
+		{name: "manage multi keys", method: http.MethodPost, target: "/api/channel/multi_key/manage", body: `{"channel_id":{id},"action":"get_key_status"}`, handler: ManageMultiKeys},
+		{name: "ollama pull", method: http.MethodPost, target: "/api/channel/ollama/pull", body: `{"channel_id":{id},"model_name":"m"}`, handler: OllamaPullModel},
+		{name: "ollama pull stream", method: http.MethodPost, target: "/api/channel/ollama/pull/stream", body: `{"channel_id":{id},"model_name":"m"}`, handler: OllamaPullModelStream},
+		{name: "ollama delete", method: http.MethodDelete, target: "/api/channel/ollama/delete", body: `{"channel_id":{id},"model_name":"m"}`, handler: OllamaDeleteModel},
+		{name: "detect upstream updates", method: http.MethodPost, target: "/api/channel/upstream_updates/detect", body: `{"id":{id}}`, handler: DetectChannelUpstreamModelUpdates},
+		{name: "apply upstream updates", method: http.MethodPost, target: "/api/channel/upstream_updates/apply", body: `{"id":{id},"add_models":["m-b1"]}`, handler: ApplyChannelUpstreamModelUpdates},
+		{name: "fetch models of a saved channel", method: http.MethodPost, target: "/api/channel/fetch_models", body: `{"channel_id":{id}}`, handler: FetchModels},
+		{name: "copy", method: http.MethodPost, target: "/api/channel/copy/{id}", handler: CopyChannel},
+		{name: "update", method: http.MethodPut, target: "/api/channel/", body: `{"id":{id},"name":"taken-over"}`, handler: UpdateChannel},
+		{name: "update status", method: http.MethodPost, target: "/api/channel/{id}/status", body: `{"status":2}`, handler: UpdateChannelStatus},
+		{name: "delete", method: http.MethodDelete, target: "/api/channel/{id}", handler: DeleteChannel},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			common.MemoryCacheEnabled = test.memoryCache
+			if test.memoryCache {
+				model.InitChannelCache()
+			}
+			var responses [2]*httptest.ResponseRecorder
+			for i, id := range []int{fixture.otherB.Id, missingChannelID} {
+				idText := strconv.Itoa(id)
+				responses[i] = channelSupplierRequest(t, test.method, strings.ReplaceAll(test.target, "{id}", idText), strings.ReplaceAll(test.body, "{id}", idText),
+					fixture.supplierA, gin.Params{{Key: "id", Value: idText}}, test.handler)
+			}
+			foreign, missing := responses[0], responses[1]
+			assert.Equal(t, missing.Code, foreign.Code)
+			assert.JSONEq(t, missing.Body.String(), foreign.Body.String())
+			assert.Contains(t, foreign.Body.String(), "Channel does not exist")
+		})
+	}
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.Equal(t, channelsBefore, countChannels(t))
+
+	params := gin.Params{{Key: "id", Value: strconv.Itoa(fixture.otherB.Id)}}
+	response := channelSupplierRequest(t, http.MethodGet, "/api/channel/"+params[0].Value, "", fixture.admin, params, GetChannel)
+	var adminView struct {
+		Success bool            `json:"success"`
+		Data    channelListItem `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &adminView))
+	assert.True(t, adminView.Success, response.Body.String())
+	assert.Equal(t, fixture.otherB.Id, adminView.Data.Id)
+}
+
+func TestSupplierCreateIgnoresNamedChannelID(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.otherB.Id).Update("setting", `{"proxy":"","system_prompt":"kept"}`).Error)
+	otherBBefore := channelState(t, fixture.otherB.Id)
+	otherB := strconv.Itoa(fixture.otherB.Id)
+
+	// AddChannel reads the submitted setting before validating it; reading an
+	// invalid one must not clear the setting of the channel the supplier named.
+	channelSupplierRequest(t, http.MethodPost, "/api/channel", `{"mode":"single","channel":{"id":`+otherB+`,"type":1,"setting":"{"}}`, fixture.supplierA, nil, AddChannel)
+	// The new channel gets an ID of its own, so the insert does not tell
+	// whether otherB exists.
+	response := channelSupplierRequest(t, http.MethodPost, "/api/channel",
+		`{"mode":"single","channel":{"id":`+otherB+`,"type":1,"name":"named-id","key":"sk-named-id","models":"m","group":"default"}}`,
+		fixture.supplierA, nil, AddChannel)
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.NotEqual(t, fixture.otherB.Id, createdChannelID(t, response))
+}
+
+func TestSupplierBatchRejectsForeignOrMissingIDs(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	ownA1, otherB := strconv.Itoa(fixture.ownA1.Id), strconv.Itoa(fixture.otherB.Id)
+	ownA1Before, otherBBefore := channelState(t, fixture.ownA1.Id), channelState(t, fixture.otherB.Id)
+
+	// {ids} stands for the channel IDs of the request.
+	for _, test := range []struct {
+		name, target, body string
+		handler            gin.HandlerFunc
+	}{
+		{name: "set tag", target: "/api/channel/batch/tag", body: `{"ids":[{ids}],"tag":"taken"}`, handler: BatchSetChannelTag},
+		{name: "update status", target: "/api/channel/status/batch", body: `{"ids":[{ids}],"status":2}`, handler: BatchUpdateChannelStatus},
+		{name: "delete", target: "/api/channel/batch", body: `{"ids":[{ids}]}`, handler: DeleteChannelBatch},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			foreign := channelSupplierRequest(t, http.MethodPost, test.target, strings.ReplaceAll(test.body, "{ids}", ownA1+","+otherB), fixture.supplierA, nil, test.handler)
+			missing := channelSupplierRequest(t, http.MethodPost, test.target, strings.ReplaceAll(test.body, "{ids}", ownA1+","+strconv.Itoa(missingChannelID)), fixture.supplierA, nil, test.handler)
+			assert.Equal(t, missing.Code, foreign.Code)
+			assert.JSONEq(t, missing.Body.String(), foreign.Body.String())
+			assert.Contains(t, foreign.Body.String(), "One or more channels do not exist")
+		})
+	}
+	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+
+	// A repeated ID names one of the supplier's channels, not a missing one.
+	response := channelSupplierRequest(t, http.MethodPost, "/api/channel/status/batch", `{"ids":[`+ownA1+`,`+ownA1+`],"status":2}`, fixture.supplierA, nil, BatchUpdateChannelStatus)
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, channelState(t, fixture.ownA1.Id).Channel.Status)
+
+	response = channelSupplierRequest(t, http.MethodPost, "/api/channel/batch", `{"ids":[`+ownA1+`,`+otherB+`]}`, fixture.admin, nil, DeleteChannelBatch)
+	assert.JSONEq(t, `{"success":true,"message":"","data":2}`, response.Body.String())
+	for _, id := range []int{fixture.ownA1.Id, fixture.otherB.Id} {
+		_, err := model.GetChannelById(id, false)
+		assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	}
+}
+
+func TestSupplierTagOperationsStayInScope(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	// otherB and legacy share the tag with ownA1; no tag operation of
+	// supplierA may change them or their abilities.
+	otherBBefore, legacyBefore := channelState(t, fixture.otherB.Id), channelState(t, fixture.legacy.Id)
+	abilityEnabled := func(ability model.Ability, _ int) bool { return ability.Enabled }
+
+	response := channelSupplierRequest(t, http.MethodPost, "/api/channel/tag/disabled", `{"tag":"shared"}`, fixture.supplierA, nil, DisableTagChannels)
+	require.Contains(t, response.Body.String(), `"success":true`)
+	ownA1 := channelState(t, fixture.ownA1.Id)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, ownA1.Channel.Status)
+	assert.Equal(t, []bool{false, false}, lo.Map(ownA1.Abilities, abilityEnabled))
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
+
+	// An edit that keeps the models updates the abilities in place.
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/tag", `{"tag":"shared","priority":9}`, fixture.supplierA, nil, EditTagChannels)
+	require.Contains(t, response.Body.String(), `"success":true`)
+	ownA1 = channelState(t, fixture.ownA1.Id)
+	assert.Equal(t, int64(9), ownA1.Channel.GetPriority())
+	assert.Equal(t, []int64{9, 9}, lo.Map(ownA1.Abilities, func(ability model.Ability, _ int) int64 { return lo.FromPtr(ability.Priority) }))
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
+
+	// An edit of the models rebuilds the abilities.
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/tag", `{"tag":"shared","models":"m-new"}`, fixture.supplierA, nil, EditTagChannels)
+	require.Contains(t, response.Body.String(), `"success":true`)
+	ownA1 = channelState(t, fixture.ownA1.Id)
+	assert.Equal(t, []string{"m-new"}, lo.Map(ownA1.Abilities, func(ability model.Ability, _ int) string { return ability.Model }))
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
+
+	// Enabling the tag leaves a disabled channel of someone else disabled.
+	require.True(t, model.UpdateChannelStatus(fixture.legacy.Id, "", common.ChannelStatusManuallyDisabled, "manual operation"))
+	legacyBefore = channelState(t, fixture.legacy.Id)
+	response = channelSupplierRequest(t, http.MethodPost, "/api/channel/tag/enabled", `{"tag":"shared"}`, fixture.supplierA, nil, EnableTagChannels)
+	require.Contains(t, response.Body.String(), `"success":true`)
+	ownA1 = channelState(t, fixture.ownA1.Id)
+	assert.Equal(t, common.ChannelStatusEnabled, ownA1.Channel.Status)
+	assert.Equal(t, []bool{true}, lo.Map(ownA1.Abilities, abilityEnabled))
+	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
+	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
+
+	// An administrator's tag operation still covers every channel under the tag.
+	response = channelSupplierRequest(t, http.MethodPost, "/api/channel/tag/disabled", `{"tag":"shared"}`, fixture.admin, nil, DisableTagChannels)
+	require.Contains(t, response.Body.String(), `"success":true`)
+	for _, channel := range []*model.Channel{fixture.ownA1, fixture.otherB, fixture.legacy} {
+		state := channelState(t, channel.Id)
+		assert.Equal(t, common.ChannelStatusManuallyDisabled, state.Channel.Status, channel.Name)
+		assert.NotContains(t, lo.Map(state.Abilities, abilityEnabled), true, channel.Name)
+	}
+}
+
+func TestSupplierCannotChangeRequestPlugins(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	channelsBefore := countChannels(t)
+	response := channelSupplierRequest(t, http.MethodPost, "/api/channel",
+		`{"mode":"single","channel":{"type":1,"name":"bound","key":"sk-bound","models":"m","group":"default","setting":"{\"request_plugins\":[\"inst-1\"]}"}}`,
+		fixture.supplierA, nil, AddChannel)
+	assert.Contains(t, response.Body.String(), "Channel suppliers cannot change request plugins")
+	assert.Equal(t, channelsBefore, countChannels(t))
+
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.ownA1.Id).Update("setting", `{"request_plugins":["inst-1"]}`).Error)
+	ownA1 := strconv.Itoa(fixture.ownA1.Id)
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"setting":"{\"request_plugins\":[]}"}`, fixture.supplierA, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), "Channel suppliers cannot change request plugins")
+	assert.Equal(t, []string{"inst-1"}, channelState(t, fixture.ownA1.Id).Channel.GetSetting().RequestPlugins)
+
+	params := gin.Params{{Key: "id", Value: ownA1}}
+	response = channelSupplierRequest(t, http.MethodPost, "/api/channel/copy/"+ownA1, "", fixture.supplierA, params, CopyChannel)
+	assert.Empty(t, channelState(t, createdChannelID(t, response)).Channel.GetSetting().RequestPlugins)
+
+	// An edit that does not submit the setting leaves the binding alone.
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"name":"renamed"}`, fixture.supplierA, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.Equal(t, "renamed", channelState(t, fixture.ownA1.Id).Channel.Name)
+}
+
+func TestSupplierCannotPreviewTaskPluginModels(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	pluginType := strconv.Itoa(constant.ChannelTypeTaskPlugin)
+	added := channelSupplierRequest(t, http.MethodPost, "/api/channel",
+		`{"mode":"single","channel":{"type":`+pluginType+`,"name":"plugin","key":"sk-plugin","models":"m","group":"default","setting":"{\"task_plugin_key\":\"some-plugin\"}"}}`,
+		fixture.supplierA, nil, AddChannel)
+	require.Contains(t, added.Body.String(), "task_plugin.bind")
+
+	preview := channelSupplierRequest(t, http.MethodPost, "/api/channel/fetch_models",
+		`{"type":`+pluginType+`,"task_plugin_key":"some-plugin","base_url":"http://127.0.0.1:1"}`, fixture.supplierA, nil, FetchModels)
+	assert.Equal(t, added.Code, preview.Code)
+	assert.JSONEq(t, added.Body.String(), preview.Body.String())
 }

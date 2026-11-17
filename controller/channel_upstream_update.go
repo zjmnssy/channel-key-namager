@@ -967,6 +967,9 @@ func ApplyChannelUpstreamModelUpdates(c *gin.Context) {
 		})
 		return
 	}
+	if rejectChannelOutsideScope(c, req.ID) {
+		return
+	}
 
 	channel, err := model.GetChannelById(req.ID, true)
 	if err != nil {
@@ -1021,6 +1024,9 @@ func DetectChannelUpstreamModelUpdates(c *gin.Context) {
 			"success": false,
 			"message": "invalid channel id",
 		})
+		return
+	}
+	if rejectChannelOutsideScope(c, req.ID) {
 		return
 	}
 
