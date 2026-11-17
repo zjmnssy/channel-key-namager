@@ -54,11 +54,13 @@ import {
 } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import {
   createServerError,
   translateServerText,
 } from '@/lib/server-error-message'
 import { truncateText } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getCodexUsage, updateChannelBalance } from '../api'
 import {
@@ -676,6 +678,7 @@ export function useChannelsColumns(
 ): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
   const { sensitiveVisible } = useChannels()
+  const isAdmin = (useAuthStore((s) => s.auth.user)?.role ?? 0) >= ROLE.ADMIN
   const enableSelection = options.enableSelection ?? true
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // The column definitions only depend on the translation function, the active
@@ -845,6 +848,39 @@ export function useChannelsColumns(
         size: 260,
         minSize: 200,
       },
+      // Creator column (administrators only; the backend returns it only to them)
+      ...(isAdmin
+        ? [
+            {
+              id: 'creator',
+              header: t('Creator'),
+              meta: { mobileHidden: true },
+              cell: ({ row }) => {
+                const channel = row.original
+                if (isTagAggregateRow(channel)) return null
+                if (channel.creator_username) {
+                  return (
+                    <TruncatedText
+                      text={channel.creator_username}
+                      maxWidth='max-w-full'
+                    />
+                  )
+                }
+                const creatorId = channel.creator_user_id ?? 0
+                if (creatorId > 0) {
+                  return (
+                    <span className='text-muted-foreground'>
+                      {t('Deleted user #{{id}}', { id: creatorId })}
+                    </span>
+                  )
+                }
+                return <span className='text-muted-foreground'>—</span>
+              },
+              enableSorting: false,
+              size: 140,
+            } satisfies ColumnDef<Channel>,
+          ]
+        : []),
 
       // Type column
       {
@@ -1319,6 +1355,6 @@ export function useChannelsColumns(
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible]
+    [enableSelection, t, locale, sensitiveVisible, isAdmin]
   )
 }
