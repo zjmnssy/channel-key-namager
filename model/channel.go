@@ -60,11 +60,20 @@ type Channel struct {
 
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
+	CreatorUserId   int    `json:"creator_user_id" gorm:"not null;default:0;index"`
+	CreatorRole     int    `json:"creator_role" gorm:"not null;default:0;index"` // 创建时创建者的角色
+	CreatorUsername string `json:"creator_username,omitempty" gorm:"-"`          // 仅列表接口为管理员填充
+
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
 	// BalanceDetail is the last balance query in channel responses; see
 	// GetBalanceDetail.
 	BalanceDetail *ChannelBalanceDetail `json:"balance_detail,omitempty" gorm:"-"`
+}
+
+// IsSupplierChannel reports whether a channel supplier created the channel.
+func (channel *Channel) IsSupplierChannel() bool {
+	return channel.CreatorRole == common.RoleChannelSupplierUser
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
@@ -618,7 +627,7 @@ func (channel *Channel) Insert() error {
 
 // Update writes an edited channel, all but its key: a key changes only through
 // UpdateChannelLocked, so an edit never writes back a key a refresh replaced
-// after the edit read it.
+// after the edit read it. The creator fields are set once on creation.
 func (channel *Channel) Update() error {
 	// If this is a multi-key channel, recalculate MultiKeySize based on the stored key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
@@ -654,7 +663,7 @@ func (channel *Channel) Update() error {
 		}
 	}
 	var err error
-	err = DB.Model(channel).Omit("key").Updates(channel).Error
+	err = DB.Model(channel).Omit("key", "creator_user_id", "creator_role").Updates(channel).Error
 	if err != nil {
 		return err
 	}

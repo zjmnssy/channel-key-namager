@@ -856,6 +856,8 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	addChannelRequest.Channel.CreatorUserId = c.GetInt("id")
+	addChannelRequest.Channel.CreatorRole = c.GetInt("role")
 	keys := make([]string, 0)
 	inputIndices := make([]int, 0)
 	switch addChannelRequest.Mode {
@@ -1844,6 +1846,8 @@ func CopyChannel(c *gin.Context) {
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
 	clone.Id = 0     // let DB auto-generate
 	clone.CreatedTime = common.GetTimestamp()
+	clone.CreatorUserId = c.GetInt("id")
+	clone.CreatorRole = c.GetInt("role")
 	clone.Name = origin.Name + suffix
 	clone.TestTime = 0
 	clone.ResponseTime = 0
