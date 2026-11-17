@@ -35,6 +35,7 @@ import {
   render,
   renderHook,
   screen,
+  waitFor,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
@@ -46,6 +47,7 @@ import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { CHANNEL_PRIORITY_GUIDE_KEYS } from '../../constants'
 import type { Channel } from '../../types'
 import { useChannelsColumns } from '../channels-columns'
 import { ChannelsPrimaryButtons } from '../channels-primary-buttons'
@@ -252,6 +254,7 @@ async function renderChannelsPage(
     },
   })
   localStorage.setItem('channels:view-mode', 'table')
+  localStorage.setItem(CHANNEL_PRIORITY_GUIDE_KEYS.table, 'seen')
   const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
     if (url === '/api/channel/search' || url === '/api/channel') {
       return {
@@ -261,6 +264,18 @@ async function renderChannelsPage(
             items: [{ id: 3, name: 'prod', type: 1, status: 1, priority: 0 }],
             total: 1,
             type_counts: {},
+          },
+        },
+      }
+    }
+    if (url === '/api/channel/priority/order') {
+      return {
+        data: {
+          success: true,
+          data: {
+            revision: 'r',
+            items: [{ id: 3, priority: 0 }],
+            changes: [],
           },
         },
       }
@@ -302,9 +317,6 @@ describe('drag mode', () => {
     expect(
       screen.queryByRole('button', { name: 'Drag mode help' })
     ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: /^Reorder channel/ })
-    ).not.toBeInTheDocument()
     expect(get).not.toHaveBeenCalledWith(
       '/api/channel/priority/order',
       expect.anything()
@@ -314,6 +326,40 @@ describe('drag mode', () => {
   it('stays enabled for an administrator who may write channels', async () => {
     await renderChannelsPage(ROLE.ADMIN)
     expect(screen.getByRole('button', { name: 'Drag mode' })).toBeEnabled()
+    expect(
+      screen.getByRole('button', { name: 'Drag mode help' })
+    ).toBeInTheDocument()
+  })
+
+  it('switches off at once when an administrator who enabled it is demoted to supplier', async () => {
+    await renderChannelsPage(ROLE.ADMIN)
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'Drag mode' }))
+    expect(
+      await screen.findByRole('button', { name: 'Reorder channel 3' })
+    ).toBeInTheDocument()
+
+    // The demoted user keeps the channel write grant, so only the role changes.
+    act(() =>
+      useAuthStore.setState({
+        auth: {
+          ...originalAuth,
+          user: {
+            id: 1,
+            username: 'u',
+            role: ROLE.CHANNEL_SUPPLIER,
+            ...channelWriteGrant,
+          },
+        },
+      })
+    )
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Reorder channel 3' })
+      ).not.toBeInTheDocument()
+    )
   })
 
   it('stays visible but disabled for an administrator without channel write', async () => {
