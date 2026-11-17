@@ -30,20 +30,30 @@ type AbilityWithChannel struct {
 	ChannelType int `json:"channel_type"`
 }
 
+// excludeSupplierChannelAbilities keeps only the abilities of channels that can
+// serve relay: a channel created by a channel supplier never does, whatever
+// role its creator has now. The column is qualified with the table the query
+// reads abilities from, so a join with channels stays unambiguous.
+func excludeSupplierChannelAbilities(query *gorm.DB) *gorm.DB {
+	supplierChannelIDs := DB.Model(&Channel{}).Select("id").Where("creator_role = ?", common.RoleChannelSupplierUser)
+	return query.Where("? NOT IN (?)", clause.Column{Table: clause.CurrentTable, Name: "channel_id"}, supplierChannelIDs)
+}
+
 func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	var abilities []AbilityWithChannel
-	err := DB.Table("abilities").
+	query := DB.Table("abilities").
 		Select("abilities.*, channels.type as channel_type").
 		Joins("left join channels on abilities.channel_id = channels.id").
-		Where("abilities.enabled = ?", true).
-		Scan(&abilities).Error
+		Where("abilities.enabled = ?", true)
+	err := excludeSupplierChannelAbilities(query).Scan(&abilities).Error
 	return abilities, err
 }
 
 func GetGroupEnabledModels(group string) []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	query := DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true)
+	excludeSupplierChannelAbilities(query).Distinct("model").Pluck("model", &models)
 	return models
 }
 
@@ -112,7 +122,7 @@ func GetChannel(
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
 	var abilities []Ability
-	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
+	err := excludeSupplierChannelAbilities(DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +130,7 @@ func GetChannel(
 	// Like the memory cache, retry with the routing name (for example without
 	// @ modifiers) when no channel serves the exact name.
 	if normalized := ratio_setting.RoutingMatchModelName(model); len(abilities) == 0 && normalized != "" && normalized != model {
-		err = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true).Order("priority DESC, weight DESC").Find(&abilities).Error
+		err = excludeSupplierChannelAbilities(DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true)).Order("priority DESC, weight DESC").Find(&abilities).Error
 		if err != nil {
 			return nil, err
 		}

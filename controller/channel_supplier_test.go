@@ -15,9 +15,16 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relay"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -764,4 +771,215 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 	response = channelSupplierRequest(t, http.MethodGet, "/api/channel/fetch_models/"+ownA1, "", fixture.supplierA, gin.Params{{Key: "id", Value: ownA1}}, FetchUpstreamModels)
 	assert.Contains(t, response.Body.String(), "private IP address not allowed")
 	assert.Zero(t, hits.Load())
+}
+
+// forEachChannelCacheMode runs test once with channel reads going to the
+// database and once with them going to the memory cache.
+func forEachChannelCacheMode(t *testing.T, test func(t *testing.T)) {
+	t.Helper()
+	for _, memoryCache := range []bool{false, true} {
+		t.Run("memory cache "+strconv.FormatBool(memoryCache), func(t *testing.T) {
+			common.MemoryCacheEnabled = memoryCache
+			t.Cleanup(func() {
+				common.MemoryCacheEnabled = false
+				model.InitChannelCache()
+			})
+			model.InitChannelCache()
+			test(t)
+		})
+	}
+}
+
+func TestSupplierChannelsNeverServeRelay(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	affinity := operation_setting.GetChannelAffinitySetting()
+	previousAffinity := *affinity
+	t.Cleanup(func() { *affinity = previousAffinity })
+	// A session keeps its binding to a channel that cannot serve it, so every
+	// round of checks meets the binding.
+	*affinity = operation_setting.ChannelAffinitySetting{
+		Enabled: true, DefaultTTLSeconds: 60, MaxEntries: 100, KeepOnChannelDisabled: true,
+		Rules: []operation_setting.ChannelAffinityRule{{
+			Name: "session", ModelRegex: []string{"^m-shared$"}, SessionMode: "prefer",
+			KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Session"}},
+		}},
+	}
+
+	// ownA1 outranks adminOwned on m-shared, so a path that let it through
+	// would pick it.
+	assertNeverServed := func(t *testing.T) {
+		for range 20 {
+			channel, err := model.GetRandomSatisfiedChannel("default", "m-shared", 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, channel)
+			assert.Equal(t, fixture.adminOwned.Id, channel.Id)
+		}
+		// Only supplier channels serve m-a2.
+		channel, _ := model.GetRandomSatisfiedChannel("default", "m-a2", 0, nil)
+		assert.Nil(t, channel)
+		assert.False(t, model.IsChannelEnabledForGroupModel("default", "m-shared", fixture.ownA1.Id))
+
+		pinned := newPinRetryContext()
+		service.GetChannelConstraints(pinned).AddPin(dto.ChannelPin{ChannelId: fixture.ownA1.Id, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+		_, _, selectErr := service.SelectChannelForRequest(pinned, "m-shared", &service.RetryParam{Ctx: pinned, TokenGroup: "default", ModelName: "m-shared"})
+		require.NotNil(t, selectErr)
+		assert.Equal(t, http.StatusForbidden, selectErr.StatusCode)
+		assert.Equal(t, i18n.MsgDistributorChannelDisabled, selectErr.MessageID)
+
+		// The session is bound to ownA1.
+		session := newPinRetryContext()
+		session.Request.Header.Set("X-Session", t.Name())
+		selected, _, selectErr := service.SelectChannelForRequest(session, "m-shared", &service.RetryParam{Ctx: session, TokenGroup: "default", ModelName: "m-shared"})
+		require.Nil(t, selectErr)
+		require.NotNil(t, selected)
+		assert.Equal(t, fixture.adminOwned.Id, selected.Id)
+	}
+
+	forEachChannelCacheMode(t, func(t *testing.T) {
+		seed := newPinRetryContext()
+		seed.Request.Header.Set("X-Session", t.Name())
+		_, found := service.GetPreferredChannelByAffinity(seed, "m-shared", "default")
+		require.False(t, found)
+		service.RecordChannelAffinity(seed, fixture.ownA1.Id)
+		t.Cleanup(func() { service.ClearCurrentChannelAffinityCache(seed) })
+		// A scheduled plugin result rewrites ownA1, which stays enabled; each
+		// subtest writes a reason of its own, so the result is never a no-op.
+		_, err := model.UpdateScheduledChannelLocked(context.Background(), fixture.ownA1.Id, func(channel *model.Channel) error {
+			channel.OtherInfo = `{"status_reason":` + strconv.Quote(t.Name()) + `}`
+			return nil
+		})
+		require.NoError(t, err)
+		assertNeverServed(t)
+
+		// The channel stays a supplier channel after its creator is promoted.
+		setSupplierARole := func(role int) {
+			require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", fixture.supplierA.Id).Update("role", role).Error)
+		}
+		setSupplierARole(common.RoleAdminUser)
+		t.Cleanup(func() { setSupplierARole(common.RoleChannelSupplierUser) })
+		model.InitChannelCache()
+		assertNeverServed(t)
+	})
+}
+
+func TestSupplierOnlyModelsStayOffCallerLists(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Model{}, &model.Vendor{}))
+	t.Cleanup(model.InvalidatePricingCache)
+	// ownA1 outranks adminOwned on m-shared; a type of its own shows whether it
+	// names the owner of m-shared.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.ownA1.Id).Update("type", constant.ChannelTypeAnthropic).Error)
+	supplierOnly := []string{"m-a1", "m-a2", "m-b1"}
+
+	forEachChannelCacheMode(t, func(t *testing.T) {
+		callerModels := service.GetGroupsEnabledModels([]string{"default"})
+		assert.Subset(t, callerModels, []string{"m-shared", "m-legacy", "m-admin"})
+		for _, name := range supplierOnly {
+			assert.NotContains(t, callerModels, name)
+		}
+
+		model.InvalidatePricingCache()
+		pricedModels := lo.Map(model.GetPricing(), func(pricing model.Pricing, _ int) string { return pricing.ModelName })
+		assert.Subset(t, pricedModels, []string{"m-shared", "m-legacy", "m-admin"})
+		for _, name := range supplierOnly {
+			assert.NotContains(t, pricedModels, name)
+		}
+
+		owners, err := model.GetPreferredModelOwnerChannelTypes([]string{"m-shared"}, []string{"default"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]int{"m-shared": fixture.adminOwned.Type}, owners)
+
+		// The administrators' list keeps every enabled model.
+		assert.Subset(t, model.GetEnabledModels(), supplierOnly)
+	})
+}
+
+func TestSupplierChannelsRefuseOriginTaskFollowUps(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Task{}, &model.Midjourney{}))
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":1,"description":"ok","result":"seed"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	// Each channel has a task and a Midjourney task the follow-ups name.
+	for _, channel := range []*model.Channel{fixture.ownA1, fixture.adminOwned} {
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("base_url", upstream.URL).Error)
+		task := &model.Task{TaskID: "task-" + channel.Name, UserId: fixture.admin.Id, ChannelId: channel.Id, Status: model.TaskStatusSuccess}
+		midjourneyTask := &model.Midjourney{MjId: "mj-" + channel.Name, UserId: fixture.admin.Id, ChannelId: channel.Id, Status: "SUCCESS"}
+		require.NoError(t, model.DB.Create(task).Error)
+		require.NoError(t, model.DB.Create(midjourneyTask).Error)
+		t.Cleanup(func() {
+			require.NoError(t, model.DB.Delete(task).Error)
+			require.NoError(t, model.DB.Delete(midjourneyTask).Error)
+		})
+	}
+	originTaskPin := func(channel *model.Channel) dto.ChannelPin {
+		return dto.ChannelPin{ChannelId: channel.Id, Source: dto.PinSourceOriginTask, Rank: dto.PinRankOriginTask, RetryMode: dto.PinRetrySameChannel}
+	}
+
+	// refused reports whether the follow-up of a task on channel was refused
+	// the way a follow-up on a disabled channel is.
+	for _, test := range []struct {
+		name    string
+		refused func(t *testing.T, channel *model.Channel) bool
+	}{
+		{name: "origin task pin", refused: func(t *testing.T, channel *model.Channel) bool {
+			c := newPinRetryContext()
+			service.GetChannelConstraints(c).AddPin(originTaskPin(channel))
+			selected, _, selectErr := service.SelectChannelForRequest(c, "m-shared", &service.RetryParam{Ctx: c, TokenGroup: "default", ModelName: "m-shared"})
+			if selectErr != nil {
+				return selectErr.Code == "origin_task_channel_disabled"
+			}
+			assert.Equal(t, channel.Id, selected.Id)
+			return false
+		}},
+		{name: "same channel retry", refused: func(t *testing.T, channel *model.Channel) bool {
+			c := newPinRetryContext()
+			service.GetChannelConstraints(c).AddPin(originTaskPin(channel))
+			info := &relaycommon.RelayInfo{}
+			if taskErr := relay.ApplyChannelPin(c, info); taskErr != nil {
+				return taskErr.Code == "origin_task_channel_disabled"
+			}
+			assert.Equal(t, channel.Id, info.LockedChannel.(*model.Channel).Id)
+			return false
+		}},
+		{name: "task continuation", refused: func(t *testing.T, channel *model.Channel) bool {
+			info := &relaycommon.RelayInfo{
+				UserId: fixture.admin.Id, OriginModelName: "m-shared",
+				ChannelMeta: &relaycommon.ChannelMeta{}, TaskRelayInfo: &relaycommon.TaskRelayInfo{OriginTaskID: "task-" + channel.Name},
+			}
+			if taskErr := relay.ResolveOriginTask(newPinRetryContext(), info); taskErr != nil {
+				return taskErr.Code == "task_channel_disable"
+			}
+			assert.Equal(t, channel.Id, info.LockedChannel.(*model.Channel).Id)
+			return false
+		}},
+		{name: "Midjourney image seed", refused: func(t *testing.T, channel *model.Channel) bool {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/mj/task/mj-"+channel.Name+"/image-seed", nil)
+			c.Params = gin.Params{{Key: "id", Value: "mj-" + channel.Name}}
+			c.Set("id", fixture.admin.Id)
+			response := relay.RelayMidjourneyTaskImageSeed(c)
+			return response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled)
+		}},
+		{name: "Midjourney action", refused: func(t *testing.T, channel *model.Channel) bool {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/mj/submit/change", strings.NewReader(`{"taskId":"mj-`+channel.Name+`","action":"UPSCALE","index":1}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			response := relay.RelayMidjourneySubmit(c, &relaycommon.RelayInfo{UserId: fixture.admin.Id, RelayMode: relayconstant.RelayModeMidjourneyChange})
+			return response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hits.Store(0)
+			assert.True(t, test.refused(t, fixture.ownA1), "supplier channel")
+			assert.Zero(t, hits.Load(), "supplier channel")
+			assert.False(t, test.refused(t, fixture.adminOwned), "administrator channel")
+		})
+	}
 }

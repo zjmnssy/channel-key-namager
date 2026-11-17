@@ -469,6 +469,9 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 	if len(groups) > 0 {
 		query = query.Where("abilities."+commonGroupCol+" IN ?", groups)
 	}
+	// A channel supplier's channel never serves the caller, so it owns none of
+	// the caller's models.
+	query = excludeSupplierChannelAbilities(query)
 
 	if err := query.Scan(&rows).Error; err != nil {
 		return nil, err
