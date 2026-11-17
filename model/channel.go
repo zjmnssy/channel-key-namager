@@ -444,10 +444,10 @@ func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOpti
 	return channels, err
 }
 
-func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
+func GetChannelsByTag(scope ChannelScope, tag string, idSort bool, selectAll bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	order := resolveChannelSortOptions(idSort, sortOptions)
-	query := order.Apply(DB.Where("tag = ?", tag))
+	query := order.Apply(scope.Apply(DB.Where("tag = ?", tag)))
 	if !selectAll {
 		query = query.Omit("key")
 	}
@@ -455,7 +455,7 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
-func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
+func SearchChannels(scope ChannelScope, keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	modelsCol := "`models`"
 
@@ -473,7 +473,7 @@ func SearchChannels(keyword string, group string, model string, idSort bool, sor
 	order := resolveChannelSortOptions(idSort, sortOptions)
 
 	// 构造基础查询
-	baseQuery := DB.Model(&Channel{}).Omit("key")
+	baseQuery := scope.Apply(DB.Model(&Channel{}).Omit("key"))
 
 	// 构造WHERE子句
 	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
@@ -1060,7 +1060,7 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 	}
 	defer BumpSyncTopic(SyncTopicChannels)
 	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
+		channels, err := GetChannelsByTag(AllChannelsScope(), updatedTag, false, false)
 		if err == nil {
 			for _, channel := range channels {
 				err = channel.UpdateAbilities(nil)
@@ -1122,7 +1122,7 @@ func GetPaginatedChannelTags(query *gorm.DB, offset int, limit int) ([]*string, 
 	return tags, err
 }
 
-func SearchTags(keyword string, group string, model string, idSort bool) ([]*string, error) {
+func SearchTags(scope ChannelScope, keyword string, group string, model string, idSort bool) ([]*string, error) {
 	var tags []*string
 	modelsCol := "`models`"
 
@@ -1143,7 +1143,7 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 	}
 
 	// 构造基础查询
-	baseQuery := DB.Model(&Channel{}).Omit("key")
+	baseQuery := scope.Apply(DB.Model(&Channel{}).Omit("key"))
 
 	// 构造WHERE子句
 	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"

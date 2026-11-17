@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -110,6 +111,37 @@ func channelSupplierRequest(t *testing.T, method, target, body string, actor *mo
 	return response
 }
 
+// channelSupplierData sends a GET request as actor and returns the data of the
+// successful response.
+func channelSupplierData[T any](t *testing.T, target string, actor *model.User, handler gin.HandlerFunc) T {
+	t.Helper()
+	response := channelSupplierRequest(t, http.MethodGet, target, "", actor, nil, handler)
+	require.Equal(t, http.StatusOK, response.Code)
+	var result struct {
+		Success bool `json:"success"`
+		Data    T    `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+	require.True(t, result.Success, response.Body.String())
+	return result.Data
+}
+
+type channelListItem struct {
+	Id              int    `json:"id"`
+	CreatorUserId   int    `json:"creator_user_id"`
+	CreatorUsername string `json:"creator_username"`
+}
+
+type channelListData struct {
+	Items      []channelListItem `json:"items"`
+	Total      int               `json:"total"`
+	TypeCounts map[string]int    `json:"type_counts"`
+}
+
+func (data channelListData) ids() []int {
+	return lo.Map(data.Items, func(item channelListItem, _ int) int { return item.Id })
+}
+
 func TestChannelCreatorIsSetByServer(t *testing.T) {
 	fixture := setupChannelSupplierTest(t)
 	const body = `{"mode":"batch","channel":{"type":1,"name":"batch","key":"k1\nk2","models":"m","group":"default","creator_user_id":999,"creator_role":100}}`
@@ -179,4 +211,82 @@ func TestCopiedChannelBelongsToCopier(t *testing.T) {
 		assert.Equal(t, test.actor.Id, stored.CreatorUserId)
 		assert.Equal(t, test.role, stored.CreatorRole)
 	}
+}
+
+func TestSupplierListSeesOnlyOwnChannels(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	// supplierA created this channel while still an administrator.
+	sharedTag := "shared"
+	adminEra := &model.Channel{
+		Type: 1, Key: "sk-a-admin-era", Name: "a-admin-era", Status: common.ChannelStatusEnabled,
+		Models: "m-a-admin-era", Group: "default", Tag: &sharedTag,
+		CreatorUserId: fixture.supplierA.Id, CreatorRole: common.RoleAdminUser,
+	}
+	require.NoError(t, adminEra.Insert())
+	t.Cleanup(func() { deleteChannelWithAbilities(t, adminEra.Id) })
+	const target = "/api/channel/?p=1&page_size=50"
+
+	list := channelSupplierData[channelListData](t, target, fixture.supplierA, GetAllChannels)
+	assert.ElementsMatch(t, []int{fixture.ownA1.Id, fixture.ownA2.Id}, list.ids())
+	assert.Equal(t, 2, list.Total)
+	assert.Equal(t, 2, lo.Sum(lo.Values(list.TypeCounts)))
+
+	list = channelSupplierData[channelListData](t, target+"&tag_mode=true", fixture.supplierA, GetAllChannels)
+	assert.ElementsMatch(t, []int{fixture.ownA1.Id}, list.ids())
+
+	// A supplier set back to a common user sees no channel.
+	demoted := &model.User{Id: fixture.supplierA.Id, Username: fixture.supplierA.Username, Role: common.RoleCommonUser}
+	list = channelSupplierData[channelListData](t, target, demoted, GetAllChannels)
+	assert.Empty(t, list.Items)
+	assert.Zero(t, list.Total)
+
+	list = channelSupplierData[channelListData](t, target, fixture.admin, GetAllChannels)
+	assert.ElementsMatch(t, []int{fixture.legacy.Id, fixture.ownA1.Id, fixture.ownA2.Id, fixture.otherB.Id, fixture.adminOwned.Id, adminEra.Id}, list.ids())
+	assert.Equal(t, 6, list.Total)
+	items := lo.KeyBy(list.Items, func(item channelListItem) int { return item.Id })
+	assert.Equal(t, "supplier-a", items[fixture.ownA1.Id].CreatorUsername)
+	assert.Zero(t, items[fixture.legacy.Id].CreatorUserId)
+	assert.Empty(t, items[fixture.legacy.Id].CreatorUsername)
+}
+
+func TestSupplierSearchSeesOnlyOwnChannels(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	const target = "/api/channel/search?keyword="
+
+	list := channelSupplierData[channelListData](t, target, fixture.supplierA, SearchChannels)
+	assert.ElementsMatch(t, []int{fixture.ownA1.Id, fixture.ownA2.Id}, list.ids())
+
+	list = channelSupplierData[channelListData](t, target+fixture.otherB.Name, fixture.supplierA, SearchChannels)
+	assert.Empty(t, list.Items)
+	assert.Zero(t, list.Total)
+
+	list = channelSupplierData[channelListData](t, target+"&tag_mode=true", fixture.supplierA, SearchChannels)
+	assert.ElementsMatch(t, []int{fixture.ownA1.Id}, list.ids())
+
+	list = channelSupplierData[channelListData](t, target, fixture.admin, SearchChannels)
+	assert.ElementsMatch(t, []int{fixture.legacy.Id, fixture.ownA1.Id, fixture.ownA2.Id, fixture.otherB.Id, fixture.adminOwned.Id}, list.ids())
+}
+
+func TestSupplierTagAndEnabledModelsStayInScope(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	const tagModels, enabledModels = "/api/channel/tag/models?tag=shared", "/api/channel/models_enabled"
+
+	assert.Equal(t, "m-a1,m-shared", channelSupplierData[string](t, tagModels, fixture.supplierA, GetTagModels))
+	assert.Equal(t, "m-b1,m-b2,m-b3", channelSupplierData[string](t, tagModels, fixture.admin, GetTagModels))
+
+	assert.ElementsMatch(t, []string{"m-a1", "m-shared", "m-a2"}, channelSupplierData[[]string](t, enabledModels, fixture.supplierA, EnabledListModels))
+	assert.Subset(t, channelSupplierData[[]string](t, enabledModels, fixture.admin, EnabledListModels), []string{"m-legacy", "m-b1", "m-admin"})
+}
+
+func TestChannelCreatorNameForDeletedUser(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, model.DB.Delete(fixture.supplierB).Error)
+
+	list := channelSupplierData[channelListData](t, "/api/channel/?p=1&page_size=50", fixture.admin, GetAllChannels)
+	items := lo.KeyBy(list.Items, func(item channelListItem) int { return item.Id })
+	require.Contains(t, items, fixture.otherB.Id)
+	assert.Equal(t, fixture.supplierB.Id, items[fixture.otherB.Id].CreatorUserId)
+	assert.Empty(t, items[fixture.otherB.Id].CreatorUsername)
+	// A creator who still exists keeps a name in the same list.
+	assert.Equal(t, "supplier-a", items[fixture.ownA1.Id].CreatorUsername)
 }
