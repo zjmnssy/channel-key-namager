@@ -540,12 +540,20 @@ func TestAccessTokenIdentityAndSingleLookup(t *testing.T) {
 func TestChannelSupplierAuth(t *testing.T) {
 	setupDashboardAuthMiddlewareTest(t)
 	gin.SetMode(gin.TestMode)
-	// The channel router declares this rule when it registers the route.
+	// The channel router declares these rules when it registers the routes.
 	DeclareAccessTokenPermissionRoute(http.MethodGet, "/api/channel/", authz.ChannelRead)
+	DeclareAccessTokenPermissionRoute(http.MethodPost, "/api/channel/", authz.ChannelSensitiveWrite)
 	ok := func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"success": true}) }
 	router := gin.New()
 	router.GET("/api/channel/", ChannelSupplierAuth(), ok)
 	router.POST("/api/channel/", ChannelSupplierAuth(), ok)
+	request := func(method, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/api/channel/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
 
 	users := map[int]*model.User{}
 	sessions := map[int]string{}
@@ -559,19 +567,16 @@ func TestChannelSupplierAuth(t *testing.T) {
 		users[role], sessions[role] = user, bundle.AccessToken
 	}
 
-	response := middlewareBearerRequest(router, "/api/channel/", sessions[common.RoleCommonUser])
+	response := request(http.MethodGet, sessions[common.RoleCommonUser])
 	assert.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
 	assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
 
 	// Lowering the gate below administrators must keep the write audit.
 	for _, role := range []int{common.RoleChannelSupplierUser, common.RoleAdminUser} {
 		t.Run(fmt.Sprintf("session of role %d", role), func(t *testing.T) {
-			response := middlewareBearerRequest(router, "/api/channel/", sessions[role])
+			response := request(http.MethodGet, sessions[role])
 			assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
-			request := httptest.NewRequest(http.MethodPost, "/api/channel/", nil)
-			request.Header.Set("Authorization", "Bearer "+sessions[role])
-			response = httptest.NewRecorder()
-			router.ServeHTTP(response, request)
+			response = request(http.MethodPost, sessions[role])
 			assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 			var audits []model.AuditLog
 			require.NoError(t, model.LOG_DB.Where("user_id = ? AND category = ?", users[role].Id, model.AuditCategoryOperation).Find(&audits).Error)
@@ -582,32 +587,39 @@ func TestChannelSupplierAuth(t *testing.T) {
 	}
 
 	// A demotion revokes sessions but not access tokens, so a supplier's token
-	// never passes the gate, even one carrying the channel scope.
-	supplierPAT, _ := createMiddlewareScopedToken(t, users[common.RoleChannelSupplierUser].Id, 0, service.AccessTokenScopeOf(authz.ChannelRead))
-	adminPAT, _ := createMiddlewareScopedToken(t, users[common.RoleAdminUser].Id, 0, service.AccessTokenScopeOf(authz.ChannelRead))
+	// never passes the gate, even one carrying the channel scope. The supplier
+	// rejection comes before the route's scope rule, which still binds the
+	// tokens of administrators.
+	supplierID, adminID := users[common.RoleChannelSupplierUser].Id, users[common.RoleAdminUser].Id
+	supplierChannelPAT, _ := createMiddlewareScopedToken(t, supplierID, 0, service.AccessTokenScopeOf(authz.ChannelRead))
+	supplierProfilePAT, _ := createMiddlewareScopedToken(t, supplierID, 0, "profile:read")
+	adminChannelPAT, _ := createMiddlewareScopedToken(t, adminID, 0, service.AccessTokenScopeOf(authz.ChannelRead))
+	adminProfilePAT, _ := createMiddlewareScopedToken(t, adminID, 0, "profile:read")
 	for _, test := range []struct {
-		name, token string
-		status      int
+		name, method, token, code, reason string
+		status                            int
 	}{
-		{name: "supplier scoped PAT", token: supplierPAT, status: http.StatusForbidden},
-		{name: "supplier legacy token", token: legacyTokens[common.RoleChannelSupplierUser], status: http.StatusForbidden},
-		{name: "administrator scoped PAT", token: adminPAT, status: http.StatusOK},
-		{name: "administrator legacy token", token: legacyTokens[common.RoleAdminUser], status: http.StatusOK},
+		{name: "supplier scoped PAT with the channel scope", method: http.MethodGet, token: supplierChannelPAT, status: http.StatusForbidden, code: "AUTH_SESSION_REQUIRED", reason: "session_required"},
+		{name: "supplier scoped PAT without the channel scope", method: http.MethodPost, token: supplierProfilePAT, status: http.StatusForbidden, code: "AUTH_SESSION_REQUIRED", reason: "session_required"},
+		{name: "supplier legacy token", method: http.MethodGet, token: legacyTokens[common.RoleChannelSupplierUser], status: http.StatusForbidden, code: "AUTH_SESSION_REQUIRED", reason: "session_required"},
+		{name: "administrator scoped PAT with the channel scope", method: http.MethodGet, token: adminChannelPAT, status: http.StatusOK},
+		{name: "administrator scoped PAT without the channel scope", method: http.MethodPost, token: adminProfilePAT, status: http.StatusForbidden, code: "ACCESS_TOKEN_SCOPE_DENIED", reason: "scope_denied"},
+		{name: "administrator legacy token", method: http.MethodGet, token: legacyTokens[common.RoleAdminUser], status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := middlewareBearerRequest(router, "/api/channel/", test.token)
+			response := request(test.method, test.token)
 			assert.Equal(t, test.status, response.Code, response.Body.String())
 			var audit model.AuditLog
 			require.NoError(t, model.LOG_DB.Where("category = ? AND token_ref = ?", model.AuditCategoryAccessToken, model.AccessTokenFingerprint(test.token)).Last(&audit).Error)
 			assert.Equal(t, test.status, audit.Status)
-			if test.status == http.StatusOK {
+			if test.code == "" {
 				return
 			}
-			assert.Contains(t, response.Body.String(), `"code":"AUTH_SESSION_REQUIRED"`)
+			assert.Contains(t, response.Body.String(), `"code":"`+test.code+`"`)
 			require.NotNil(t, audit.Other.Op)
 			params, err := common.Marshal(audit.Other.Op.Params)
 			require.NoError(t, err)
-			assert.Contains(t, string(params), `"failure_reason":"session_required"`)
+			assert.Contains(t, string(params), `"failure_reason":"`+test.reason+`"`)
 		})
 	}
 }

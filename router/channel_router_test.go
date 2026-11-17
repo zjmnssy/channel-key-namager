@@ -91,7 +91,8 @@ func TestChannelGlobalOperationsAreAdminOnly(t *testing.T) {
 // TestChannelSupplierRouteGates drives the registered API routes with dashboard
 // sessions: a channel supplier reaches the channel routes and the group reads
 // the channel page needs, but no operation on every channel, no prefill group
-// change and no channel key; a common user reaches none of them.
+// change and no channel key; a common user reaches none of them, and an
+// administrator still gets past every gate.
 func TestChannelSupplierRouteGates(t *testing.T) {
 	previousDB, previousLogDB, previousType := model.DB, model.LOG_DB, common.MainDatabaseType()
 	previousRedis, previousSecret, wasMaster := common.RedisEnabled, common.SessionSecret, common.IsMasterNode
@@ -112,7 +113,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	require.NoError(t, authz.Init(db))
 	sessions := map[int]string{}
-	for _, role := range []int{common.RoleCommonUser, common.RoleChannelSupplierUser} {
+	for _, role := range []int{common.RoleCommonUser, common.RoleChannelSupplierUser, common.RoleAdminUser} {
 		name := fmt.Sprintf("route-gate-%d", role)
 		user := &model.User{Username: name, Password: "password-placeholder", Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: name}
 		require.NoError(t, db.Create(user).Error)
@@ -149,8 +150,21 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 			tests = append(tests, gateCase{method: route.method, path: "/api/channel" + strings.ReplaceAll(route.path, ":task_id", "1"), supplierStatus: http.StatusForbidden})
 		}
 	}
+	// Administrators still get past every gate. Only routes whose handler is
+	// harmless here are sent: empty bodies and missing tables make those
+	// handlers answer on their own, never with an authorization error.
+	adminRoutes := map[string]bool{
+		"GET /api/group/":                        true,
+		"GET /api/prefill_group/":                true,
+		"POST /api/prefill_group/":               true,
+		"PUT /api/prefill_group/":                true,
+		"DELETE /api/prefill_group/1":            true,
+		"GET /api/channel/priority/order":        true,
+		"GET /api/channel/update_balance/task/1": true,
+	}
 	for _, test := range tests {
-		t.Run(test.method+" "+test.path, func(t *testing.T) {
+		key := test.method + " " + test.path
+		t.Run(key, func(t *testing.T) {
 			response := request(test.method, test.path, sessions[common.RoleCommonUser])
 			assert.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
 			assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
@@ -159,8 +173,16 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 			if test.supplierStatus == http.StatusForbidden {
 				assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
 			}
+			if !adminRoutes[key] {
+				return
+			}
+			response = request(test.method, test.path, sessions[common.RoleAdminUser])
+			assert.NotContains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, response.Code, response.Body.String())
+			assert.NotContains(t, response.Body.String(), "AUTH_INSUFFICIENT_PRIVILEGE")
 		})
+		delete(adminRoutes, key)
 	}
+	assert.Empty(t, adminRoutes, "every administrator route must be in the table")
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {
