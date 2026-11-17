@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { Row } from '@tanstack/react-table'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { useAuthStore } from '@/stores/auth-store'
@@ -28,6 +29,10 @@ import type { User } from '../../types'
 import { DataTableRowActions } from '../data-table-row-actions'
 
 const requestVerification = vi.fn()
+
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}))
 
 vi.mock('../../api', () => ({
   manageUser: vi.fn(),
@@ -86,6 +91,8 @@ beforeEach(() => {
   useAuthStore.setState(useAuthStore.getInitialState(), true)
   requestVerification.mockReset()
   vi.mocked(manageUser).mockReset()
+  vi.mocked(toast.success).mockReset()
+  vi.mocked(toast.error).mockReset()
 })
 
 afterEach(() => {
@@ -192,4 +199,47 @@ it('clicking Unset channel supplier verifies with the manage scope then sends th
       title: 'Verify to unset channel supplier',
     })
   )
+})
+
+it.each([
+  [1, 'Set as channel supplier', 'User set as channel supplier successfully'],
+  [5, 'Unset channel supplier', 'User is no longer a channel supplier'],
+])(
+  'root choosing the menu item for target role %i and succeeding shows the result sentence, not the menu label (%s)',
+  async (targetRole, menuLabel, resultMessage) => {
+    requestVerification.mockResolvedValue({ proof_token: 'proof-3' })
+    vi.mocked(manageUser).mockResolvedValue({ success: true })
+    await openMenuAs(100, targetRole)
+    await userEvent.click(screen.getByRole('menuitem', { name: menuLabel }))
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(resultMessage)
+    )
+  }
+)
+
+it.each([
+  ['Set as channel supplier', 1],
+  ['Unset channel supplier', 5],
+])(
+  'failure without a server message after %s falls back to a readable name, never the raw action key',
+  async (menuLabel, targetRole) => {
+    requestVerification.mockResolvedValue({ proof_token: 'proof-4' })
+    vi.mocked(manageUser).mockResolvedValue({ success: false })
+    await openMenuAs(100, targetRole)
+    await userEvent.click(screen.getByRole('menuitem', { name: menuLabel }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    const shown = String(vi.mocked(toast.error).mock.calls[0][0])
+    expect(shown).not.toContain('channel_supplier')
+    expect(shown).toContain(menuLabel)
+  }
+)
+
+it('cancelling verification from the Set as channel supplier item never calls manageUser', async () => {
+  requestVerification.mockResolvedValue(null)
+  await openMenuAs(100, 1)
+  await userEvent.click(
+    screen.getByRole('menuitem', { name: 'Set as channel supplier' })
+  )
+  await waitFor(() => expect(requestVerification).toHaveBeenCalled())
+  expect(manageUser).not.toHaveBeenCalled()
 })

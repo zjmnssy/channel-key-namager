@@ -75,6 +75,12 @@ const MANAGE_ACTION_TITLES: Record<AdminUserManageAction, string> = {
   unset_channel_supplier: 'Verify to unset channel supplier',
 }
 
+// Raw action keys read badly in the failure fallback; these have a menu label.
+const MANAGE_ACTION_NAMES: Partial<Record<AdminUserManageAction, string>> = {
+  set_channel_supplier: 'Set as channel supplier',
+  unset_channel_supplier: 'Unset channel supplier',
+}
+
 interface DataTableRowActionsProps {
   row: Row<User>
 }
@@ -123,7 +129,13 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         toast.success(t(getUserActionMessage(action)))
         triggerRefresh()
       } else {
-        handleServerError(result, t('Failed to {{action}} user', { action }))
+        const actionName = MANAGE_ACTION_NAMES[action]
+        handleServerError(
+          result,
+          t('Failed to {{action}} user', {
+            action: actionName ? t(actionName) : action,
+          })
+        )
       }
     } catch (error) {
       handleServerError(

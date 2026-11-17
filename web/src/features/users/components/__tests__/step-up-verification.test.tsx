@@ -250,6 +250,27 @@ it('root creating a channel supplier sends the create request only with a proof 
   )
 })
 
+it('cancelling verification while creating a channel supplier sends no create request', async () => {
+  mockVerification('admin.user.create', 'create-proof')
+  const post = vi.spyOn(api, 'post')
+  renderCreateDrawer(100)
+  await userEvent.type(await screen.findByLabelText('Username'), 'new-supplier')
+  await userEvent.type(screen.getByLabelText('Password'), 'Str0ng-Passw0rd!')
+  await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Channel Supplier' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await screen.findByLabelText('Authenticator code or backup code')
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await waitFor(() =>
+    expect(
+      screen.queryByLabelText('Authenticator code or backup code')
+    ).not.toBeInTheDocument()
+  )
+  expect(post).not.toHaveBeenCalled()
+})
+
 it('administrator opening the create drawer is not offered the Channel Supplier role', async () => {
   vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
   renderCreateDrawer(10)
