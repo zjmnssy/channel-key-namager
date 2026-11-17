@@ -537,6 +537,111 @@ func TestAccessTokenIdentityAndSingleLookup(t *testing.T) {
 	}
 }
 
+func TestChannelSupplierAuth(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	gin.SetMode(gin.TestMode)
+	// The channel router declares this rule when it registers the route.
+	DeclareAccessTokenPermissionRoute(http.MethodGet, "/api/channel/", authz.ChannelRead)
+	ok := func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"success": true}) }
+	router := gin.New()
+	router.GET("/api/channel/", ChannelSupplierAuth(), ok)
+	router.POST("/api/channel/", ChannelSupplierAuth(), ok)
+
+	users := map[int]*model.User{}
+	sessions := map[int]string{}
+	legacyTokens := map[int]string{}
+	for _, role := range []int{common.RoleCommonUser, common.RoleChannelSupplierUser, common.RoleAdminUser} {
+		legacyTokens[role] = fmt.Sprintf("channel-gate-legacy-%d", role)
+		user := createMiddlewarePATUser(t, fmt.Sprintf("channel-gate-%d", role), legacyTokens[role])
+		require.NoError(t, model.DB.Model(user).Update("role", role).Error)
+		bundle, err := service.CreateLoginSession(user.Id, "password", "127.0.0.1", "channel-gate-test")
+		require.NoError(t, err)
+		users[role], sessions[role] = user, bundle.AccessToken
+	}
+
+	response := middlewareBearerRequest(router, "/api/channel/", sessions[common.RoleCommonUser])
+	assert.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
+
+	// Lowering the gate below administrators must keep the write audit.
+	for _, role := range []int{common.RoleChannelSupplierUser, common.RoleAdminUser} {
+		t.Run(fmt.Sprintf("session of role %d", role), func(t *testing.T) {
+			response := middlewareBearerRequest(router, "/api/channel/", sessions[role])
+			assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			request := httptest.NewRequest(http.MethodPost, "/api/channel/", nil)
+			request.Header.Set("Authorization", "Bearer "+sessions[role])
+			response = httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			var audits []model.AuditLog
+			require.NoError(t, model.LOG_DB.Where("user_id = ? AND category = ?", users[role].Id, model.AuditCategoryOperation).Find(&audits).Error)
+			require.Len(t, audits, 1, "the write is audited, the read is not")
+			assert.Equal(t, role, audits[0].ActorRole)
+			assert.Equal(t, http.MethodPost, audits[0].Method)
+		})
+	}
+
+	// A demotion revokes sessions but not access tokens, so a supplier's token
+	// never passes the gate, even one carrying the channel scope.
+	supplierPAT, _ := createMiddlewareScopedToken(t, users[common.RoleChannelSupplierUser].Id, 0, service.AccessTokenScopeOf(authz.ChannelRead))
+	adminPAT, _ := createMiddlewareScopedToken(t, users[common.RoleAdminUser].Id, 0, service.AccessTokenScopeOf(authz.ChannelRead))
+	for _, test := range []struct {
+		name, token string
+		status      int
+	}{
+		{name: "supplier scoped PAT", token: supplierPAT, status: http.StatusForbidden},
+		{name: "supplier legacy token", token: legacyTokens[common.RoleChannelSupplierUser], status: http.StatusForbidden},
+		{name: "administrator scoped PAT", token: adminPAT, status: http.StatusOK},
+		{name: "administrator legacy token", token: legacyTokens[common.RoleAdminUser], status: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := middlewareBearerRequest(router, "/api/channel/", test.token)
+			assert.Equal(t, test.status, response.Code, response.Body.String())
+			var audit model.AuditLog
+			require.NoError(t, model.LOG_DB.Where("category = ? AND token_ref = ?", model.AuditCategoryAccessToken, model.AccessTokenFingerprint(test.token)).Last(&audit).Error)
+			assert.Equal(t, test.status, audit.Status)
+			if test.status == http.StatusOK {
+				return
+			}
+			assert.Contains(t, response.Body.String(), `"code":"AUTH_SESSION_REQUIRED"`)
+			require.NotNil(t, audit.Other.Op)
+			params, err := common.Marshal(audit.Other.Op.Params)
+			require.NoError(t, err)
+			assert.Contains(t, string(params), `"failure_reason":"session_required"`)
+		})
+	}
+}
+
+func TestRequireAdminRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		role   int
+		status int
+		called bool
+	}{
+		{role: common.RoleChannelSupplierUser, status: http.StatusForbidden},
+		{role: common.RoleAdminUser, status: http.StatusNoContent, called: true},
+		{role: common.RoleRootUser, status: http.StatusNoContent, called: true},
+	} {
+		t.Run(fmt.Sprintf("role_%d", test.role), func(t *testing.T) {
+			called := false
+			router := gin.New()
+			setRole := func(c *gin.Context) { c.Set("role", test.role) }
+			router.GET("/api/channel/test", setRole, RequireAdminRole(), func(c *gin.Context) {
+				called = true
+				c.Status(http.StatusNoContent)
+			})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/channel/test", nil))
+			assert.Equal(t, test.status, response.Code, response.Body.String())
+			assert.Equal(t, test.called, called)
+			if !test.called {
+				assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
+			}
+		})
+	}
+}
+
 func TestAPIKeyFromWebSocketSubprotocol(t *testing.T) {
 	tests := []struct {
 		name      string
