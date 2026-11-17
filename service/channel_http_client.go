@@ -149,11 +149,19 @@ func (t *channelProtectedRoundTripper) RoundTrip(req *http.Request) (*http.Respo
 	if req == nil || req.URL == nil {
 		return nil, fmt.Errorf("invalid request")
 	}
-	if err := ValidateSSRFProtectedFetchURL(req.URL.String()); err != nil {
-		if req.Body != nil {
-			_ = req.Body.Close()
+	targets := []string{req.URL.String()}
+	// Through an HTTP proxy, a plain http request names its target by the
+	// Host header, which a channel's header override can set.
+	if req.Host != "" && req.Host != req.URL.Host {
+		targets = append(targets, req.URL.Scheme+"://"+req.Host+"/")
+	}
+	for _, target := range targets {
+		if err := ValidateSSRFProtectedFetchURL(target); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	if t.viaEnvironmentProxy != nil {
 		// That transport also reports a malformed environment proxy.

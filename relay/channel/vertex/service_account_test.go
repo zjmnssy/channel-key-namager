@@ -139,3 +139,21 @@ func TestGetAccessTokenDoesNotCacheFailures(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "recovered", token)
 }
+
+func TestGetAccessTokenTellsWhetherASupplierCreatedTheChannel(t *testing.T) {
+	for _, supplierChannel := range []bool{false, true} {
+		t.Run(fmt.Sprint(supplierChannel), func(t *testing.T) {
+			var received []bool
+			stubAccessTokenFetch(t, func(_ Credentials, _ string, supplier bool) (string, time.Duration, error) {
+				received = append(received, supplier)
+				return "token", time.Hour, nil
+			})
+			info := newAccessTokenTestInfo(13)
+			info.SupplierChannel = supplierChannel
+
+			_, err := getAccessToken(newAccessTokenTestAdaptor("key-1"), info)
+			require.NoError(t, err)
+			assert.Equal(t, []bool{supplierChannel}, received)
+		})
+	}
+}

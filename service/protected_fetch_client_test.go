@@ -406,3 +406,68 @@ func TestChannelHTTPClientGuardsSupplierChannels(t *testing.T) {
 	require.NoError(t, response.Body.Close())
 	assert.Equal(t, http.StatusOK, response.StatusCode)
 }
+
+func TestChannelHTTPClientChecksTheTargetAProxyIsAskedFor(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	fetchSetting := system_setting.GetFetchSetting()
+	t.Cleanup(ResetProxyClientCache)
+	// Only the proxy and 1.1.1.1 may be reached.
+	fetchSetting.AllowPrivateIp, fetchSetting.AllowedPorts = true, nil
+	fetchSetting.IpFilterMode, fetchSetting.IpList = true, []string{"127.0.0.1", "1.1.1.1"}
+	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = proxyListener.Close() })
+	var accepted atomic.Int32
+	go func() {
+		for {
+			conn, err := proxyListener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	client, err := ChannelHTTPClient("http://"+proxyListener.Addr().String(), dto.ChannelSettings{}, true)
+	require.NoError(t, err)
+	get := func(target, host string) error {
+		request, err := http.NewRequest(http.MethodGet, target, nil)
+		require.NoError(t, err)
+		request.Host = host
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		return err
+	}
+
+	// An http request through an HTTP proxy names its target by the Host
+	// header, which a header override sets; the URL alone names it otherwise.
+	assert.ErrorContains(t, get("http://1.1.1.1/", "10.0.0.1"), "ip not in whitelist")
+	assert.ErrorContains(t, get("http://10.0.0.1/", ""), "ip not in whitelist")
+	assert.Zero(t, accepted.Load())
+	_ = get("http://1.1.1.1/", "127.0.0.1")
+	assert.Positive(t, accepted.Load())
+}
+
+func TestProxyClientCacheResetsCoverSupplierChannelClients(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	t.Cleanup(ResetProxyClientCache)
+	get := func(rawProxyURL string) *http.Client {
+		client, err := ChannelHTTPClient(rawProxyURL, dto.ChannelSettings{}, true)
+		require.NoError(t, err)
+		return client
+	}
+	const proxyA, proxyB = "http://1.1.1.1", "http://8.8.8.8"
+	direct, viaA, viaB := get(""), get(proxyA), get(proxyB)
+	require.Same(t, viaA, get(proxyA))
+
+	InvalidateProxyClient(proxyA)
+	assert.NotSame(t, viaA, get(proxyA))
+	assert.Same(t, viaB, get(proxyB))
+	assert.Same(t, direct, get(""))
+
+	ResetProxyClientCache()
+	assert.NotSame(t, viaB, get(proxyB))
+	assert.NotSame(t, direct, get(""))
+}

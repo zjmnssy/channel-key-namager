@@ -230,6 +230,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 	supplierChannelIDs := make(map[int]bool)
 
 	if len(req.Upstreams) > 0 {
+		namedChannelIDs := make([]int, 0, len(req.Upstreams))
 		for _, u := range req.Upstreams {
 			if strings.HasPrefix(u.BaseURL, "http") {
 				if u.Endpoint == "" {
@@ -237,6 +238,22 @@ func FetchUpstreamRatios(c *gin.Context) {
 				}
 				u.BaseURL = strings.TrimRight(u.BaseURL, "/")
 				upstreams = append(upstreams, u)
+				if u.ID > 0 {
+					namedChannelIDs = append(namedChannelIDs, u.ID)
+				}
+			}
+		}
+		// The channel an upstream names by ID decides the checks, whatever
+		// address the request gives for it.
+		if len(namedChannelIDs) > 0 {
+			namedChannels, err := model.GetChannelsByIds(namedChannelIDs)
+			if err != nil {
+				logger.LogError(c.Request.Context(), common.LogText("failed to query channels: %s", err.Error()))
+				common.ApiErrorStatus(c, http.StatusInternalServerError, common.NewMessage("Failed to query channels"))
+				return
+			}
+			for _, ch := range namedChannels {
+				supplierChannelIDs[ch.Id] = ch.IsSupplierChannel()
 			}
 		}
 	} else if len(req.ChannelIDs) > 0 {

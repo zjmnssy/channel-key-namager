@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -695,7 +697,10 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 		name, method, target, body string
 		channelType                int
 		key, settings              string
-		handler                    gin.HandlerFunc
+		// supplierResponse is in the response for the supplier's channel,
+		// `"success":false` when empty.
+		supplierResponse string
+		handler          gin.HandlerFunc
 	}{
 		{name: "fetch upstream models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", channelType: constant.ChannelTypeOpenAI, handler: FetchUpstreamModels},
 		{name: "fetch Gemini models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", channelType: constant.ChannelTypeGemini, handler: FetchUpstreamModels},
@@ -705,22 +710,22 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 		{name: "update balance", method: http.MethodGet, target: "/api/channel/update_balance/{id}", channelType: constant.ChannelTypeOpenAI, handler: UpdateChannelBalance},
 		{name: "update Advanced Custom balance", method: http.MethodGet, target: "/api/channel/update_balance/{id}", channelType: constant.ChannelTypeAdvancedCustom, settings: balanceRoute, handler: UpdateChannelBalance},
 		{name: "detect upstream updates", method: http.MethodPost, target: "/api/channel/upstream_updates/detect", body: `{"id":{id}}`, channelType: constant.ChannelTypeOpenAI, handler: DetectChannelUpstreamModelUpdates},
-		{name: "vLLM status", method: http.MethodGet, target: "/api/channel/{id}/vllm/status", channelType: constant.ChannelTypeVLLM, handler: GetVLLMChannelStatus},
+		{name: "vLLM status", method: http.MethodGet, target: "/api/channel/{id}/vllm/status", channelType: constant.ChannelTypeVLLM, supplierResponse: `"request_failed"`, handler: GetVLLMChannelStatus},
 		{name: "Codex usage", method: http.MethodGet, target: "/api/channel/{id}/codex/usage", channelType: constant.ChannelTypeCodex, key: codexKey, handler: GetCodexChannelUsage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			send := func(channel *model.Channel) {
+			send := func(channel *model.Channel) string {
 				updates := map[string]any{"type": test.channelType, "base_url": upstream.URL, "key": "sk-" + channel.Name, "setting": "", "settings": test.settings}
 				if test.key != "" {
 					updates["key"] = test.key
 				}
 				require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error)
 				id := strconv.Itoa(channel.Id)
-				channelSupplierRequest(t, test.method, strings.ReplaceAll(test.target, "{id}", id), strings.ReplaceAll(test.body, "{id}", id),
-					fixture.admin, gin.Params{{Key: "id", Value: id}}, test.handler)
+				return channelSupplierRequest(t, test.method, strings.ReplaceAll(test.target, "{id}", id), strings.ReplaceAll(test.body, "{id}", id),
+					fixture.admin, gin.Params{{Key: "id", Value: id}}, test.handler).Body.String()
 			}
 			hits.Store(0)
-			send(fixture.ownA1)
+			assert.Contains(t, send(fixture.ownA1), cmp.Or(test.supplierResponse, `"success":false`), "supplier channel")
 			assert.Zero(t, hits.Load(), "supplier channel")
 			send(fixture.adminOwned)
 			assert.Positive(t, hits.Load(), "administrator channel")
@@ -737,9 +742,26 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 	runChannelUpstreamModelUpdateTaskOnce(context.Background(), true, false, nil)
 	assert.Positive(t, hits.Swap(0))
 
-	// So does root's price sync from the channels it names.
-	response = channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", `{"channel_ids":[`+ownA1+`]}`, fixture.root, nil, FetchUpstreamRatios)
-	assert.Zero(t, hits.Load(), response.Body.String())
-	channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", `{"channel_ids":[`+adminOwned+`]}`, fixture.root, nil, FetchUpstreamRatios)
-	assert.Positive(t, hits.Load())
+	// So does root's price sync from the channels it names, by ID or, as the
+	// web page does, as upstreams; {id} stands for the channel ID.
+	for _, body := range []string{
+		`{"channel_ids":[{id}]}`,
+		`{"upstreams":[{"id":{id},"name":"named","base_url":"` + upstream.URL + `","endpoint":""}]}`,
+	} {
+		hits.Store(0)
+		response = channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", strings.ReplaceAll(body, "{id}", ownA1), fixture.root, nil, FetchUpstreamRatios)
+		assert.Zero(t, hits.Load(), response.Body.String())
+		channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", strings.ReplaceAll(body, "{id}", adminOwned), fixture.root, nil, FetchUpstreamRatios)
+		assert.Positive(t, hits.Load(), body)
+	}
+
+	// With its port allowed, the private address of a supplier's channel is
+	// still refused.
+	upstreamAddress, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	fetchSetting.AllowedPorts = []string{"80", "443", upstreamAddress.Port()}
+	hits.Store(0)
+	response = channelSupplierRequest(t, http.MethodGet, "/api/channel/fetch_models/"+ownA1, "", fixture.supplierA, gin.Params{{Key: "id", Value: ownA1}}, FetchUpstreamModels)
+	assert.Contains(t, response.Body.String(), "private IP address not allowed")
+	assert.Zero(t, hits.Load())
 }
