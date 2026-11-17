@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -15,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -631,4 +634,112 @@ func TestSupplierCannotPreviewTaskPluginModels(t *testing.T) {
 		`{"type":`+pluginType+`,"task_plugin_key":"some-plugin","base_url":"http://127.0.0.1:1"}`, fixture.supplierA, nil, FetchModels)
 	assert.Equal(t, added.Code, preview.Code)
 	assert.JSONEq(t, added.Body.String(), preview.Body.String())
+}
+
+func TestSupplierChannelAddressesAreChecked(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	fetchSetting := system_setting.GetFetchSetting()
+	originalFetchSetting := *fetchSetting
+	t.Cleanup(func() { *fetchSetting = originalFetchSetting })
+	fetchSetting.EnableSSRFProtection, fetchSetting.AllowPrivateIp = true, false
+	fetchSetting.DomainFilterMode, fetchSetting.IpFilterMode = false, false
+	fetchSetting.DomainList, fetchSetting.IpList = nil, nil
+	fetchSetting.AllowedPorts, fetchSetting.ApplyIPFilterForDomain = []string{"80", "443"}, true
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"m-upstream"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	// A supplier's channel is saved without an address fetch_setting refuses;
+	// an administrator's is saved as before.
+	channelsBefore := countChannels(t)
+	const internalChannel = `{"mode":"single","channel":{"type":1,"name":"internal","key":"sk-internal","models":"m","group":"default","base_url":"http://127.0.0.1:18080"}}`
+	response := channelSupplierRequest(t, http.MethodPost, "/api/channel", internalChannel, fixture.supplierA, nil, AddChannel)
+	assert.Contains(t, response.Body.String(), "Base URL is not allowed")
+	assert.Equal(t, channelsBefore, countChannels(t))
+	createdChannelID(t, channelSupplierRequest(t, http.MethodPost, "/api/channel", internalChannel, fixture.admin, nil, AddChannel))
+
+	ownA1, adminOwned := strconv.Itoa(fixture.ownA1.Id), strconv.Itoa(fixture.adminOwned.Id)
+	ownA1Before := channelState(t, fixture.ownA1.Id)
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"setting":"{\"proxy\":\"http://127.0.0.1:1080\"}"}`, fixture.supplierA, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), "Proxy is not allowed")
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"base_url":"http://127.0.0.1:18080"}`, fixture.supplierA, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), "Base URL is not allowed")
+	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
+
+	// A model list preview is sent as a request of the asker's channel.
+	advancedCustom := `{"advanced_routes":[{"incoming_path":"/v1/models","upstream_path":"/v1/models","converter":"none"}]}`
+	for _, preview := range []fetchModelsRequest{
+		{Type: constant.ChannelTypeOpenAI, Key: "sk-preview", BaseURL: &upstream.URL},
+		{Type: constant.ChannelTypeAdvancedCustom, Key: "sk-preview", BaseURL: &upstream.URL, AdvancedCustom: &advancedCustom},
+	} {
+		body, err := common.Marshal(preview)
+		require.NoError(t, err)
+		response = channelSupplierRequest(t, http.MethodPost, "/api/channel/fetch_models", string(body), fixture.supplierA, nil, FetchModels)
+		assert.Contains(t, response.Body.String(), `"success":false`)
+		assert.Zero(t, hits.Load(), preview.Type)
+		response = channelSupplierRequest(t, http.MethodPost, "/api/channel/fetch_models", string(body), fixture.admin, nil, FetchModels)
+		assert.Contains(t, response.Body.String(), `"success":true`)
+		assert.Positive(t, hits.Swap(0), preview.Type)
+	}
+
+	// Whoever starts it, a request of a supplier's channel is checked, and one
+	// of an administrator's channel goes out as before.
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", fixture.admin.Id).Update("setting", `{"accept_unset_model_ratio_model":true}`).Error)
+	balanceRoute := `{"advanced_custom":{"advanced_routes":[{"incoming_path":"/v1/dashboard/billing/credit_grants","upstream_path":"/balance","converter":"none"}]}}`
+	codexKey := `{"access_token":"at","account_id":"account"}`
+	for _, test := range []struct {
+		name, method, target, body string
+		channelType                int
+		key, settings              string
+		handler                    gin.HandlerFunc
+	}{
+		{name: "fetch upstream models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", channelType: constant.ChannelTypeOpenAI, handler: FetchUpstreamModels},
+		{name: "fetch Gemini models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", channelType: constant.ChannelTypeGemini, handler: FetchUpstreamModels},
+		{name: "fetch Ollama models", method: http.MethodGet, target: "/api/channel/fetch_models/{id}", channelType: constant.ChannelTypeOllama, handler: FetchUpstreamModels},
+		{name: "Ollama version", method: http.MethodGet, target: "/api/channel/ollama/version/{id}", channelType: constant.ChannelTypeOllama, handler: OllamaVersion},
+		{name: "test", method: http.MethodGet, target: "/api/channel/test/{id}", channelType: constant.ChannelTypeOpenAI, handler: TestChannel},
+		{name: "update balance", method: http.MethodGet, target: "/api/channel/update_balance/{id}", channelType: constant.ChannelTypeOpenAI, handler: UpdateChannelBalance},
+		{name: "update Advanced Custom balance", method: http.MethodGet, target: "/api/channel/update_balance/{id}", channelType: constant.ChannelTypeAdvancedCustom, settings: balanceRoute, handler: UpdateChannelBalance},
+		{name: "detect upstream updates", method: http.MethodPost, target: "/api/channel/upstream_updates/detect", body: `{"id":{id}}`, channelType: constant.ChannelTypeOpenAI, handler: DetectChannelUpstreamModelUpdates},
+		{name: "vLLM status", method: http.MethodGet, target: "/api/channel/{id}/vllm/status", channelType: constant.ChannelTypeVLLM, handler: GetVLLMChannelStatus},
+		{name: "Codex usage", method: http.MethodGet, target: "/api/channel/{id}/codex/usage", channelType: constant.ChannelTypeCodex, key: codexKey, handler: GetCodexChannelUsage},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			send := func(channel *model.Channel) {
+				updates := map[string]any{"type": test.channelType, "base_url": upstream.URL, "key": "sk-" + channel.Name, "setting": "", "settings": test.settings}
+				if test.key != "" {
+					updates["key"] = test.key
+				}
+				require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error)
+				id := strconv.Itoa(channel.Id)
+				channelSupplierRequest(t, test.method, strings.ReplaceAll(test.target, "{id}", id), strings.ReplaceAll(test.body, "{id}", id),
+					fixture.admin, gin.Params{{Key: "id", Value: id}}, test.handler)
+			}
+			hits.Store(0)
+			send(fixture.ownA1)
+			assert.Zero(t, hits.Load(), "supplier channel")
+			send(fixture.adminOwned)
+			assert.Positive(t, hits.Load(), "administrator channel")
+		})
+	}
+
+	// The scheduled upstream model check reads the channels itself.
+	checked := map[string]any{"type": constant.ChannelTypeOpenAI, "base_url": upstream.URL, "key": "sk-checked", "setting": "", "settings": `{"upstream_model_update_check_enabled":true}`}
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.ownA1.Id).Updates(checked).Error)
+	hits.Store(0)
+	runChannelUpstreamModelUpdateTaskOnce(context.Background(), true, false, nil)
+	assert.Zero(t, hits.Load())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.adminOwned.Id).Updates(checked).Error)
+	runChannelUpstreamModelUpdateTaskOnce(context.Background(), true, false, nil)
+	assert.Positive(t, hits.Swap(0))
+
+	// So does root's price sync from the channels it names.
+	response = channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", `{"channel_ids":[`+ownA1+`]}`, fixture.root, nil, FetchUpstreamRatios)
+	assert.Zero(t, hits.Load(), response.Body.String())
+	channelSupplierRequest(t, http.MethodPost, "/api/ratio_sync/fetch", `{"channel_ids":[`+adminOwned+`]}`, fixture.root, nil, FetchUpstreamRatios)
+	assert.Positive(t, hits.Load())
 }

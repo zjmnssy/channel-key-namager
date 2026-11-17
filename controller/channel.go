@@ -858,6 +858,10 @@ func AddChannel(c *gin.Context) {
 		})
 		return
 	}
+	if addChannelRequest.Channel != nil && c.GetInt("role") == common.RoleChannelSupplierUser &&
+		rejectSupplierChannelAddresses(c, addChannelRequest.Channel, true, true) {
+		return
+	}
 
 	baseURLFromPluginDefault := addChannelRequest.Channel != nil &&
 		addChannelRequest.Channel.Type == constant.ChannelTypeTaskPlugin &&
@@ -1315,6 +1319,12 @@ func UpdateChannel(c *gin.Context) {
 			return
 		}
 	}
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		_, baseURLProvided := requestData["base_url"]
+		if rejectSupplierChannelAddresses(c, &channel.Channel, baseURLProvided, settingProvided) {
+			return
+		}
+	}
 
 	baseURLFromPluginDefault := channel.Type == constant.ChannelTypeTaskPlugin &&
 		(channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "")
@@ -1748,6 +1758,30 @@ func unsavedChannelSetting(channel *model.Channel) dto.ChannelSettings {
 	return setting
 }
 
+// rejectSupplierChannelAddresses answers why and returns true when the base
+// URL or the proxy a channel supplier submits for a channel, whichever the
+// caller asks to check, is an address fetch_setting refuses. This is the
+// first line of defense; the requests of a supplier channel check the
+// addresses they reach again.
+func rejectSupplierChannelAddresses(c *gin.Context, channel *model.Channel, checkBaseURL, checkProxy bool) bool {
+	if checkBaseURL && channel.BaseURL != nil && strings.TrimSpace(*channel.BaseURL) != "" {
+		// A special base names official hosts, not an address.
+		if _, special := constant.ChannelSpecialBases[*channel.BaseURL]; !special {
+			if err := service.ValidateSSRFProtectedFetchURL(*channel.BaseURL); err != nil {
+				common.ApiErrorT(c, "Base URL is not allowed: {{error}}", map[string]any{"error": err.Error()})
+				return true
+			}
+		}
+	}
+	if checkProxy {
+		if err := service.ValidateChannelProxyAddress(unsavedChannelSetting(channel).Proxy); err != nil {
+			common.ApiErrorT(c, "Proxy is not allowed: {{error}}", map[string]any{"error": err.Error()})
+			return true
+		}
+	}
+	return false
+}
+
 // applyTaskPluginModelPreview sets up an unsaved task plugin channel for a
 // model list preview as the Advanced Custom preview does: the plugin's
 // meta.baseUrl stands in for an empty base URL, and the form's header
@@ -1833,6 +1867,10 @@ func FetchModels(c *gin.Context) {
 				return
 			}
 		}
+	}
+	// A supplier's preview goes out as a request of his channel would.
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		channel.CreatorRole = common.RoleChannelSupplierUser
 	}
 
 	models, err := fetchChannelUpstreamModelIDs(channel)
@@ -2526,7 +2564,7 @@ func OllamaPullModel(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	err = ollama.PullOllamaModel(baseURL, key, req.ModelName)
+	err = ollama.PullOllamaModel(baseURL, key, req.ModelName, channel.IsSupplierChannel())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -2607,7 +2645,7 @@ func OllamaPullModelStream(c *gin.Context) {
 	}
 
 	// 执行拉取
-	err = ollama.PullOllamaModelStream(baseURL, key, req.ModelName, progressCallback)
+	err = ollama.PullOllamaModelStream(baseURL, key, req.ModelName, channel.IsSupplierChannel(), progressCallback)
 
 	if err != nil {
 		errorData, _ := json.Marshal(gin.H{
@@ -2677,7 +2715,7 @@ func OllamaDeleteModel(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	err = ollama.DeleteOllamaModel(baseURL, key, req.ModelName)
+	err = ollama.DeleteOllamaModel(baseURL, key, req.ModelName, channel.IsSupplierChannel())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -2729,7 +2767,7 @@ func OllamaVersion(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	version, err := ollama.FetchOllamaVersion(baseURL, key)
+	version, err := ollama.FetchOllamaVersion(baseURL, key, channel.IsSupplierChannel())
 	if err != nil {
 		common.ApiErrorT(c, "Failed to fetch Ollama version: {{error}}", map[string]any{"error": err.Error()})
 		return

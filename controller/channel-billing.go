@@ -161,7 +161,7 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 		req.Header.Add(k, headers.Get(k))
 	}
 	setting := channel.GetSetting()
-	client, err := service.GetHttpClientWithProxySettings(setting.Proxy, setting)
+	client, err := service.ChannelHTTPClient(setting.Proxy, setting, channel.IsSupplierChannel())
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +572,7 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
 		}
 	}
 	setting := channel.GetSetting()
-	client, err := service.GetHttpClientWithProxySettings(setting.Proxy, setting)
+	client, err := service.ChannelHTTPClient(setting.Proxy, setting, channel.IsSupplierChannel())
 	if err != nil {
 		return channelBalanceResult{}, sanitizeFetchModelsError(err, key)
 	}
