@@ -372,8 +372,9 @@ export function ChannelsTable() {
   let dragReason: 'sort' | 'tag' | 'permission' | 'busy' | null = null
   if (sortField !== 'priority') dragReason = 'sort'
   else if (enableTagMode) dragReason = 'tag'
-  else if (!hasPermission(user, 'channel', 'write')) dragReason = 'permission'
-  else if (priorityOrder.saving || isFetching) dragReason = 'busy'
+  else if (!isAdmin || !hasPermission(user, 'channel', 'write')) {
+    dragReason = 'permission'
+  } else if (priorityOrder.saving || isFetching) dragReason = 'busy'
 
   const dragControls = useMemo(
     () => ({ reason: dragReason, start: drag.start, keyDown: drag.keyDown }),
@@ -506,6 +507,7 @@ export function ChannelsTable() {
   return (
     <ChannelPriorityContext.Provider value={dragControls}>
       {priorityActionContainer &&
+        isAdmin &&
         createPortal(
           <ChannelPriorityModeToggle
             active={reorderActive}

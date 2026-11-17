@@ -29,13 +29,20 @@ import {
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { cleanup, render, renderHook, screen } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import type { ReactNode } from 'react'
 import { I18nextProvider, initReactI18next } from 'react-i18next'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -43,6 +50,7 @@ import type { Channel } from '../../types'
 import { useChannelsColumns } from '../channels-columns'
 import { ChannelsPrimaryButtons } from '../channels-primary-buttons'
 import { ChannelsProvider } from '../channels-provider'
+import { ChannelsTable } from '../channels-table'
 
 const i18n = createInstance().use(initReactI18next)
 await i18n.init({
@@ -66,6 +74,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   cleanup()
   localStorage.clear()
   clients.splice(0).forEach((client) => client.clear())
@@ -210,5 +219,105 @@ describe('creator column', () => {
   it('shows a dash when the channel has no creator', () => {
     renderCreatorCell(channelWith({ creator_user_id: 0, creator_username: '' }))
     expect(screen.getByText('—')).toBeInTheDocument()
+  })
+})
+
+describe('columns memoization', () => {
+  it('adds the creator column when the signed-in user is promoted from supplier to administrator', () => {
+    signInAs(ROLE.CHANNEL_SUPPLIER)
+    const hook = renderHook(() => useChannelsColumns(), { wrapper: Providers })
+    expect(hook.result.current.map((column) => column.id)).not.toContain(
+      'creator'
+    )
+
+    act(() => signInAs(ROLE.ADMIN))
+    hook.rerender()
+
+    expect(hook.result.current.map((column) => column.id)).toContain('creator')
+  })
+})
+
+const channelWriteGrant = {
+  permissions: { admin_permissions: { channel: { write: true } } },
+}
+
+async function renderChannelsPage(
+  role: number,
+  grants: Record<string, unknown> = channelWriteGrant
+) {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'u', role, ...grants } as never,
+    },
+  })
+  localStorage.setItem('channels:view-mode', 'table')
+  const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/channel/search' || url === '/api/channel') {
+      return {
+        data: {
+          success: true,
+          data: {
+            items: [{ id: 3, name: 'prod', type: 1, status: 1, priority: 0 }],
+            total: 1,
+            type_counts: {},
+          },
+        },
+      }
+    }
+    return { data: { success: true, data: [] } }
+  })
+  const root = createRootRoute()
+  const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
+  const channelsRoute = createRoute({
+    getParentRoute: () => auth,
+    path: 'channels/',
+    validateSearch: (search) => ({ page: 1, pageSize: 10, ...search }),
+    component: () => (
+      <Providers>
+        <header>
+          <ChannelsPrimaryButtons />
+        </header>
+        <ChannelsTable />
+      </Providers>
+    ),
+  })
+  const router = createRouter({
+    routeTree: root.addChildren([auth.addChildren([channelsRoute])]),
+    history: createMemoryHistory({ initialEntries: ['/channels/'] }),
+  })
+  await router.load()
+  render(<RouterProvider router={router} />)
+  expect((await screen.findAllByText('prod')).length).toBeGreaterThan(0)
+  return get
+}
+
+describe('drag mode', () => {
+  it('is not offered to a channel supplier who may write channels', async () => {
+    const get = await renderChannelsPage(ROLE.CHANNEL_SUPPLIER)
+
+    expect(
+      screen.queryByRole('button', { name: 'Drag mode' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Drag mode help' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /^Reorder channel/ })
+    ).not.toBeInTheDocument()
+    expect(get).not.toHaveBeenCalledWith(
+      '/api/channel/priority/order',
+      expect.anything()
+    )
+  })
+
+  it('stays enabled for an administrator who may write channels', async () => {
+    await renderChannelsPage(ROLE.ADMIN)
+    expect(screen.getByRole('button', { name: 'Drag mode' })).toBeEnabled()
+  })
+
+  it('stays visible but disabled for an administrator without channel write', async () => {
+    await renderChannelsPage(ROLE.ADMIN, {})
+    expect(screen.getByRole('button', { name: 'Drag mode' })).toBeDisabled()
   })
 })
