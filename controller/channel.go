@@ -841,7 +841,7 @@ func AddChannel(c *gin.Context) {
 		// choosing would tell whether that channel exists, and the setting
 		// read below clears an invalid setting on the channel with that ID.
 		addChannelRequest.Channel.Id = 0
-		if len(requestPluginsOf(addChannelRequest.Channel)) > 0 {
+		if len(unsavedChannelSetting(addChannelRequest.Channel).RequestPlugins) > 0 {
 			common.ApiErrorT(c, "Channel suppliers cannot change request plugins")
 			return
 		}
@@ -1270,6 +1270,17 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
+	// The body fills the channel by field names in any letter case, while the
+	// checks of this edit look the fields up as spelled; a supplier spells
+	// every field exactly.
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		for field := range requestData {
+			if !isClassifiedChannelField(field) {
+				common.ApiErrorT(c, "Invalid parameters")
+				return
+			}
+		}
+	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
 	if channel.Type == constant.ChannelTypeTaskPlugin &&
@@ -1282,16 +1293,25 @@ func UpdateChannel(c *gin.Context) {
 	}
 
 	_, settingProvided := requestData["setting"]
-	// validateChannel tells whether a request plugin instance exists, so a
-	// supplier's change of the binding is refused before it runs.
-	if settingProvided && c.GetInt("role") == common.RoleChannelSupplierUser {
+	// validateChannel tells whether a request plugin instance or a task plugin
+	// exists, so a supplier's change of either binding is refused before it
+	// runs. The setting the body filled in is checked whatever its key.
+	if (settingProvided || channel.Setting != nil) && c.GetInt("role") == common.RoleChannelSupplierUser {
 		stored, err := model.GetChannelById(channel.Id, false)
 		if err != nil {
 			common.ApiError(c, err)
 			return
 		}
-		if !slices.Equal(requestPluginsOf(&channel.Channel), stored.GetSetting().RequestPlugins) {
+		submittedSetting, storedSetting := unsavedChannelSetting(&channel.Channel), stored.GetSetting()
+		if !slices.Equal(submittedSetting.RequestPlugins, storedSetting.RequestPlugins) {
 			common.ApiErrorT(c, "Channel suppliers cannot change request plugins")
+			return
+		}
+		if !slices.Equal(submittedSetting.TaskPluginBindings(), storedSetting.TaskPluginBindings()) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "task plugin channels require the task_plugin.bind permission",
+			})
 			return
 		}
 	}
@@ -1716,15 +1736,16 @@ func checkPluginChannelKeys(c *gin.Context, channel *model.Channel, key, storedK
 	return service.CheckPluginKeys(c.Request.Context(), plugin, channel.GetBaseURL(), config, key, storedKey, i18n.StatedLang(c))
 }
 
-// requestPluginsOf returns the request plugin instances a submitted channel
-// binds. It parses the setting itself: the setting is not validated yet, and
-// Channel.GetSetting writes to the channel row when it does not parse.
-func requestPluginsOf(channel *model.Channel) []string {
+// unsavedChannelSetting parses the setting of a channel a request submitted.
+// It does not call Channel.GetSetting, which writes to the stored channel
+// when the setting does not parse: the submitted setting is not validated
+// yet, and the request names the channel.
+func unsavedChannelSetting(channel *model.Channel) dto.ChannelSettings {
 	var setting dto.ChannelSettings
 	if channel.Setting != nil {
 		_ = common.UnmarshalJsonStr(*channel.Setting, &setting)
 	}
-	return setting.RequestPlugins
+	return setting
 }
 
 // applyTaskPluginModelPreview sets up an unsaved task plugin channel for a
@@ -1944,7 +1965,7 @@ func CopyChannel(c *gin.Context) {
 	service.DropPluginCredentials(&clone)
 	// A supplier's copy binds no request plugins, as any channel the supplier
 	// creates.
-	if c.GetInt("role") == common.RoleChannelSupplierUser && len(requestPluginsOf(&clone)) > 0 {
+	if c.GetInt("role") == common.RoleChannelSupplierUser && len(unsavedChannelSetting(&clone).RequestPlugins) > 0 {
 		setting := clone.GetSetting()
 		setting.RequestPlugins = nil
 		clone.SetSetting(setting)

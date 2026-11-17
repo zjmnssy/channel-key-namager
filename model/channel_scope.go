@@ -65,8 +65,11 @@ func (s ChannelScope) ChannelIDQuery() *gorm.DB {
 }
 
 // ChannelIDsWithinScope reports whether every ID names an existing channel in
-// the scope. A repeated ID counts once.
+// the scope. A repeated ID counts once, and an empty list names no channel.
 func ChannelIDsWithinScope(scope ChannelScope, ids []int) (bool, error) {
+	if len(ids) == 0 {
+		return false, nil
+	}
 	uniqueIDs := lo.Uniq(ids)
 	var count int64
 	if err := scope.Apply(DB.Model(&Channel{}).Where("id IN ?", uniqueIDs)).Count(&count).Error; err != nil {

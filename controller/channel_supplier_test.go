@@ -13,6 +13,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -455,6 +457,11 @@ func TestSupplierBatchRejectsForeignOrMissingIDs(t *testing.T) {
 	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
 	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
 
+	// An empty list names no channel.
+	within, err := model.ChannelIDsWithinScope(model.CreatorChannelsScope(fixture.supplierA.Id), nil)
+	require.NoError(t, err)
+	assert.False(t, within)
+
 	// A repeated ID names one of the supplier's channels, not a missing one.
 	response := channelSupplierRequest(t, http.MethodPost, "/api/channel/status/batch", `{"ids":[`+ownA1+`,`+ownA1+`],"status":2}`, fixture.supplierA, nil, BatchUpdateChannelStatus)
 	assert.Contains(t, response.Body.String(), `"success":true`)
@@ -470,6 +477,14 @@ func TestSupplierBatchRejectsForeignOrMissingIDs(t *testing.T) {
 
 func TestSupplierTagOperationsStayInScope(t *testing.T) {
 	fixture := setupChannelSupplierTest(t)
+	// legacy is a multi-key channel disabled because all its keys are, the
+	// state a tag disable overrides channel by channel.
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.legacy.Id).Updates(map[string]any{
+		"status":       common.ChannelStatusAutoDisabled,
+		"other_info":   `{"status_reason":"` + model.ChannelStatusReasonAllKeysDisabled + `"}`,
+		"channel_info": model.ChannelInfo{IsMultiKey: true, MultiKeySize: 1},
+	}).Error)
+	require.NoError(t, model.UpdateAbilityStatus(fixture.legacy.Id, false))
 	// otherB and legacy share the tag with ownA1; no tag operation of
 	// supplierA may change them or their abilities.
 	otherBBefore, legacyBefore := channelState(t, fixture.otherB.Id), channelState(t, fixture.legacy.Id)
@@ -492,7 +507,10 @@ func TestSupplierTagOperationsStayInScope(t *testing.T) {
 	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
 	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
 
-	// An edit of the models rebuilds the abilities.
+	// An edit of the models rebuilds the abilities. legacy's abilities differ
+	// from what its row would rebuild, so a rebuild of legacy shows.
+	require.NoError(t, model.DB.Model(&model.Ability{}).Where("channel_id = ?", fixture.legacy.Id).Update("priority", 7).Error)
+	legacyBefore = channelState(t, fixture.legacy.Id)
 	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/tag", `{"tag":"shared","models":"m-new"}`, fixture.supplierA, nil, EditTagChannels)
 	require.Contains(t, response.Body.String(), `"success":true`)
 	ownA1 = channelState(t, fixture.ownA1.Id)
@@ -500,9 +518,7 @@ func TestSupplierTagOperationsStayInScope(t *testing.T) {
 	assert.Equal(t, otherBBefore, channelState(t, fixture.otherB.Id))
 	assert.Equal(t, legacyBefore, channelState(t, fixture.legacy.Id))
 
-	// Enabling the tag leaves a disabled channel of someone else disabled.
-	require.True(t, model.UpdateChannelStatus(fixture.legacy.Id, "", common.ChannelStatusManuallyDisabled, "manual operation"))
-	legacyBefore = channelState(t, fixture.legacy.Id)
+	// Enabling the tag leaves legacy, disabled and someone else's, disabled.
 	response = channelSupplierRequest(t, http.MethodPost, "/api/channel/tag/enabled", `{"tag":"shared"}`, fixture.supplierA, nil, EnableTagChannels)
 	require.Contains(t, response.Body.String(), `"success":true`)
 	ownA1 = channelState(t, fixture.ownA1.Id)
@@ -544,6 +560,63 @@ func TestSupplierCannotChangeRequestPlugins(t *testing.T) {
 	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"name":"renamed"}`, fixture.supplierA, nil, UpdateChannel)
 	assert.Contains(t, response.Body.String(), `"success":true`)
 	assert.Equal(t, "renamed", channelState(t, fixture.ownA1.Id).Channel.Name)
+}
+
+func TestSupplierChannelEditTakesOnlyExactFieldNames(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[{"id":"inst-1","name":"One","plugin":"rp-one"},{"id":"inst-2","name":"Two","plugin":"rp-two"}]`}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+	})
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.ownA1.Id).Update("setting", `{"request_plugins":["inst-1"]}`).Error)
+	ownA1Before := channelState(t, fixture.ownA1.Id)
+	ownA1 := strconv.Itoa(fixture.ownA1.Id)
+
+	// The body fills the channel by field names in any letter case, while the
+	// setting and status checks read the keys as spelled; a supplier's edit
+	// with any other spelling of a field is refused whole.
+	for _, fields := range []string{
+		`"Setting":"{\"request_plugins\":[\"rp_missing\"]}"`,
+		`"Setting":"{\"request_plugins\":[\"inst-1\",\"inst-2\"]}"`,
+		`"SETTING":"{\"request_plugins\":[]}"`,
+		`"type":60,"base_url":"http://127.0.0.1:1","Setting":"{\"task_extend_plugin_keys\":[\"probe-ext\"]}"`,
+		`"Status":2`,
+	} {
+		response := channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,`+fields+`}`, fixture.supplierA, nil, UpdateChannel)
+		assert.JSONEq(t, `{"success":false,"message":"Invalid parameters","message_key":"Invalid parameters"}`, response.Body.String(), fields)
+	}
+	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
+
+	// A change of the task plugin bindings under the exact name gets the
+	// refusal of creating such a channel, before validation can tell whether
+	// that plugin exists.
+	added := channelSupplierRequest(t, http.MethodPost, "/api/channel",
+		`{"mode":"single","channel":{"type":60,"name":"gateway","key":"sk-gateway","models":"m","group":"default","base_url":"http://127.0.0.1:1","setting":"{\"task_extend_plugin_keys\":[\"probe-ext\"]}"}}`,
+		fixture.supplierA, nil, AddChannel)
+	require.Contains(t, added.Body.String(), "task_plugin.bind")
+	updated := channelSupplierRequest(t, http.MethodPut, "/api/channel/",
+		`{"id":`+ownA1+`,"type":60,"base_url":"http://127.0.0.1:1","setting":"{\"request_plugins\":[\"inst-1\"],\"task_extend_plugin_keys\":[\"probe-ext\"]}"}`,
+		fixture.supplierA, nil, UpdateChannel)
+	assert.Equal(t, added.Code, updated.Code)
+	assert.JSONEq(t, added.Body.String(), updated.Body.String())
+	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
+
+	// Every field the edit form sends, spelled exactly, goes through.
+	response := channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"name":"edited","type":1,"base_url":"","openai_organization":"",`+
+		`"models":"m-a1,m-shared","group":"default","model_mapping":"","priority":100,"weight":0,"test_model":"","auto_ban":1,"status_code_mapping":"",`+
+		`"tag":"shared","remark":"","setting":"{\"request_plugins\":[\"inst-1\"]}","param_override":"","header_override":"","settings":"{}","other":"",`+
+		`"multi_key_mode":"random","key_mode":"append"}`, fixture.supplierA, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.Equal(t, "edited", channelState(t, fixture.ownA1.Id).Channel.Name)
+
+	// Administrators keep the old handling of another spelling: root's edit
+	// goes through, and an administrator without sensitive_write still gets
+	// the refusal of the sensitivity check.
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"Setting":"{\"request_plugins\":[\"inst-2\"]}"}`, fixture.root, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.Equal(t, []string{"inst-2"}, channelState(t, fixture.ownA1.Id).Channel.GetSetting().RequestPlugins)
+	response = channelSupplierRequest(t, http.MethodPut, "/api/channel/", `{"id":`+ownA1+`,"Name":"renamed-by-admin"}`, fixture.admin, nil, UpdateChannel)
+	assert.Contains(t, response.Body.String(), "Unauthorized, insufficient privileges")
 }
 
 func TestSupplierCannotPreviewTaskPluginModels(t *testing.T) {
