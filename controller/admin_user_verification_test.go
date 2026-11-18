@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -11,7 +12,9 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -362,6 +365,25 @@ func TestChannelSupplierRoleManagement(t *testing.T) {
 
 	t.Run("super administrator sets and unsets a supplier", func(t *testing.T) {
 		resetTarget(t, common.RoleCommonUser)
+		// The target is in the Redis user cache, which a change must publish.
+		server := miniredis.RunT(t)
+		previousRDB, previousRedis := common.RDB, common.RedisEnabled
+		common.RDB = redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+		common.RedisEnabled = true
+		t.Cleanup(func() {
+			_ = common.RDB.Close()
+			common.RDB, common.RedisEnabled = previousRDB, previousRedis
+		})
+		_, err := model.GetUserCache(target.Id)
+		require.NoError(t, err)
+		var cacheKey string
+		for _, key := range server.Keys() {
+			if server.HGet(key, "Id") == strconv.Itoa(target.Id) {
+				cacheKey = key
+				break
+			}
+		}
+		require.NotEmpty(t, cacheKey)
 		newTargetSession := func(t *testing.T) service.AuthIdentity {
 			t.Helper()
 			bundle, err := service.CreateLoginSession(target.Id, "password", "127.0.0.1", "managed-session")
@@ -370,11 +392,15 @@ func TestChannelSupplierRoleManagement(t *testing.T) {
 			require.NoError(t, err)
 			return session
 		}
-		// A change takes effect at once: the auth version advances, the
-		// target's sessions are revoked, the other nodes are told to reload the
-		// policy, and the audit names the action and the verification method.
+		// A change takes effect at once: the auth version advances, the user
+		// cache holds the new role and version before anything reads the user
+		// again, the target's sessions are revoked, the other nodes are told to
+		// reload the policy, and the audit names the action and the
+		// verification method.
 		assertRoleChanged := func(t *testing.T, session service.AuthIdentity, action string, role int, authVersion int64, reason string, authzSyncTasks int64) {
 			t.Helper()
+			assert.Equal(t, strconv.Itoa(role), server.HGet(cacheKey, "Role"))
+			assert.Equal(t, strconv.FormatInt(authVersion, 10), server.HGet(cacheKey, "AuthVersion"))
 			stored, err := model.GetUserById(target.Id, false)
 			require.NoError(t, err)
 			assert.Equal(t, role, stored.Role)
@@ -416,6 +442,22 @@ func TestChannelSupplierRoleManagement(t *testing.T) {
 		result = manage(t, "unset_channel_supplier", manageProof(t, "unset_channel_supplier"), common.RoleRootUser)
 		require.True(t, result.Success, result.Message)
 		assertRoleChanged(t, session, "unset_channel_supplier", common.RoleCommonUser, 3, "admin_unset_channel_supplier", 2)
+	})
+
+	// An administrator is refused before the proof is consumed: the same
+	// verified identity can still use it as the super administrator.
+	t.Run("a refused administrator leaves the proof unused", func(t *testing.T) {
+		resetTarget(t, common.RoleCommonUser)
+		proof := manageProof(t, "set_channel_supplier")
+		result := manage(t, "set_channel_supplier", proof, common.RoleAdminUser)
+		assert.False(t, result.Success)
+		assert.Equal(t, "Only the super administrator can change channel suppliers", result.MessageKey)
+
+		result = manage(t, "set_channel_supplier", proof, common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		assert.Equal(t, common.RoleChannelSupplierUser, stored.Role)
 	})
 
 	t.Run("super administrator promotes a supplier", func(t *testing.T) {
