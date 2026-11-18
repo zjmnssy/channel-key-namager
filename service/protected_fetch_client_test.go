@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -448,6 +450,39 @@ func TestChannelHTTPClientChecksTheTargetAProxyIsAskedFor(t *testing.T) {
 	assert.Zero(t, accepted.Load())
 	_ = get("http://1.1.1.1/", "127.0.0.1")
 	assert.Positive(t, accepted.Load())
+}
+
+// closeRecordingBody is a request body that records whether it was closed.
+type closeRecordingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (body *closeRecordingBody) Close() error {
+	body.closed = true
+	return nil
+}
+
+// A RoundTripper closes the request body even when it refuses the request.
+func TestChannelHTTPClientClosesTheBodyOfARefusedRequest(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	t.Cleanup(ResetProxyClientCache)
+	client, err := ChannelHTTPClient("", dto.ChannelSettings{}, true)
+	require.NoError(t, err)
+	for _, test := range []struct{ name, target, host string }{
+		{name: "private target", target: "http://10.0.0.1/"},
+		{name: "private Host", target: "http://1.1.1.1/", host: "10.0.0.1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &closeRecordingBody{Reader: strings.NewReader(`{"model":"m"}`)}
+			request, err := http.NewRequest(http.MethodPost, test.target, body)
+			require.NoError(t, err)
+			request.Host = test.host
+			_, err = client.Do(request)
+			assert.ErrorContains(t, err, "not allowed")
+			assert.True(t, body.closed)
+		})
+	}
 }
 
 func TestProxyClientCacheResetsCoverSupplierChannelClients(t *testing.T) {

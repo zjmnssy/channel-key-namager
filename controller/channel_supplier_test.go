@@ -245,6 +245,15 @@ func TestChannelCreatorIsReadOnly(t *testing.T) {
 	assert.Equal(t, "renamed", stored.Name)
 	assert.Equal(t, fixture.supplierA.Id, stored.CreatorUserId)
 	assert.Equal(t, common.RoleChannelSupplierUser, stored.CreatorRole)
+
+	// The handler clears the creator before saving; the update of the model
+	// leaves the creator alone by itself.
+	require.NoError(t, (&model.Channel{Id: fixture.ownA1.Id, Name: "x", CreatorUserId: fixture.admin.Id, CreatorRole: common.RoleAdminUser}).Update())
+	stored, err = model.GetChannelById(fixture.ownA1.Id, false)
+	require.NoError(t, err)
+	assert.Equal(t, "x", stored.Name)
+	assert.Equal(t, fixture.supplierA.Id, stored.CreatorUserId)
+	assert.Equal(t, common.RoleChannelSupplierUser, stored.CreatorRole)
 }
 
 func TestCopiedChannelBelongsToCopier(t *testing.T) {
@@ -307,6 +316,20 @@ func TestSupplierListSeesOnlyOwnChannels(t *testing.T) {
 	assert.Equal(t, "supplier-a", items[fixture.ownA1.Id].CreatorUsername)
 	assert.Zero(t, items[fixture.legacy.Id].CreatorUserId)
 	assert.Empty(t, items[fixture.legacy.Id].CreatorUsername)
+
+	// A tag only supplierB uses sorts before shared. supplierA's first page of
+	// one tag still holds shared, and the tag count leaves the other tag out.
+	bOnlyTag := "b-only"
+	bOnly := &model.Channel{
+		Type: 1, Key: "sk-b-only", Name: "b-only", Status: common.ChannelStatusEnabled,
+		Models: "m-b-only", Group: "default", Tag: &bOnlyTag,
+		CreatorUserId: fixture.supplierB.Id, CreatorRole: common.RoleChannelSupplierUser,
+	}
+	require.NoError(t, bOnly.Insert())
+	t.Cleanup(func() { deleteChannelWithAbilities(t, bOnly.Id) })
+	list = channelSupplierData[channelListData](t, "/api/channel/?p=1&page_size=1&tag_mode=true", fixture.supplierA, GetAllChannels)
+	assert.ElementsMatch(t, []int{fixture.ownA1.Id}, list.ids())
+	assert.Equal(t, 1, list.Total)
 }
 
 func TestSupplierSearchSeesOnlyOwnChannels(t *testing.T) {
@@ -907,6 +930,36 @@ func TestSupplierChannelsNeverServeRelay(t *testing.T) {
 		model.InitChannelCache()
 		assertNeverServed(t)
 	})
+
+	// A channel that serves a model only under its routing name, as with
+	// gizmos, is found by a second lookup, which keeps supplier channels out
+	// too. The supplier's channel outranks the administrator's.
+	t.Run("routing name", func(t *testing.T) {
+		priority100, priority0 := int64(100), int64(0)
+		supplierGizmo := &model.Channel{
+			Type: 1, Key: "sk-supplier-gizmo", Name: "supplier-gizmo", Status: common.ChannelStatusEnabled,
+			Models: "gpt-4-gizmo-*", Group: "default", Priority: &priority100,
+			CreatorUserId: fixture.supplierA.Id, CreatorRole: common.RoleChannelSupplierUser,
+		}
+		adminGizmo := &model.Channel{
+			Type: 1, Key: "sk-admin-gizmo", Name: "admin-gizmo", Status: common.ChannelStatusEnabled,
+			Models: "gpt-4-gizmo-*", Group: "default", Priority: &priority0,
+			CreatorUserId: fixture.admin.Id, CreatorRole: common.RoleAdminUser,
+		}
+		for _, channel := range []*model.Channel{supplierGizmo, adminGizmo} {
+			require.NoError(t, channel.Insert())
+			t.Cleanup(func() { deleteChannelWithAbilities(t, channel.Id) })
+		}
+		forEachChannelCacheMode(t, func(t *testing.T) {
+			for range 20 {
+				channel, err := model.GetRandomSatisfiedChannel("default", "gpt-4-gizmo-x", 0, nil)
+				require.NoError(t, err)
+				require.NotNil(t, channel)
+				assert.Equal(t, adminGizmo.Id, channel.Id)
+			}
+			assert.False(t, model.IsChannelEnabledForGroupModel("default", "gpt-4-gizmo-x", supplierGizmo.Id))
+		})
+	})
 }
 
 func TestSupplierOnlyModelsStayOffCallerLists(t *testing.T) {
@@ -1012,14 +1065,26 @@ func TestSupplierChannelsRefuseOriginTaskFollowUps(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: "mj-" + channel.Name}}
 			c.Set("id", fixture.admin.Id)
 			response := relay.RelayMidjourneyTaskImageSeed(c)
-			return response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled)
+			if response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled) {
+				return true
+			}
+			// The seed is fetched from the task's channel.
+			assert.EqualValues(t, 1, hits.Load())
+			return false
 		}},
 		{name: "Midjourney action", refused: func(t *testing.T, channel *model.Channel) bool {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/mj/submit/change", strings.NewReader(`{"taskId":"mj-`+channel.Name+`","action":"UPSCALE","index":1}`))
 			c.Request.Header.Set("Content-Type", "application/json")
 			response := relay.RelayMidjourneySubmit(c, &relaycommon.RelayInfo{UserId: fixture.admin.Id, RelayMode: relayconstant.RelayModeMidjourneyChange})
-			return response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled)
+			if response != nil && response.Description == i18n.T(c, i18n.MsgRelayTaskChannelDisabled) {
+				return true
+			}
+			// The action goes on with the task's channel and stops at the price
+			// check, as no Midjourney price is set here.
+			assert.Equal(t, channel.Id, c.GetInt("channel_id"))
+			assert.Equal(t, upstream.URL, c.GetString("base_url"))
+			return false
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
