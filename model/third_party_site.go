@@ -52,7 +52,7 @@ const (
 
 // normalizeThirdPartySiteInput validates and normalizes a create or edit
 // request. When editing, an ApiKey that is empty after trimming means "keep the
-// stored one": keepApiKey is true and the returned ApiKey is empty.
+// stored one": the second result is true and the returned ApiKey is empty.
 func normalizeThirdPartySiteInput(input ThirdPartySiteInput, editing bool) (ThirdPartySiteInput, bool, error) {
 	name := strings.TrimSpace(input.Name)
 	nameLen := utf8.RuneCountInString(name)

@@ -198,6 +198,9 @@ func TestThirdPartySiteCreateNormalizesAndHidesApiKey(t *testing.T) {
 		thirdPartySiteBody(t, map[string]any{"name": "Delta", "receivable_discount": 0.30000000000000004}), nil, CreateThirdPartySite)
 	require.True(t, rounded.Success, rounded.Message)
 	assert.Equal(t, 0.3, rounded.Data.ReceivableDiscount)
+	var storedRounded model.ThirdPartySite
+	require.NoError(t, db.First(&storedRounded, rounded.Data.Id).Error)
+	assert.Equal(t, 0.3, storedRounded.ReceivableDiscount)
 }
 
 func TestThirdPartySiteListPagesNewestFirstWithoutApiKey(t *testing.T) {
@@ -264,21 +267,20 @@ func TestThirdPartySiteUpdate(t *testing.T) {
 		return site
 	}
 
-	for i, apiKey := range []any{nil, "", "   "} {
-		discount := []float64{0.5, 0.6, 0.7}[i]
-		raw, r := update(map[string]any{"api_key": apiKey, "receivable_discount": discount})
+	for _, tc := range []struct {
+		apiKey   any
+		discount float64
+	}{{nil, 0.5}, {"", 0.6}, {"   ", 0.7}} {
+		raw, r := update(map[string]any{"api_key": tc.apiKey, "receivable_discount": tc.discount})
 		require.True(t, r.Success, r.Message)
 		assert.NotContains(t, raw, "api_key")
 		site := stored()
 		assert.Equal(t, "remote-access-token", site.ApiKey)
-		assert.Equal(t, discount, site.ReceivableDiscount)
+		assert.Equal(t, tc.discount, site.ReceivableDiscount)
 	}
 
 	for range 2 {
-		r := func() thirdPartySiteResult[model.ThirdPartySite] {
-			_, r := update(map[string]any{"api_key": " new-key "})
-			return r
-		}()
+		_, r := update(map[string]any{"api_key": " new-key "})
 		require.True(t, r.Success, r.Message)
 		assert.Equal(t, "new-key", stored().ApiKey)
 	}
@@ -286,6 +288,12 @@ func TestThirdPartySiteUpdate(t *testing.T) {
 	_, renamed := update(map[string]any{"name": "ALPHA"})
 	require.True(t, renamed.Success, renamed.Message)
 	assert.Equal(t, "ALPHA", stored().Name)
+
+	_, moved := update(map[string]any{"base_url": "https://alpha2.example.com/v1/", "remote_user_id": 8})
+	require.True(t, moved.Success, moved.Message)
+	movedSite := stored()
+	assert.Equal(t, "https://alpha2.example.com/v1", movedSite.BaseURL)
+	assert.Equal(t, 8, movedSite.RemoteUserID)
 
 	_, duplicate := update(map[string]any{"name": " beta "})
 	assert.False(t, duplicate.Success)
@@ -341,7 +349,9 @@ func TestThirdPartySiteDelete(t *testing.T) {
 	assert.False(t, edited.Success)
 	assert.Equal(t, "Site does not exist", edited.MessageKey)
 
-	_, badID := thirdPartySiteCall[any](t, http.MethodDelete, "/api/third_party_site/abc", "", gin.Params{{Key: "id", Value: "abc"}}, DeleteThirdPartySite)
-	assert.False(t, badID.Success)
-	assert.Equal(t, "Invalid ID", badID.MessageKey)
+	for _, badID := range []string{"abc", "0"} {
+		_, r := thirdPartySiteCall[any](t, http.MethodDelete, "/api/third_party_site/"+badID, "", gin.Params{{Key: "id", Value: badID}}, DeleteThirdPartySite)
+		assert.False(t, r.Success)
+		assert.Equal(t, "Invalid ID", r.MessageKey)
+	}
 }

@@ -69,7 +69,8 @@ func DeleteThirdPartySite(c *gin.Context) {
 }
 
 // respondThirdPartySiteError answers a validation failure with the offending
-// field, and any other error as a plain API error. It never echoes the request.
+// field, a missing site as "Site does not exist", and any other error as a
+// plain API error. It never echoes the request.
 func respondThirdPartySiteError(c *gin.Context, err error) {
 	var fieldErr *model.ThirdPartySiteFieldError
 	if errors.As(err, &fieldErr) {
