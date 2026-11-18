@@ -526,7 +526,9 @@ func TestAdminUserVerificationPolicy(t *testing.T) {
 	})
 	t.Run("a user:write token completes the deletion on its own proof", func(t *testing.T) {
 		operator, _, target := setupAdminUserTest(t)
-		require.NoError(t, model.DB.AutoMigrate(&model.ExternalIdentityClaim{}, &model.Token{}))
+		// A hard deletion also writes these tables: the user's identity claims
+		// and tokens, and the creator of the user's channels.
+		require.NoError(t, model.DB.AutoMigrate(&model.ExternalIdentityClaim{}, &model.Token{}, &model.Channel{}))
 		raw, _ := createScopedAccessToken(t, operator.Id, 0, "user:write")
 		router := newAccessTokenTestRouter()
 		response := accessTokenRequest(router, http.MethodPost, "/api/verify", raw, "", fmt.Sprintf(`{"scope":"admin.user.delete","method":"password","password":"enrollment-password","context":{"user_id":%d}}`, target.Id))

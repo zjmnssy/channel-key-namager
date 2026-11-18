@@ -351,6 +351,53 @@ func TestChannelCreatorNameForDeletedUser(t *testing.T) {
 	assert.Equal(t, "supplier-a", items[fixture.ownA1.Id].CreatorUsername)
 }
 
+// MySQL before 8.0 may give the ID of a hard-deleted user to the next new
+// user after a restart, so a hard deletion takes the user's channels from that
+// ID. A soft deletion keeps the row, and with it the ID and the creator.
+func TestHardDeletedSupplierChannelsLoseTheirCreator(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.UserAccessToken{}, &model.UserSession{}, &model.AuthFlow{}, &model.TwoFA{}, &model.TwoFABackupCode{},
+		&model.PasskeyCredential{}, &model.Token{}, &model.UserOAuthBinding{}, &model.ExternalIdentityClaim{}))
+	// A channel test that reached ownA1 would fail at once on this address,
+	// with an error it translates.
+	require.NoError(t, i18n.Init())
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", fixture.ownA1.Id).Update("base_url", "http://127.0.0.1:1").Error)
+	// The memory cache keeps the channels as they were before the deletion.
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = false
+		model.InitChannelCache()
+	})
+	model.InitChannelCache()
+
+	_, err := model.HardDeleteUserById(fixture.supplierA.Id)
+	require.NoError(t, err)
+	for _, channel := range []*model.Channel{fixture.ownA1, fixture.ownA2} {
+		stored := channelState(t, channel.Id).Channel
+		assert.Zero(t, stored.CreatorUserId, channel.Name)
+		// Still a supplier channel, which never serves relay.
+		assert.Equal(t, common.RoleChannelSupplierUser, stored.CreatorRole, channel.Name)
+	}
+	assert.Equal(t, fixture.supplierB.Id, channelState(t, fixture.otherB.Id).Channel.CreatorUserId)
+
+	// A supplier who gets the deleted supplier's ID reaches none of its
+	// channels, from the list or by ID through the memory cache.
+	reused := &model.User{Id: fixture.supplierA.Id, Username: "reused-id", Role: common.RoleChannelSupplierUser, Status: common.UserStatusEnabled, AffCode: "reused-id"}
+	require.NoError(t, model.DB.Create(reused).Error)
+	t.Cleanup(func() { require.NoError(t, model.DB.Unscoped().Delete(reused).Error) })
+	list := channelSupplierData[channelListData](t, "/api/channel/?p=1&page_size=50", reused, GetAllChannels)
+	assert.Empty(t, list.Items)
+	assert.Zero(t, list.Total)
+	ownA1 := strconv.Itoa(fixture.ownA1.Id)
+	response := channelSupplierRequest(t, http.MethodGet, "/api/channel/test/"+ownA1, "", reused, gin.Params{{Key: "id", Value: ownA1}}, TestChannel)
+	assert.Contains(t, response.Body.String(), "Channel does not exist")
+
+	// A soft deletion keeps the creator.
+	_, err = model.DeleteUserById(fixture.supplierB.Id)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.supplierB.Id, channelState(t, fixture.otherB.Id).Channel.CreatorUserId)
+}
+
 // missingChannelID names no channel in the supplier tests.
 const missingChannelID = 999999
 
