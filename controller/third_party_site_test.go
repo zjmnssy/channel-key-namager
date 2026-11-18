@@ -2,10 +2,12 @@ package controller
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -140,7 +142,7 @@ func TestThirdPartySiteCreateValidation(t *testing.T) {
 		cases = append(cases, validationCase{name: "base url " + baseURL, overrides: map[string]any{"base_url": baseURL}, key: urlKey, field: "base_url"})
 	}
 	for _, discount := range []float64{0, -0.5, 1.0001, 0.00005, 0.12345} {
-		cases = append(cases, validationCase{name: "discount", overrides: map[string]any{"receivable_discount": discount}, key: discountKey, field: "receivable_discount"})
+		cases = append(cases, validationCase{name: fmt.Sprintf("discount %v", discount), overrides: map[string]any{"receivable_discount": discount}, key: discountKey, field: "receivable_discount"})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,6 +193,11 @@ func TestThirdPartySiteCreateNormalizesAndHidesApiKey(t *testing.T) {
 			thirdPartySiteBody(t, overrides), nil, CreateThirdPartySite)
 		assert.True(t, r.Success, r.Message)
 	}
+
+	_, rounded := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, map[string]any{"name": "Delta", "receivable_discount": 0.30000000000000004}), nil, CreateThirdPartySite)
+	require.True(t, rounded.Success, rounded.Message)
+	assert.Equal(t, 0.3, rounded.Data.ReceivableDiscount)
 }
 
 func TestThirdPartySiteListPagesNewestFirstWithoutApiKey(t *testing.T) {
@@ -228,4 +235,113 @@ func TestThirdPartySiteWritesKeepApiKeyOutOfDebugSQLLog(t *testing.T) {
 		thirdPartySiteBody(t, map[string]any{"api_key": "create-probe-key"}), nil, CreateThirdPartySite)
 	require.True(t, created.Success, created.Message)
 	assert.NotContains(t, sqlLog.String(), "create-probe-key")
+
+	_, updated := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPut, fmt.Sprintf("/api/third_party_site/%d", created.Data.Id),
+		thirdPartySiteBody(t, map[string]any{"api_key": "update-probe-key"}),
+		gin.Params{{Key: "id", Value: strconv.Itoa(created.Data.Id)}}, UpdateThirdPartySite)
+	require.True(t, updated.Success, updated.Message)
+	assert.NotContains(t, sqlLog.String(), "update-probe-key")
+}
+
+func TestThirdPartySiteUpdate(t *testing.T) {
+	db := setupThirdPartySiteTest(t)
+	_, alpha := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, nil), nil, CreateThirdPartySite)
+	require.True(t, alpha.Success, alpha.Message)
+	_, beta := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, map[string]any{"name": "Beta"}), nil, CreateThirdPartySite)
+	require.True(t, beta.Success, beta.Message)
+
+	id := alpha.Data.Id
+	target := fmt.Sprintf("/api/third_party_site/%d", id)
+	params := gin.Params{{Key: "id", Value: strconv.Itoa(id)}}
+	update := func(overrides map[string]any) (string, thirdPartySiteResult[model.ThirdPartySite]) {
+		return thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPut, target, thirdPartySiteBody(t, overrides), params, UpdateThirdPartySite)
+	}
+	stored := func() model.ThirdPartySite {
+		var site model.ThirdPartySite
+		require.NoError(t, db.First(&site, id).Error)
+		return site
+	}
+
+	for i, apiKey := range []any{nil, "", "   "} {
+		discount := []float64{0.5, 0.6, 0.7}[i]
+		raw, r := update(map[string]any{"api_key": apiKey, "receivable_discount": discount})
+		require.True(t, r.Success, r.Message)
+		assert.NotContains(t, raw, "api_key")
+		site := stored()
+		assert.Equal(t, "remote-access-token", site.ApiKey)
+		assert.Equal(t, discount, site.ReceivableDiscount)
+	}
+
+	for range 2 {
+		r := func() thirdPartySiteResult[model.ThirdPartySite] {
+			_, r := update(map[string]any{"api_key": " new-key "})
+			return r
+		}()
+		require.True(t, r.Success, r.Message)
+		assert.Equal(t, "new-key", stored().ApiKey)
+	}
+
+	_, renamed := update(map[string]any{"name": "ALPHA"})
+	require.True(t, renamed.Success, renamed.Message)
+	assert.Equal(t, "ALPHA", stored().Name)
+
+	_, duplicate := update(map[string]any{"name": " beta "})
+	assert.False(t, duplicate.Success)
+	assert.Equal(t, "A site with this name already exists", duplicate.MessageKey)
+	assert.Equal(t, "name", duplicate.Field)
+
+	_, badURL := update(map[string]any{"base_url": "ftp://example.com"})
+	assert.False(t, badURL.Success)
+	assert.Equal(t, "base_url", badURL.Field)
+
+	_, missing := thirdPartySiteCall[any](t, http.MethodPut, "/api/third_party_site/999999", thirdPartySiteBody(t, nil),
+		gin.Params{{Key: "id", Value: "999999"}}, UpdateThirdPartySite)
+	assert.False(t, missing.Success)
+	assert.Equal(t, "Site does not exist", missing.MessageKey)
+
+	for _, badID := range []string{"abc", "0"} {
+		_, r := thirdPartySiteCall[any](t, http.MethodPut, "/api/third_party_site/"+badID, thirdPartySiteBody(t, nil),
+			gin.Params{{Key: "id", Value: badID}}, UpdateThirdPartySite)
+		assert.False(t, r.Success)
+		assert.Equal(t, "Invalid ID", r.MessageKey)
+	}
+}
+
+func TestThirdPartySiteDelete(t *testing.T) {
+	db := setupThirdPartySiteTest(t)
+	_, created := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, nil), nil, CreateThirdPartySite)
+	require.True(t, created.Success, created.Message)
+	id := created.Data.Id
+	target := fmt.Sprintf("/api/third_party_site/%d", id)
+	params := gin.Params{{Key: "id", Value: strconv.Itoa(id)}}
+
+	_, deleted := thirdPartySiteCall[any](t, http.MethodDelete, target, "", params, DeleteThirdPartySite)
+	require.True(t, deleted.Success, deleted.Message)
+	_, page := thirdPartySiteCall[thirdPartySitePage](t, http.MethodGet, "/api/third_party_site/", "", nil, GetThirdPartySites)
+	require.True(t, page.Success, page.Message)
+	assert.Equal(t, 0, page.Data.Total)
+
+	var stored model.ThirdPartySite
+	require.NoError(t, db.Unscoped().First(&stored, id).Error)
+	assert.True(t, stored.DeletedAt.Valid)
+	assert.Empty(t, stored.ApiKey)
+	assert.Equal(t, "Alpha", stored.Name)
+
+	_, again := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, nil), nil, CreateThirdPartySite)
+	assert.True(t, again.Success, again.Message)
+
+	_, deletedTwice := thirdPartySiteCall[any](t, http.MethodDelete, target, "", params, DeleteThirdPartySite)
+	assert.False(t, deletedTwice.Success)
+	assert.Equal(t, "Site does not exist", deletedTwice.MessageKey)
+	_, edited := thirdPartySiteCall[any](t, http.MethodPut, target, thirdPartySiteBody(t, nil), params, UpdateThirdPartySite)
+	assert.False(t, edited.Success)
+	assert.Equal(t, "Site does not exist", edited.MessageKey)
+
+	_, badID := thirdPartySiteCall[any](t, http.MethodDelete, "/api/third_party_site/abc", "", gin.Params{{Key: "id", Value: "abc"}}, DeleteThirdPartySite)
+	assert.False(t, badID.Success)
+	assert.Equal(t, "Invalid ID", badID.MessageKey)
 }
