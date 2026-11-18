@@ -3,6 +3,7 @@ package controller
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,7 +18,9 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -992,6 +995,82 @@ func TestSupplierOnlyModelsStayOffCallerLists(t *testing.T) {
 		// The administrators' list keeps every enabled model.
 		assert.Subset(t, model.GetEnabledModels(), supplierOnly)
 	})
+}
+
+func TestSupplierChannelMappingsMakeNoTaskModelAliases(t *testing.T) {
+	fixture := setupChannelSupplierTest(t)
+	// Like Sora, each plugin serves its model through the OpenAI video protocol
+	// and runs on OpenAI channels such as adminOwned.
+	const pluginSource = `
+export const meta = {
+  apiVersion: 1, key: %[1]q, name: %[1]q, version: "1.0.0", author: {name: "Test"},
+  channelTypes: [1], models: [%[2]q], fetchMode: "per_task", protocols: ["openai_video"]
+};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export function listArtifacts() { return []; }
+export function buildContentRequest() { return {}; }
+export const protocols = {openai_video: {decodeRequest: function() { return {}; }, render: function() { return {}; }}};
+`
+	for _, key := range []string{"alias-target-a", "alias-target-b"} {
+		_, err := jsplugin.DefaultRegistry.Register(fmt.Sprintf(pluginSource, key, key+"-model"), jsplugin.Options{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, jsplugin.DefaultRegistry.Unregister(key)) })
+	}
+	mapModels := func(channel *model.Channel, mapping string) {
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("model_mapping", mapping).Error)
+		model.InitChannelCache()
+	}
+	alias := func(name string) (model.TaskAliasTarget, bool) {
+		return model.ResolveTaskModelAlias(jsplugin.DefaultRegistry.Generation(), name)
+	}
+	// claimant names the plugin that claims a caller's video request for
+	// modelName, or is empty when the request goes on as ordinary relay.
+	claimant := func(modelName string) string {
+		var claimedBy string
+		router := gin.New()
+		router.POST("/v1/videos", func(c *gin.Context) {
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		}, middleware.RouteTaskPluginEndpoint(), func(c *gin.Context) {
+			if endpoint, claimed := c.Get(jsplugin.ContextKeyPinnedEndpoint); claimed {
+				claimedBy = endpoint.(jsplugin.PinnedEndpoint).Plugin.Meta.Key
+			}
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"`+modelName+`"}`))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(httptest.NewRecorder(), request)
+		return claimedBy
+	}
+
+	// A supplier's mapping makes no alias, so a caller's request for m-shared,
+	// which adminOwned serves, stays ordinary relay.
+	mapModels(fixture.ownA1, `{"m-shared":"alias-target-a-model"}`)
+	_, found := alias("m-shared")
+	assert.False(t, found)
+	assert.Empty(t, claimant("m-shared"))
+
+	// The same mapping on an administrator's channel makes the alias, as one on
+	// a channel without a creator does.
+	mapModels(fixture.adminOwned, `{"m-shared":"alias-target-a-model"}`)
+	mapModels(fixture.legacy, `{"m-legacy":"alias-target-b-model"}`)
+	adminAlias := model.TaskAliasTarget{Alias: "m-shared", Declared: "alias-target-a-model", PluginKey: "alias-target-a"}
+	got, found := alias("m-shared")
+	assert.True(t, found)
+	assert.Equal(t, adminAlias, got)
+	assert.Equal(t, "alias-target-a", claimant("m-shared"))
+	got, found = alias("m-legacy")
+	assert.True(t, found)
+	assert.Equal(t, model.TaskAliasTarget{Alias: "m-legacy", Declared: "alias-target-b-model", PluginKey: "alias-target-b"}, got)
+
+	// A supplier mapping the administrator's alias to another plugin leaves it
+	// as it is.
+	mapModels(fixture.ownA1, `{"m-shared":"alias-target-b-model"}`)
+	got, found = alias("m-shared")
+	assert.True(t, found)
+	assert.Equal(t, adminAlias, got)
+	assert.Equal(t, "alias-target-a", claimant("m-shared"))
 }
 
 func TestSupplierChannelsRefuseOriginTaskFollowUps(t *testing.T) {
