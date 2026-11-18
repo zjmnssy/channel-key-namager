@@ -82,6 +82,9 @@ export function ThirdPartySitesTable() {
       isLoading={isLoading}
       isFetching={isFetching}
       emptyTitle={t('No Third-Party Sites Found')}
+      emptyDescription={t(
+        'No third-party sites available. Add your first site to get started.'
+      )}
       skeletonKeyPrefix='third-party-sites-skeleton'
       toolbarProps={null}
     />

@@ -33,8 +33,10 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { AxiosError, AxiosHeaders } from 'axios'
 import { createInstance, type i18n as I18n } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -110,11 +112,26 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+function spyToasts() {
+  return {
+    success: vi.spyOn(toast, 'success').mockImplementation(() => 1),
+    error: vi.spyOn(toast, 'error').mockImplementation(() => 1),
+  }
+}
+
+async function confirmDelete(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByText('Alpha')
+  await user.click(screen.getByRole('button', { name: 'Open menu' }))
+  await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+  const dialog = await screen.findByRole('alertdialog')
+  await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
+}
+
 describe('ThirdPartySitesTable', () => {
   it('renders the site columns and rows', async () => {
     const get = await renderPage()
 
-    expect((await screen.findAllByText('Alpha')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
     for (const name of [
       'Name',
       'Type',
@@ -177,13 +194,14 @@ describe('ThirdPartySitesTable', () => {
   it('deletes a site after confirmation and refetches', async () => {
     const get = await renderPage()
     const user = userEvent.setup()
+    const { success } = spyToasts()
     const del = vi
       .spyOn(api, 'delete')
       .mockResolvedValue({ data: { success: true } })
-    await screen.findAllByText('Alpha')
+    await screen.findByText('Alpha')
 
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
-    await user.click(await screen.findByRole('menuitem', { name: /Delete/ }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     const dialog = await screen.findByRole('alertdialog')
     expect(
       within(dialog).getByText(
@@ -196,15 +214,69 @@ describe('ThirdPartySitesTable', () => {
       expect(del).toHaveBeenCalledWith('/api/third_party_site/5')
     )
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+    expect(success).toHaveBeenCalledWith('Site deleted successfully')
+  })
+
+  it('keeps the delete dialog open when the server rejects the delete', async () => {
+    const get = await renderPage()
+    const user = userEvent.setup()
+    const { success, error } = spyToasts()
+    vi.spyOn(api, 'delete').mockResolvedValue({
+      data: {
+        success: false,
+        message: 'Site does not exist',
+        message_key: 'Site does not exist',
+      },
+    })
+
+    await confirmDelete(user)
+
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1))
+    expect(error).toHaveBeenCalledWith('Site does not exist')
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(success).not.toHaveBeenCalled()
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the delete dialog open when the delete request fails', async () => {
+    const get = await renderPage()
+    const user = userEvent.setup()
+    const { success, error } = spyToasts()
+    vi.spyOn(api, 'delete').mockRejectedValue(
+      new AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 404,
+          statusText: 'Not Found',
+          headers: {},
+          config: { headers: new AxiosHeaders() },
+          data: { success: false, message: 'Site does not exist' },
+        }
+      )
+    )
+
+    await confirmDelete(user)
+
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1))
+    expect(error).toHaveBeenCalledWith('Site does not exist')
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(success).not.toHaveBeenCalled()
+    expect(get).toHaveBeenCalledTimes(1)
   })
 
   it('opens the edit dialog from the row menu', async () => {
     await renderPage()
     const user = userEvent.setup()
-    await screen.findAllByText('Alpha')
+    await screen.findByText('Alpha')
 
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
-    await user.click(await screen.findByRole('menuitem', { name: /Edit/ }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Edit Site' })
     expect(within(dialog).getByLabelText('Name')).toHaveValue('Alpha')
@@ -215,6 +287,11 @@ describe('ThirdPartySitesTable', () => {
 
     expect(
       await screen.findByText('No Third-Party Sites Found')
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'No third-party sites available. Add your first site to get started.'
+      )
     ).toBeInTheDocument()
   })
 })
