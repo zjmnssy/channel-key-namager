@@ -222,6 +222,42 @@ describe('creator column', () => {
     renderCreatorCell(channelWith({ creator_user_id: 0, creator_username: '' }))
     expect(screen.getByText('—')).toBeInTheDocument()
   })
+
+  it.each([
+    {
+      shown: 'alice',
+      creator: { creator_user_id: 7, creator_username: 'alice' },
+    },
+    {
+      shown: 'Deleted user #7',
+      creator: { creator_user_id: 7, creator_username: '' },
+    },
+    { shown: '—', creator: { creator_user_id: 0, creator_username: '' } },
+  ])(
+    'marks a channel supplier channel whose creator shows as $shown',
+    ({ shown, creator }) => {
+      renderCreatorCell(
+        channelWith({ ...creator, creator_role: ROLE.CHANNEL_SUPPLIER })
+      )
+      expect(screen.getByText(shown)).toBeInTheDocument()
+      expect(screen.getByText('Channel Supplier')).toBeInTheDocument()
+    }
+  )
+
+  it.each([ROLE.ADMIN, 0])(
+    'does not mark a channel created with role %i',
+    (role) => {
+      renderCreatorCell(
+        channelWith({
+          creator_user_id: 7,
+          creator_username: 'alice',
+          creator_role: role,
+        })
+      )
+      expect(screen.getByText('alice')).toBeInTheDocument()
+      expect(screen.queryByText('Channel Supplier')).not.toBeInTheDocument()
+    }
+  )
 })
 
 describe('columns memoization', () => {

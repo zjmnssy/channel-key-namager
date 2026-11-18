@@ -858,23 +858,38 @@ export function useChannelsColumns(
               cell: ({ row }) => {
                 const channel = row.original
                 if (isTagAggregateRow(channel)) return null
+                const creatorId = channel.creator_user_id ?? 0
+                let creator = <span className='text-muted-foreground'>—</span>
                 if (channel.creator_username) {
-                  return (
+                  creator = (
                     <TruncatedText
                       text={channel.creator_username}
                       maxWidth='max-w-full'
                     />
                   )
-                }
-                const creatorId = channel.creator_user_id ?? 0
-                if (creatorId > 0) {
-                  return (
+                } else if (creatorId > 0) {
+                  creator = (
                     <span className='text-muted-foreground'>
                       {t('Deleted user #{{id}}', { id: creatorId })}
                     </span>
                   )
                 }
-                return <span className='text-muted-foreground'>—</span>
+                // A channel supplier's channel never serves relay, even after
+                // its creator becomes an administrator or is deleted.
+                if (channel.creator_role !== ROLE.CHANNEL_SUPPLIER) {
+                  return creator
+                }
+                return (
+                  <div className='flex max-w-full min-w-0 flex-col items-start gap-1'>
+                    {creator}
+                    <StatusBadge
+                      label={t('Channel Supplier')}
+                      variant='info'
+                      size='sm'
+                      copyable={false}
+                    />
+                  </div>
+                )
               },
               enableSorting: false,
               size: 140,
