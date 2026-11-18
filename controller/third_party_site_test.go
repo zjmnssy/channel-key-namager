@@ -141,7 +141,7 @@ func TestThirdPartySiteCreateValidation(t *testing.T) {
 		"//example.com", "https://exa mple.com"} {
 		cases = append(cases, validationCase{name: "base url " + baseURL, overrides: map[string]any{"base_url": baseURL}, key: urlKey, field: "base_url"})
 	}
-	for _, discount := range []float64{0, -0.5, 1.0001, 0.00005, 0.12345} {
+	for _, discount := range []float64{0, -0.5, 1.0001, 0.00005, 0.12345, 1e-10, 1e-11} {
 		cases = append(cases, validationCase{name: fmt.Sprintf("discount %v", discount), overrides: map[string]any{"receivable_discount": discount}, key: discountKey, field: "receivable_discount"})
 	}
 	for _, tc := range cases {
@@ -188,6 +188,8 @@ func TestThirdPartySiteCreateNormalizesAndHidesApiKey(t *testing.T) {
 		{"name": strings.Repeat("站", 128)},
 		{"name": "Beta", "receivable_discount": 0.0001},
 		{"name": "Gamma", "receivable_discount": 1},
+		{"name": "Zeta", "base_url": "https://example.com/" + strings.Repeat("a", 1004)},
+		{"name": "Eta", "api_key": strings.Repeat("k", 4096)},
 	} {
 		_, r := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
 			thirdPartySiteBody(t, overrides), nil, CreateThirdPartySite)
@@ -201,6 +203,13 @@ func TestThirdPartySiteCreateNormalizesAndHidesApiKey(t *testing.T) {
 	var storedRounded model.ThirdPartySite
 	require.NoError(t, db.First(&storedRounded, rounded.Data.Id).Error)
 	assert.Equal(t, 0.3, storedRounded.ReceivableDiscount)
+
+	_, plainHTTP := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, map[string]any{"name": "Epsilon", "base_url": "http://10.0.0.5:3000/"}), nil, CreateThirdPartySite)
+	require.True(t, plainHTTP.Success, plainHTTP.Message)
+	var storedHTTP model.ThirdPartySite
+	require.NoError(t, db.First(&storedHTTP, plainHTTP.Data.Id).Error)
+	assert.Equal(t, "http://10.0.0.5:3000", storedHTTP.BaseURL)
 }
 
 func TestThirdPartySiteListPagesNewestFirstWithoutApiKey(t *testing.T) {

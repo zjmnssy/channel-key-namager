@@ -94,7 +94,7 @@ func normalizeThirdPartySiteInput(input ThirdPartySiteInput, editing bool) (Thir
 		return ThirdPartySiteInput{}, false, &ThirdPartySiteFieldError{Field: "api_key", Message: "ApiKey must not exceed 4096 characters"}
 	}
 	d := input.ReceivableDiscount
-	if !(d > 0 && d <= 1 && math.Abs(d*10000-math.Round(d*10000)) <= 1e-6) {
+	if !(d > 0 && d <= 1 && math.Abs(d*10000-math.Round(d*10000)) <= 1e-6 && math.Round(d*10000) >= 1) {
 		return ThirdPartySiteInput{}, false, &ThirdPartySiteFieldError{Field: "receivable_discount", Message: thirdPartySiteDiscountMessage}
 	}
 	return ThirdPartySiteInput{
