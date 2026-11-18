@@ -397,6 +397,26 @@ describe('Admin group visibility by role', () => {
     ])
   })
 
+  it('keeps the Admin group unchanged for the super administrator', async () => {
+    // The super administrator's sidebar also loads the model pricing issues.
+    vi.spyOn(api, 'get').mockImplementation(async () => ({
+      data: { success: true, data: [] },
+    }))
+    await renderSidebarFor(ROLE.SUPER_ADMIN)
+
+    expect(adminItemTitles()).toEqual([
+      'Channels',
+      'Models',
+      'Users',
+      'Redemption Codes',
+      'Subscriptions',
+      'System Info',
+      'Plugins',
+      'Request processing',
+      'System Settings',
+    ])
+  })
+
   it('hides the Admin group from common users', async () => {
     await renderSidebarFor(ROLE.USER)
 
