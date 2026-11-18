@@ -64,10 +64,15 @@ function isValidRemoteUserId(value: string): boolean {
   return Number.isSafeInteger(n) && n > 0
 }
 
+// Judged on the text so a long fraction is never rounded into range. A comma
+// is accepted as the decimal separator, since some keyboards offer no dot.
+function parseDiscount(value: string): number {
+  return Number(value.replace(',', '.'))
+}
+
 function isValidDiscount(value: string): boolean {
-  if (!/^\d+(\.\d+)?$/.test(value)) return false
-  const n = Number(value)
-  return n > 0 && n <= 1 && Math.abs(n * 10000 - Math.round(n * 10000)) <= 1e-6
+  if (!/^(?:0(?:[.,]\d{1,4})?|1(?:[.,]0{1,4})?)$/.test(value)) return false
+  return parseDiscount(value) > 0
 }
 
 export function getThirdPartySiteFormSchema(
@@ -153,7 +158,7 @@ export function toThirdPartySitePayload(
     type: values.type.trim() as ThirdPartySitePayload['type'],
     base_url: values.base_url.trim(),
     remote_user_id: Number(values.remote_user_id.trim()),
-    receivable_discount: Number(values.receivable_discount.trim()),
+    receivable_discount: parseDiscount(values.receivable_discount.trim()),
   }
   const apiKey = values.api_key.trim()
   if (mode === 'create' || apiKey !== '') payload.api_key = apiKey

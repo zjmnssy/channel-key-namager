@@ -146,6 +146,8 @@ describe('ThirdPartySiteMutateDialog', () => {
     ['Receivable Discount', '0', discountMessage],
     ['Receivable Discount', '0.12345', discountMessage],
     ['Receivable Discount', '1.0001', discountMessage],
+    ['Receivable Discount', '0.0000000001', discountMessage],
+    ['Receivable Discount', '0.85000000001', discountMessage],
   ])('blocks submit when %s is %j', async (label, value, message) => {
     const post = vi.spyOn(api, 'post')
     const user = userEvent.setup()
@@ -156,6 +158,57 @@ describe('ThirdPartySiteMutateDialog', () => {
 
     expect(await screen.findByText(message)).toBeInTheDocument()
     expect(post).not.toHaveBeenCalled()
+  })
+
+  it('accepts a comma as the decimal separator', async () => {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: createdSite },
+    })
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user)
+    await setField(user, 'Receivable Discount', '0,85')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(post).toHaveBeenCalledWith(
+      '/api/third_party_site/',
+      expect.objectContaining({ receivable_discount: 0.85 })
+    )
+  })
+
+  it('accepts an http base URL', async () => {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: createdSite },
+    })
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user, { 'Site Base URL': 'http://10.0.0.5:3000' })
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(post).toHaveBeenCalledWith(
+      '/api/third_party_site/',
+      expect.objectContaining({ base_url: 'http://10.0.0.5:3000' })
+    )
+  })
+
+  it('keeps spellcheck and autocorrect off on the ApiKey field', async () => {
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    const input = screen.getByLabelText('ApiKey')
+    expect(input).toHaveAttribute('spellcheck', 'false')
+    expect(input).toHaveAttribute('autocapitalize', 'off')
+    expect(input).toHaveAttribute('autocorrect', 'off')
+
+    await user.click(screen.getByRole('button', { name: 'Show password' }))
+
+    const revealed = screen.getByLabelText('ApiKey')
+    expect(revealed).toHaveAttribute('type', 'text')
+    expect(revealed).toHaveAttribute('spellcheck', 'false')
   })
 
   it('prefills an edit and omits a blank ApiKey', async () => {

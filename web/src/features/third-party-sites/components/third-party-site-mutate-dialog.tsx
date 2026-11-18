@@ -259,6 +259,9 @@ export function ThirdPartySiteMutateDialog(
                   <PasswordInput
                     {...field}
                     autoComplete='new-password'
+                    spellCheck={false}
+                    autoCapitalize='off'
+                    autoCorrect='off'
                     placeholder={
                       mode === 'update'
                         ? t('Leave empty to keep unchanged')
