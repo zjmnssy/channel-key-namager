@@ -24,18 +24,12 @@ import {
   AxiosHeaders,
   type InternalAxiosRequestConfig,
 } from 'axios'
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type Mock,
-} from 'vitest'
+import { toast } from 'sonner'
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 import { api } from '@/lib/api'
 
+import { THIRD_PARTY_SITES_QUERY_KEY } from '../../constants'
 import { THIRD_PARTY_SITE_FORM_DEFAULTS } from '../../lib/third-party-site-form'
 import type { ThirdPartySite } from '../../types'
 import { ThirdPartySiteMutateDialog } from '../third-party-site-mutate-dialog'
@@ -107,10 +101,6 @@ async function fillCreateForm(
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   onOpenChange = vi.fn()
-})
-
-afterEach(() => {
-  vi.restoreAllMocks()
 })
 
 describe('ThirdPartySiteMutateDialog', () => {
@@ -273,8 +263,68 @@ describe('ThirdPartySiteMutateDialog', () => {
       expect(client.getMutationCache().getAll()[0]?.state.status).toBe('error')
     )
     expect(cacheText(client)).not.toContain('secret-create-key')
+    const failure = client.getMutationCache().getAll()[0].state.error as Error
+    expect(failure.cause).toEqual({})
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
+  it('keeps the ApiKey out of the caches when a non-Axios error is thrown', async () => {
+    vi.spyOn(api, 'post').mockRejectedValue(
+      Object.assign(new Error('boom'), {
+        config: { data: JSON.stringify({ api_key: 'secret-create-key' }) },
+      })
+    )
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(client.getMutationCache().getAll()[0]?.state.status).toBe('error')
+    )
+    expect(cacheText(client)).not.toContain('secret-create-key')
+    const failure = client.getMutationCache().getAll()[0].state.error as Error
+    expect(failure.cause).toBeUndefined()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
+  it('announces the creation and marks the site list stale', async () => {
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: createdSite },
+    })
+    const success = vi.spyOn(toast, 'success')
+    const listKey = [...THIRD_PARTY_SITES_QUERY_KEY, { p: 1 }]
+    client.setQueryData(listKey, { items: [] })
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith('Site created successfully')
+    )
+    await waitFor(() =>
+      expect(client.getQueryState(listKey)?.isInvalidated).toBe(true)
+    )
+  })
+
+  it('announces the update after saving an edit', async () => {
+    vi.spyOn(api, 'put').mockResolvedValue({
+      data: { success: true, data: row },
+    })
+    const success = vi.spyOn(toast, 'success')
+    const user = userEvent.setup()
+    render(wrap(true, row))
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith('Site updated successfully')
+    )
   })
 
   it('starts clean after closing, including after an edit', async () => {

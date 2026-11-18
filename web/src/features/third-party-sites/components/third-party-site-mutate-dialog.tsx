@@ -120,10 +120,10 @@ export function ThirdPartySiteMutateDialog(
           ? await updateThirdPartySite(props.currentRow.id, payload)
           : await createThirdPartySite(payload)
       } catch (error) {
-        // An AxiosError carries the request body (with the ApiKey) in its config.
-        if (!isAxiosError(error)) throw error
+        // The original error can carry the request body (with the ApiKey) in its
+        // config, and the MutationCache keeps the thrown error.
         throw createServerError(
-          error.response?.data,
+          isAxiosError(error) ? error.response?.data : undefined,
           getServerErrorMessage(error)
         )
       }
