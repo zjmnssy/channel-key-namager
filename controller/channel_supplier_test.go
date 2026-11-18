@@ -752,6 +752,17 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 	assert.Contains(t, response.Body.String(), "Base URL is not allowed")
 	assert.Equal(t, ownA1Before, channelState(t, fixture.ownA1.Id))
 
+	// A refusal names neither the address nor the one the server resolved it
+	// to: localhost resolves to a loopback address.
+	for _, address := range []string{`"base_url":"http://localhost"`, `"setting":"{\"proxy\":\"http://localhost\"}"`} {
+		response = channelSupplierRequest(t, http.MethodPost, "/api/channel",
+			`{"mode":"single","channel":{"type":1,"name":"named","key":"sk-named","models":"m","group":"default",`+address+`}}`, fixture.supplierA, nil, AddChannel)
+		assert.Contains(t, response.Body.String(), "is not allowed: the address is not allowed by the server's fetch policy", address)
+		for _, named := range []string{"localhost", "127.0.0.1", "::1"} {
+			assert.NotContains(t, response.Body.String(), named, address)
+		}
+	}
+
 	// A model list preview is sent as a request of the asker's channel.
 	advancedCustom := `{"advanced_routes":[{"incoming_path":"/v1/models","upstream_path":"/v1/models","converter":"none"}]}`
 	for _, preview := range []fetchModelsRequest{
@@ -836,13 +847,14 @@ func TestSupplierChannelAddressesAreChecked(t *testing.T) {
 	}
 
 	// With its port allowed, the private address of a supplier's channel is
-	// still refused.
+	// still refused, for a reason that names no address.
 	upstreamAddress, err := url.Parse(upstream.URL)
 	require.NoError(t, err)
 	fetchSetting.AllowedPorts = []string{"80", "443", upstreamAddress.Port()}
 	hits.Store(0)
 	response = channelSupplierRequest(t, http.MethodGet, "/api/channel/fetch_models/"+ownA1, "", fixture.supplierA, gin.Params{{Key: "id", Value: ownA1}}, FetchUpstreamModels)
-	assert.Contains(t, response.Body.String(), "private IP address not allowed")
+	assert.Contains(t, response.Body.String(), "outbound request blocked by the server's fetch policy")
+	assert.NotContains(t, response.Body.String(), "private IP address not allowed")
 	assert.Zero(t, hits.Load())
 }
 

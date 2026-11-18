@@ -343,11 +343,11 @@ func TestChannelHTTPClientGuardsSupplierChannels(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := channelGet("", true, server.URL)
-	assert.ErrorContains(t, err, "not allowed")
+	assert.ErrorIs(t, err, errChannelFetchBlocked)
 	// The target is an IP literal, so its check needs no DNS. Were the proxy
 	// not checked, the request would reach the server acting as the proxy.
 	_, err = channelGet(server.URL, true, "http://1.1.1.1/")
-	assert.ErrorContains(t, err, "not allowed")
+	assert.ErrorIs(t, err, errChannelFetchBlocked)
 	assert.Zero(t, hits.Load())
 
 	response, err := channelGet("", false, server.URL)
@@ -388,7 +388,7 @@ func TestChannelHTTPClientGuardsSupplierChannels(t *testing.T) {
 		require.NoError(t, err, scheme)
 		fetchSetting.AllowPrivateIp = false
 		_, err = client.Get("http://1.1.1.1/")
-		assert.ErrorContains(t, err, "private IP address not allowed", scheme)
+		assert.ErrorIs(t, err, errChannelFetchBlocked, scheme)
 	}
 	assert.Zero(t, accepted.Load())
 
@@ -445,8 +445,8 @@ func TestChannelHTTPClientChecksTheTargetAProxyIsAskedFor(t *testing.T) {
 
 	// An http request through an HTTP proxy names its target by the Host
 	// header, which a header override sets; the URL alone names it otherwise.
-	assert.ErrorContains(t, get("http://1.1.1.1/", "10.0.0.1"), "ip not in whitelist")
-	assert.ErrorContains(t, get("http://10.0.0.1/", ""), "ip not in whitelist")
+	assert.ErrorIs(t, get("http://1.1.1.1/", "10.0.0.1"), errChannelFetchBlocked)
+	assert.ErrorIs(t, get("http://10.0.0.1/", ""), errChannelFetchBlocked)
 	assert.Zero(t, accepted.Load())
 	_ = get("http://1.1.1.1/", "127.0.0.1")
 	assert.Positive(t, accepted.Load())
@@ -479,10 +479,50 @@ func TestChannelHTTPClientClosesTheBodyOfARefusedRequest(t *testing.T) {
 			require.NoError(t, err)
 			request.Host = test.host
 			_, err = client.Do(request)
-			assert.ErrorContains(t, err, "not allowed")
+			assert.ErrorIs(t, err, errChannelFetchBlocked)
 			assert.True(t, body.closed)
 		})
 	}
+}
+
+// A supplier channel's request fetch_setting refuses fails without the
+// reason, which can name an address the server resolved; the other protected
+// fetches keep reporting it.
+func TestChannelHTTPClientRefusalsNameNoAddress(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	t.Cleanup(ResetProxyClientCache)
+	// localhost resolves to a loopback address.
+	_, err := channelGet("", true, "http://localhost/")
+	var refusal *url.Error
+	require.ErrorAs(t, err, &refusal)
+	assert.Equal(t, errChannelFetchBlocked, refusal.Err)
+	for _, address := range []string{"127.0.0.1", "::1"} {
+		assert.NotContains(t, err.Error(), address)
+	}
+	InitHttpClient()
+	_, err = GetSSRFProtectedHTTPClient().Get("http://localhost/")
+	assert.ErrorContains(t, err, "private IP address not allowed: localhost resolves to")
+
+	// So does a redirect to an address fetch_setting refuses.
+	fetchSetting := system_setting.GetFetchSetting()
+	fetchSetting.AllowPrivateIp, fetchSetting.AllowedPorts = true, nil
+	fetchSetting.IpFilterMode, fetchSetting.IpList = true, []string{"127.0.0.1"}
+	server := httptest.NewServer(http.RedirectHandler("http://10.0.0.1/", http.StatusFound))
+	t.Cleanup(server.Close)
+	_, err = channelGet("", true, server.URL)
+	require.ErrorAs(t, err, &refusal)
+	assert.Equal(t, errChannelFetchBlocked, refusal.Err)
+
+	// A connection that fails to an address fetch_setting allows keeps its
+	// own error.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closedAddress := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	_, err = channelGet("", true, "http://"+closedAddress+"/")
+	var dialError *net.OpError
+	assert.ErrorAs(t, err, &dialError)
+	assert.NotErrorIs(t, err, errChannelFetchBlocked)
 }
 
 func TestProxyClientCacheResetsCoverSupplierChannelClients(t *testing.T) {

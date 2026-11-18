@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
@@ -1762,20 +1763,25 @@ func unsavedChannelSetting(channel *model.Channel) dto.ChannelSettings {
 // URL or the proxy a channel supplier submits for a channel, whichever the
 // caller asks to check, is an address fetch_setting refuses. This is the
 // first line of defense; the requests of a supplier channel check the
-// addresses they reach again.
+// addresses they reach again. The answer gives a fixed reason and the server
+// log the actual one, which can name an address the server resolved: a
+// supplier could otherwise map internal names through the server's resolver.
 func rejectSupplierChannelAddresses(c *gin.Context, channel *model.Channel, checkBaseURL, checkProxy bool) bool {
+	refusal := map[string]any{"error": "the address is not allowed by the server's fetch policy"}
 	if checkBaseURL && channel.BaseURL != nil && strings.TrimSpace(*channel.BaseURL) != "" {
 		// A special base names official hosts, not an address.
 		if _, special := constant.ChannelSpecialBases[*channel.BaseURL]; !special {
 			if err := service.ValidateSSRFProtectedFetchURL(*channel.BaseURL); err != nil {
-				common.ApiErrorT(c, "Base URL is not allowed: {{error}}", map[string]any{"error": err.Error()})
+				logger.LogWarn(c, common.LogText("channel supplier address refused: user_id=%d field=%s error=%s", c.GetInt("id"), "base_url", err.Error()))
+				common.ApiErrorT(c, "Base URL is not allowed: {{error}}", refusal)
 				return true
 			}
 		}
 	}
 	if checkProxy {
 		if err := service.ValidateChannelProxyAddress(unsavedChannelSetting(channel).Proxy); err != nil {
-			common.ApiErrorT(c, "Proxy is not allowed: {{error}}", map[string]any{"error": err.Error()})
+			logger.LogWarn(c, common.LogText("channel supplier address refused: user_id=%d field=%s error=%s", c.GetInt("id"), "proxy", err.Error()))
+			common.ApiErrorT(c, "Proxy is not allowed: {{error}}", refusal)
 			return true
 		}
 	}

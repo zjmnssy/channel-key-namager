@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
@@ -24,13 +26,28 @@ var channelProtectedClients = proxyHTTPClientCache{
 	aliases: make(map[string]string),
 }
 
+// errChannelFetchBlocked is the error of a supplier channel's request when
+// fetch_setting refuses an address the request would reach.
+var errChannelFetchBlocked = errors.New("outbound request blocked by the server's fetch policy")
+
+// channelFetchBlocked logs reason, why fetch_setting refuses an address a
+// supplier channel's request would reach, and returns errChannelFetchBlocked.
+// The reason can name an address the server resolved, so the error keeps it
+// from a channel supplier, who could otherwise map internal names through the
+// server's resolver.
+func channelFetchBlocked(ctx context.Context, reason error) error {
+	logger.LogWarn(ctx, common.LogText("supplier channel request blocked: %s", reason.Error()))
+	return errChannelFetchBlocked
+}
+
 // ChannelHTTPClient returns the client for the requests sent for a channel.
 // A channel no channel supplier created, and every channel while
 // fetch_setting turns SSRF protection off, gets the client of
 // GetHttpClientWithProxySettings. A supplier channel gets a client with the
 // same proxy and transport policy that checks against fetch_setting the
 // target of every request and redirect, the channel proxy, and each address
-// it dials.
+// it dials. A refusal fails with errChannelFetchBlocked, the client and its
+// requests alike.
 func ChannelHTTPClient(rawProxyURL string, settings dto.ChannelSettings, supplierChannel bool) (*http.Client, error) {
 	if !supplierChannel || !system_setting.GetFetchSetting().EnableSSRFProtection {
 		return GetHttpClientWithProxySettings(rawProxyURL, settings)
@@ -38,7 +55,7 @@ func ChannelHTTPClient(rawProxyURL string, settings dto.ChannelSettings, supplie
 	// Checked on every call: fetch_setting may have changed since the cached
 	// client was built.
 	if err := ValidateChannelProxyAddress(rawProxyURL); err != nil {
-		return nil, err
+		return nil, channelFetchBlocked(context.Background(), err)
 	}
 	policy := NormalizeHTTPTransportPolicy(settings)
 	trimmedProxyURL := strings.TrimSpace(rawProxyURL)
@@ -85,11 +102,20 @@ func ValidateChannelProxyAddress(rawProxyURL string) error {
 // newChannelProtectedHTTPClient builds the client of a supplier channel with
 // the proxy proxyURL, nil for a channel without one.
 func newChannelProtectedHTTPClient(policy HTTPTransportPolicy, proxyURL *url.URL) (*http.Client, error) {
-	dialer := &protectedFetchDialer{
-		resolver:      net.DefaultResolver,
-		dialContext:   (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	netDialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := &channelFetchDialer{checked: protectedFetchDialer{
+		resolver: net.DefaultResolver,
+		// A failed connection is marked, so DialContext tells it apart from
+		// a refusal.
+		dialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := netDialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, dialFailure{err}
+			}
+			return conn, nil
+		},
 		getProtection: currentFetchProtection,
-	}
+	}}
 	// newTransport sets a relay transport up with the channel's TLS setting,
 	// the proxy of proxyFunc, and dialContext when it is not nil.
 	newTransport := func(proxyFunc func(*http.Request) (*url.URL, error), dialContext func(context.Context, string, string) (net.Conn, error)) func() *http.Transport {
@@ -130,8 +156,21 @@ func newChannelProtectedHTTPClient(policy HTTPTransportPolicy, proxyURL *url.URL
 		return nil, fmt.Errorf("unsupported proxy scheme")
 	}
 	client := newRelayHTTPClient(roundTripper)
-	client.CheckRedirect = checkProtectedFetchRedirect
+	client.CheckRedirect = checkChannelRedirect
 	return client, nil
+}
+
+// checkChannelRedirect checks a redirect of a supplier channel's request as
+// checkProtectedFetchRedirect does, a refused target failing with
+// errChannelFetchBlocked.
+func checkChannelRedirect(req *http.Request, via []*http.Request) error {
+	if err := ValidateSSRFProtectedFetchURL(req.URL.String()); err != nil {
+		return channelFetchBlocked(req.Context(), err)
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	return nil
 }
 
 // channelProtectedRoundTripper sends the requests of a supplier channel after
@@ -160,7 +199,7 @@ func (t *channelProtectedRoundTripper) RoundTrip(req *http.Request) (*http.Respo
 			if req.Body != nil {
 				_ = req.Body.Close()
 			}
-			return nil, err
+			return nil, channelFetchBlocked(req.Context(), err)
 		}
 	}
 	if t.viaEnvironmentProxy != nil {
@@ -179,9 +218,32 @@ func (t *channelProtectedRoundTripper) CloseIdleConnections() {
 	}
 }
 
-// Dial makes protectedFetchDialer a proxy.Dialer, through which the SOCKS
+// channelFetchDialer dials for a supplier channel through the checks of
+// protectedFetchDialer. An address fetch_setting refuses fails with
+// errChannelFetchBlocked; a connection that fails keeps its own error.
+type channelFetchDialer struct {
+	checked protectedFetchDialer
+}
+
+// dialFailure is the error of a connection attempt of channelFetchDialer.
+type dialFailure struct{ error }
+
+func (d *channelFetchDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := d.checked.DialContext(ctx, network, addr)
+	var failure dialFailure
+	switch {
+	case err == nil:
+		return conn, nil
+	case errors.As(err, &failure):
+		return nil, failure.error
+	default:
+		return nil, channelFetchBlocked(ctx, err)
+	}
+}
+
+// Dial makes channelFetchDialer a proxy.Dialer, through which the SOCKS
 // dialer of a channel proxy reaches the proxy; that dialer calls DialContext
 // instead when it can.
-func (d *protectedFetchDialer) Dial(network, addr string) (net.Conn, error) {
+func (d *channelFetchDialer) Dial(network, addr string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, addr)
 }
