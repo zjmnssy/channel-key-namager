@@ -238,7 +238,7 @@
     "Access token expiry must be at least one hour from now.": "存取令牌的到期時間必須至少在一小時之後。",
     "Access token name must be 1 to 64 characters.": "存取令牌名稱必須為 1 到 64 個字元。",
     "access token not found": "找不到存取令牌",
-    "Access token of the remote administrator account, not an sk- API key": "遠端管理員帳號的存取權杖，不是 sk- 開頭的呼叫金鑰",
+    "Access token of the remote administrator account, not an sk- API key": "遠端管理員帳號的存取令牌，不是 sk- 開頭的呼叫金鑰",
     "Access token revoked": "存取權杖已撤銷",
     "Access tokens": "存取令牌",
     "Access tokens cannot use this feature": "存取令牌不能使用此功能",
