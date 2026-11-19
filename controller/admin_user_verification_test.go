@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,6 +82,17 @@ func TestAdminUserRiskOperationsRequireProofBeforeMutation(t *testing.T) {
 		{
 			name: "manage promote", method: http.MethodPost, path: "/api/user/manage", handler: ManageUser,
 			body: func(target *model.User) string { return fmt.Sprintf(`{"id":%d,"action":"promote"}`, target.Id) },
+			unchanged: func(t *testing.T, target *model.User) {
+				stored, err := model.GetUserById(target.Id, false)
+				require.NoError(t, err)
+				assert.Equal(t, common.RoleCommonUser, stored.Role)
+			},
+		},
+		{
+			name: "manage set channel supplier", method: http.MethodPost, path: "/api/user/manage", handler: ManageUser,
+			body: func(target *model.User) string {
+				return fmt.Sprintf(`{"id":%d,"action":"set_channel_supplier","payable_discount":0.85}`, target.Id)
+			},
 			unchanged: func(t *testing.T, target *model.User) {
 				stored, err := model.GetUserById(target.Id, false)
 				require.NoError(t, err)
@@ -217,7 +232,7 @@ func TestCreateUserRejectsNonStandardRole(t *testing.T) {
 		role         int
 		operatorRole int
 	}{
-		{"between common and admin", 5, common.RoleAdminUser},
+		{"between common and admin", 7, common.RoleAdminUser},
 		{"negative", -1, common.RoleAdminUser},
 		{"between admin and root", 99, common.RoleRootUser},
 	} {
@@ -293,6 +308,392 @@ func TestAdminUserProofIsBoundToTargetAndActionAndConsumedOnce(t *testing.T) {
 	assert.Equal(t, "SECURITY_PROOF_CONSUMED", result.Code)
 }
 
+// TestChannelSupplierRoleManagement pins who may change whether a user is a
+// channel supplier: only the super administrator, with a step-up proof, and the
+// change ends every session of the target. A regular administrator cannot
+// change it in any way, not even holding a valid proof.
+func TestChannelSupplierRoleManagement(t *testing.T) {
+	_, identity, target := setupAdminUserTest(t)
+	// Role changes clear the user's own permission rules, reload the policy and
+	// add an authz sync task for the other nodes.
+	require.NoError(t, model.DB.AutoMigrate(&model.CasbinRule{}, &model.SystemTask{}))
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = false
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	require.NoError(t, authz.Init(model.DB))
+	resetTarget := func(t *testing.T, role int) {
+		t.Helper()
+		require.NoError(t, model.DB.Model(target).Updates(map[string]any{"role": role, "auth_version": 1}).Error)
+	}
+	manage := func(t *testing.T, action, proof string, operatorRole int) securityEnrollmentResponse {
+		t.Helper()
+		body := fmt.Sprintf(`{"id":%d,"action":%q}`, target.Id, action)
+		// Becoming a supplier carries the payable discount; see
+		// TestChannelSupplierPayableDiscount.
+		if action == "set_channel_supplier" {
+			body = fmt.Sprintf(`{"id":%d,"action":%q,"payable_discount":0.85}`, target.Id, action)
+		}
+		return decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/manage", body, proof, identity, operatorRole, nil, ManageUser))
+	}
+	manageProof := func(t *testing.T, action string) string {
+		t.Helper()
+		context := fmt.Sprintf(`{"user_id":%d,"action":%q}`, target.Id, action)
+		return issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(context)}, service.VerificationMethodPassword)
+	}
+
+	for _, test := range []struct {
+		name                     string
+		operatorRole, targetRole int
+		action, message          string
+	}{
+		{"administrator sets a supplier", common.RoleAdminUser, common.RoleCommonUser, "set_channel_supplier", "Only the super administrator can change channel suppliers"},
+		{"administrator unsets a supplier", common.RoleAdminUser, common.RoleChannelSupplierUser, "unset_channel_supplier", "Only the super administrator can change channel suppliers"},
+		{"administrator demotes a supplier", common.RoleAdminUser, common.RoleChannelSupplierUser, "demote", "This user is not an administrator"},
+		{"super administrator demotes a supplier", common.RoleRootUser, common.RoleChannelSupplierUser, "demote", "This user is not an administrator"},
+		{"super administrator sets an administrator", common.RoleRootUser, common.RoleAdminUser, "set_channel_supplier", "Only common users can become channel suppliers"},
+		{"super administrator unsets a common user", common.RoleRootUser, common.RoleCommonUser, "unset_channel_supplier", "This user is not a channel supplier"},
+		{"super administrator unsets an administrator", common.RoleRootUser, common.RoleAdminUser, "unset_channel_supplier", "This user is not a channel supplier"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetTarget(t, test.targetRole)
+			// The checks run before the proof is consumed: even a valid proof
+			// for this target and action changes nothing.
+			result := manage(t, test.action, manageProof(t, test.action), test.operatorRole)
+			assert.False(t, result.Success)
+			assert.Equal(t, test.message, result.MessageKey)
+			stored, err := model.GetUserById(target.Id, false)
+			require.NoError(t, err)
+			assert.Equal(t, test.targetRole, stored.Role)
+			assert.EqualValues(t, 1, stored.AuthVersion)
+		})
+	}
+
+	t.Run("super administrator sets and unsets a supplier", func(t *testing.T) {
+		resetTarget(t, common.RoleCommonUser)
+		// The target is in the Redis user cache, which a change must publish.
+		server := miniredis.RunT(t)
+		previousRDB, previousRedis := common.RDB, common.RedisEnabled
+		common.RDB = redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+		common.RedisEnabled = true
+		t.Cleanup(func() {
+			_ = common.RDB.Close()
+			common.RDB, common.RedisEnabled = previousRDB, previousRedis
+		})
+		_, err := model.GetUserCache(target.Id)
+		require.NoError(t, err)
+		var cacheKey string
+		for _, key := range server.Keys() {
+			if server.HGet(key, "Id") == strconv.Itoa(target.Id) {
+				cacheKey = key
+				break
+			}
+		}
+		require.NotEmpty(t, cacheKey)
+		newTargetSession := func(t *testing.T) service.AuthIdentity {
+			t.Helper()
+			bundle, err := service.CreateLoginSession(target.Id, "password", "127.0.0.1", "managed-session")
+			require.NoError(t, err)
+			session, err := service.ParseAccessToken(bundle.AccessToken)
+			require.NoError(t, err)
+			return session
+		}
+		// A change takes effect at once: the auth version advances, the user
+		// cache holds the new role and version before anything reads the user
+		// again, the target's sessions are revoked, the other nodes are told to
+		// reload the policy, and the audit names the action and the
+		// verification method.
+		assertRoleChanged := func(t *testing.T, session service.AuthIdentity, action string, role int, authVersion int64, reason string, authzSyncTasks int64) {
+			t.Helper()
+			assert.Equal(t, strconv.Itoa(role), server.HGet(cacheKey, "Role"))
+			assert.Equal(t, strconv.FormatInt(authVersion, 10), server.HGet(cacheKey, "AuthVersion"))
+			stored, err := model.GetUserById(target.Id, false)
+			require.NoError(t, err)
+			assert.Equal(t, role, stored.Role)
+			assert.EqualValues(t, authVersion, stored.AuthVersion)
+			_, _, err = service.ValidateLoginSession(session)
+			assert.ErrorIs(t, err, service.ErrLoginSessionRevoked)
+			var revoked model.UserSession
+			require.NoError(t, model.DB.First(&revoked, "sid = ?", session.SessionID).Error)
+			assert.Equal(t, reason, revoked.RevokedReason)
+			var tasks int64
+			require.NoError(t, model.DB.Model(&model.SystemTask{}).Where("type = ?", model.SyncTaskType(model.SyncTopicAuthz)).Count(&tasks).Error)
+			assert.Equal(t, authzSyncTasks, tasks)
+			var audit model.AuditLog
+			require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Last(&audit).Error)
+			require.NotNil(t, audit.Other.Op)
+			params, err := common.Marshal(audit.Other.Op.Params)
+			require.NoError(t, err)
+			discount := ""
+			if action == "set_channel_supplier" {
+				discount = `"payable_discount":0.85,`
+			}
+			assert.JSONEq(t, fmt.Sprintf(`{"action":%q,"id":%d,"username":"managed-user",%s"target_user_id":%d,"verification_method":"password"}`, action, target.Id, discount, target.Id), string(params))
+		}
+
+		session := newTargetSession(t)
+		// A permission rule left on the account must not outlive the change:
+		// a supplier's permissions come from its role alone.
+		require.NoError(t, model.DB.Create(&model.CasbinRule{Ptype: "p", V0: authz.UserSubject(target.Id), V1: authz.ChannelSecretView.Resource, V2: authz.ChannelSecretView.Action, V3: authz.EffectAllow}).Error)
+		require.NoError(t, authz.ReloadPolicy())
+		require.True(t, authz.Can(target.Id, common.RoleChannelSupplierUser, authz.ChannelSecretView))
+		result := manage(t, "set_channel_supplier", manageProof(t, "set_channel_supplier"), common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		assertRoleChanged(t, session, "set_channel_supplier", common.RoleChannelSupplierUser, 2, "admin_set_channel_supplier", 1)
+		assert.False(t, authz.Can(target.Id, common.RoleChannelSupplierUser, authz.ChannelSecretView))
+
+		result = manage(t, "unset_channel_supplier", "", common.RoleRootUser)
+		assert.Equal(t, "SECURITY_PROOF_REQUIRED", result.Code)
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		assert.Equal(t, common.RoleChannelSupplierUser, stored.Role)
+
+		session = newTargetSession(t)
+		result = manage(t, "unset_channel_supplier", manageProof(t, "unset_channel_supplier"), common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		assertRoleChanged(t, session, "unset_channel_supplier", common.RoleCommonUser, 3, "admin_unset_channel_supplier", 2)
+	})
+
+	// An administrator is refused before the proof is consumed: the same
+	// verified identity can still use it as the super administrator.
+	t.Run("a refused administrator leaves the proof unused", func(t *testing.T) {
+		resetTarget(t, common.RoleCommonUser)
+		proof := manageProof(t, "set_channel_supplier")
+		result := manage(t, "set_channel_supplier", proof, common.RoleAdminUser)
+		assert.False(t, result.Success)
+		assert.Equal(t, "Only the super administrator can change channel suppliers", result.MessageKey)
+
+		result = manage(t, "set_channel_supplier", proof, common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		assert.Equal(t, common.RoleChannelSupplierUser, stored.Role)
+	})
+
+	t.Run("super administrator promotes a supplier", func(t *testing.T) {
+		resetTarget(t, common.RoleChannelSupplierUser)
+		result := manage(t, "promote", manageProof(t, "promote"), common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		assert.Equal(t, common.RoleAdminUser, stored.Role)
+	})
+
+	t.Run("administrator cannot edit the role", func(t *testing.T) {
+		resetTarget(t, common.RoleCommonUser)
+		body := fmt.Sprintf(`{"id":%d,"username":"managed-user","role":%d}`, target.Id, common.RoleChannelSupplierUser)
+		result := decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPut, "/api/user/", body, "", identity, common.RoleAdminUser, nil, UpdateUser))
+		assert.False(t, result.Success)
+		assert.Equal(t, "Invalid parameters", result.MessageKey)
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		assert.Equal(t, common.RoleCommonUser, stored.Role)
+	})
+
+	t.Run("only the super administrator creates a supplier", func(t *testing.T) {
+		body := `{"username":"new-supplier","password":"supplier-password-1","role":5,"payable_discount":0.85}`
+		create := service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(`{"role":5}`)}
+		proof := issueSecurityEnrollmentProof(t, identity, create, service.VerificationMethodPassword)
+		result := decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, proof, identity, common.RoleAdminUser, nil, CreateUser))
+		assert.False(t, result.Success)
+		assert.Equal(t, "Only the super administrator can create channel suppliers", result.MessageKey)
+		result = decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, "", identity, common.RoleRootUser, nil, CreateUser))
+		assert.Equal(t, "SECURITY_PROOF_REQUIRED", result.Code)
+		var count int64
+		require.NoError(t, model.DB.Model(&model.User{}).Where("username = ?", "new-supplier").Count(&count).Error)
+		assert.Zero(t, count)
+
+		proof = issueSecurityEnrollmentProof(t, identity, create, service.VerificationMethodPassword)
+		result = decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, proof, identity, common.RoleRootUser, nil, CreateUser))
+		require.True(t, result.Success, result.Message)
+		var created model.User
+		require.NoError(t, model.DB.Where("username = ?", "new-supplier").First(&created).Error)
+		assert.Equal(t, common.RoleChannelSupplierUser, created.Role)
+		var audit model.AuditLog
+		require.NoError(t, model.LOG_DB.Where("action = ?", "user.create").Last(&audit).Error)
+		require.NotNil(t, audit.Other.Op)
+		params, err := common.Marshal(audit.Other.Op.Params)
+		require.NoError(t, err)
+		assert.JSONEq(t, fmt.Sprintf(`{"role":5,"payable_discount":0.85,"username":"new-supplier","target_user_id":%d,"verification_method":"password"}`, created.Id), string(params))
+	})
+}
+
+// TestChannelSupplierPayableDiscount pins the payable discount that comes with
+// the channel supplier role. Creating a supplier or setting a user as one needs
+// a discount greater than 0 and at most 1, with at most 4 decimal places,
+// checked before the step-up proof is used. Only the super administrator
+// changes it afterwards, and it stays when the user stops being a supplier.
+func TestChannelSupplierPayableDiscount(t *testing.T) {
+	_, identity, target := setupAdminUserTest(t)
+	// Role changes and the super administrator's edits clear the user's own
+	// permission rules and reload the policy.
+	require.NoError(t, model.DB.AutoMigrate(&model.CasbinRule{}, &model.SystemTask{}))
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = false
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	require.NoError(t, authz.Init(model.DB))
+
+	const discountMessage = "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places"
+	invalidDiscounts := []struct{ name, field string }{
+		{"missing", ""},
+		{"null", `,"payable_discount":null`},
+		{"zero", `,"payable_discount":0`},
+		{"negative", `,"payable_discount":-0.5`},
+		{"above one", `,"payable_discount":1.0001`},
+		{"five decimal places", `,"payable_discount":0.12345`},
+	}
+	setTarget := func(t *testing.T, role int, discount *float64) {
+		t.Helper()
+		var value any
+		if discount != nil {
+			value = *discount
+		}
+		require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", target.Id).Updates(map[string]any{"role": role, "payable_discount": value}).Error)
+	}
+	storedUser := func(t *testing.T) *model.User {
+		t.Helper()
+		stored, err := model.GetUserById(target.Id, false)
+		require.NoError(t, err)
+		return stored
+	}
+	manage := func(t *testing.T, action, field, proof string) securityEnrollmentResponse {
+		t.Helper()
+		body := fmt.Sprintf(`{"id":%d,"action":%q%s}`, target.Id, action, field)
+		return decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/manage", body, proof, identity, common.RoleRootUser, nil, ManageUser))
+	}
+	manageProof := func(t *testing.T, action string) string {
+		t.Helper()
+		context := fmt.Sprintf(`{"user_id":%d,"action":%q}`, target.Id, action)
+		return issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(context)}, service.VerificationMethodPassword)
+	}
+
+	t.Run("creating a supplier needs a valid discount, checked before the proof is used", func(t *testing.T) {
+		create := service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(`{"role":5}`)}
+		proof := issueSecurityEnrollmentProof(t, identity, create, service.VerificationMethodPassword)
+		for _, test := range invalidDiscounts {
+			body := `{"username":"discount-supplier","password":"supplier-password-1","role":5` + test.field + `}`
+			result := decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, proof, identity, common.RoleRootUser, nil, CreateUser))
+			assert.False(t, result.Success, test.name)
+			assert.Equal(t, discountMessage, result.MessageKey, test.name)
+		}
+		var count int64
+		require.NoError(t, model.DB.Model(&model.User{}).Where("username = ?", "discount-supplier").Count(&count).Error)
+		assert.Zero(t, count)
+
+		// The same proof still works, and the stored value drops the
+		// floating-point noise of the decimal input.
+		body := `{"username":"discount-supplier","password":"supplier-password-1","role":5,"payable_discount":0.30000000000000004}`
+		result := decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, proof, identity, common.RoleRootUser, nil, CreateUser))
+		require.True(t, result.Success, result.Message)
+		var created model.User
+		require.NoError(t, model.DB.Where("username = ?", "discount-supplier").First(&created).Error)
+		require.NotNil(t, created.PayableDiscount)
+		assert.Equal(t, 0.3, *created.PayableDiscount)
+	})
+
+	t.Run("a user created with another role gets no discount", func(t *testing.T) {
+		body := `{"username":"plain-member","password":"member-password-1","role":1,"payable_discount":0.5}`
+		result := decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPost, "/api/user/", body, "", identity, common.RoleAdminUser, nil, CreateUser))
+		require.True(t, result.Success, result.Message)
+		var created model.User
+		require.NoError(t, model.DB.Where("username = ?", "plain-member").First(&created).Error)
+		assert.Nil(t, created.PayableDiscount)
+	})
+
+	t.Run("setting a supplier needs a valid discount, checked before the proof is used", func(t *testing.T) {
+		setTarget(t, common.RoleCommonUser, nil)
+		proof := manageProof(t, "set_channel_supplier")
+		for _, test := range invalidDiscounts {
+			result := manage(t, "set_channel_supplier", test.field, proof)
+			assert.False(t, result.Success, test.name)
+			assert.Equal(t, discountMessage, result.MessageKey, test.name)
+			stored := storedUser(t)
+			assert.Equal(t, common.RoleCommonUser, stored.Role, test.name)
+			assert.Nil(t, stored.PayableDiscount, test.name)
+		}
+		result := manage(t, "set_channel_supplier", `,"payable_discount":0.85`, proof)
+		require.True(t, result.Success, result.Message)
+		stored := storedUser(t)
+		assert.Equal(t, common.RoleChannelSupplierUser, stored.Role)
+		require.NotNil(t, stored.PayableDiscount)
+		assert.Equal(t, 0.85, *stored.PayableDiscount)
+	})
+
+	t.Run("the discount stays when the user stops being a supplier", func(t *testing.T) {
+		discount := 0.85
+		for _, test := range []struct {
+			action string
+			role   int
+		}{
+			{"unset_channel_supplier", common.RoleCommonUser},
+			{"promote", common.RoleAdminUser},
+		} {
+			setTarget(t, common.RoleChannelSupplierUser, &discount)
+			result := manage(t, test.action, "", manageProof(t, test.action))
+			require.True(t, result.Success, result.Message)
+			stored := storedUser(t)
+			assert.Equal(t, test.role, stored.Role, test.action)
+			require.NotNil(t, stored.PayableDiscount, test.action)
+			assert.Equal(t, 0.85, *stored.PayableDiscount, test.action)
+		}
+	})
+
+	t.Run("only the super administrator changes the discount of a supplier", func(t *testing.T) {
+		discount := 0.85
+		update := func(t *testing.T, field string, operatorRole int) securityEnrollmentResponse {
+			t.Helper()
+			body := fmt.Sprintf(`{"id":%d,"username":"managed-user","display_name":"Managed","group":"default"%s}`, target.Id, field)
+			return decodeSecurityEnrollmentResponse(t, adminUserRequest(http.MethodPut, "/api/user/", body, "", identity, operatorRole, nil, UpdateUser))
+		}
+		for _, test := range []struct {
+			name, field, message     string
+			operatorRole, targetRole int
+		}{
+			{"administrator", `,"payable_discount":0.7`, "Only the super administrator can change channel suppliers", common.RoleAdminUser, common.RoleChannelSupplierUser},
+			{"common user target", `,"payable_discount":0.7`, "This user is not a channel supplier", common.RoleRootUser, common.RoleCommonUser},
+			{"invalid value", `,"payable_discount":1.5`, discountMessage, common.RoleRootUser, common.RoleChannelSupplierUser},
+		} {
+			setTarget(t, test.targetRole, &discount)
+			result := update(t, test.field, test.operatorRole)
+			assert.False(t, result.Success, test.name)
+			assert.Equal(t, test.message, result.MessageKey, test.name)
+			stored := storedUser(t)
+			require.NotNil(t, stored.PayableDiscount, test.name)
+			assert.Equal(t, 0.85, *stored.PayableDiscount, test.name)
+		}
+
+		// An edit that leaves the discount out keeps it: an administrator edits
+		// a supplier the way it edits any common user.
+		setTarget(t, common.RoleChannelSupplierUser, &discount)
+		result := update(t, "", common.RoleAdminUser)
+		require.True(t, result.Success, result.Message)
+		stored := storedUser(t)
+		require.NotNil(t, stored.PayableDiscount)
+		assert.Equal(t, 0.85, *stored.PayableDiscount)
+
+		// The super administrator changes it without a step-up proof, and the
+		// audit records the new value only when it changes.
+		latestUpdateAudit := func(t *testing.T) string {
+			t.Helper()
+			var audit model.AuditLog
+			require.NoError(t, model.LOG_DB.Where("action = ?", "user.update").Last(&audit).Error)
+			require.NotNil(t, audit.Other.Op)
+			params, err := common.Marshal(audit.Other.Op.Params)
+			require.NoError(t, err)
+			return string(params)
+		}
+		result = update(t, `,"payable_discount":0.7`, common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		stored = storedUser(t)
+		require.NotNil(t, stored.PayableDiscount)
+		assert.Equal(t, 0.7, *stored.PayableDiscount)
+		assert.JSONEq(t, fmt.Sprintf(`{"id":%d,"username":"managed-user","payable_discount":0.7,"target_user_id":%d}`, target.Id, target.Id), latestUpdateAudit(t))
+
+		result = update(t, `,"payable_discount":0.7`, common.RoleRootUser)
+		require.True(t, result.Success, result.Message)
+		assert.JSONEq(t, fmt.Sprintf(`{"id":%d,"username":"managed-user","target_user_id":%d}`, target.Id, target.Id), latestUpdateAudit(t))
+	})
+}
+
 func TestAdminUserBindingProofDistinguishesBuiltInAndCustomBindings(t *testing.T) {
 	_, identity, target := setupAdminUserTest(t)
 	require.NoError(t, model.DB.Create(&model.UserOAuthBinding{UserId: target.Id, ProviderId: 7, ProviderUserId: "provider-user"}).Error)
@@ -353,7 +754,9 @@ func TestAdminUserVerificationPolicy(t *testing.T) {
 	})
 	t.Run("a user:write token completes the deletion on its own proof", func(t *testing.T) {
 		operator, _, target := setupAdminUserTest(t)
-		require.NoError(t, model.DB.AutoMigrate(&model.ExternalIdentityClaim{}, &model.Token{}))
+		// A hard deletion also writes these tables: the user's identity claims
+		// and tokens, and the creator of the user's channels.
+		require.NoError(t, model.DB.AutoMigrate(&model.ExternalIdentityClaim{}, &model.Token{}, &model.Channel{}))
 		raw, _ := createScopedAccessToken(t, operator.Id, 0, "user:write")
 		router := newAccessTokenTestRouter()
 		response := accessTokenRequest(router, http.MethodPost, "/api/verify", raw, "", fmt.Sprintf(`{"scope":"admin.user.delete","method":"password","password":"enrollment-password","context":{"user_id":%d}}`, target.Id))

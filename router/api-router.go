@@ -327,6 +327,14 @@ func SetApiRouter(router *gin.Engine) {
 			redemptionRoute.DELETE("/invalid", controller.DeleteInvalidRedemption)
 			redemptionRoute.DELETE("/:id", controller.DeleteRedemption)
 		}
+		thirdPartySiteRoute := apiRouter.Group("/third_party_site")
+		thirdPartySiteRoute.Use(middleware.AdminAuth())
+		{
+			thirdPartySiteRoute.GET("/", controller.GetThirdPartySites)
+			thirdPartySiteRoute.POST("/", controller.CreateThirdPartySite)
+			thirdPartySiteRoute.PUT("/:id", controller.UpdateThirdPartySite)
+			thirdPartySiteRoute.DELETE("/:id", controller.DeleteThirdPartySite)
+		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
 		logRoute := apiRouter.Group("/log")
@@ -369,19 +377,19 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
 		}
+		// The channel page reads group names and prefill groups, so channel
+		// suppliers may read them; changing prefill groups stays with administrators.
 		groupRoute := apiRouter.Group("/group")
-		groupRoute.Use(middleware.AdminAuth())
 		{
-			groupRoute.GET("/", controller.GetGroups)
+			groupRoute.GET("/", middleware.ChannelSupplierAuth(), controller.GetGroups)
 		}
 
 		prefillGroupRoute := apiRouter.Group("/prefill_group")
-		prefillGroupRoute.Use(middleware.AdminAuth())
 		{
-			prefillGroupRoute.GET("/", controller.GetPrefillGroups)
-			prefillGroupRoute.POST("/", controller.CreatePrefillGroup)
-			prefillGroupRoute.PUT("/", controller.UpdatePrefillGroup)
-			prefillGroupRoute.DELETE("/:id", controller.DeletePrefillGroup)
+			prefillGroupRoute.GET("/", middleware.ChannelSupplierAuth(), controller.GetPrefillGroups)
+			prefillGroupRoute.POST("/", middleware.AdminAuth(), controller.CreatePrefillGroup)
+			prefillGroupRoute.PUT("/", middleware.AdminAuth(), controller.UpdatePrefillGroup)
+			prefillGroupRoute.DELETE("/:id", middleware.AdminAuth(), controller.DeletePrefillGroup)
 		}
 
 		mjRoute := apiRouter.Group("/mj")

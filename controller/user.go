@@ -680,10 +680,30 @@ func UpdateUser(c *gin.Context) {
 		common.ApiErrorT(c, "No permission to update users of same or higher permission level")
 		return
 	}
+	// Only the super administrator sets a supplier's payable discount; an edit
+	// that leaves it out keeps the stored one.
+	payableDiscountChanged := false
+	if updatedUser.PayableDiscount != nil {
+		if myRole != common.RoleRootUser {
+			common.ApiErrorT(c, "Only the super administrator can change channel suppliers")
+			return
+		}
+		if originUser.Role != common.RoleChannelSupplierUser {
+			common.ApiErrorT(c, "This user is not a channel supplier")
+			return
+		}
+		if updatedUser.PayableDiscount = requirePayableDiscount(c, updatedUser.PayableDiscount); updatedUser.PayableDiscount == nil {
+			return
+		}
+		payableDiscountChanged = originUser.PayableDiscount == nil || *originUser.PayableDiscount != *updatedUser.PayableDiscount
+	}
 	updatePassword := updatedUser.Password != ""
 	auditParams := map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,
+	}
+	if payableDiscountChanged {
+		auditParams["payable_discount"] = *updatedUser.PayableDiscount
 	}
 	// Resetting a password or rewriting the admin permission matrix changes what
 	// the managed account can do or who can sign in to it.
@@ -1021,9 +1041,23 @@ func CreateUser(c *gin.Context) {
 		common.ApiErrorT(c, "Cannot create users with permission level equal to or higher than yourself")
 		return
 	}
+	if user.Role == common.RoleChannelSupplierUser && myRole != common.RoleRootUser {
+		common.ApiErrorT(c, "Only the super administrator can create channel suppliers")
+		return
+	}
 	auditParams := map[string]any{"role": user.Role}
-	// Creating an administrator grants privilege just like promoting one.
-	if user.Role >= common.RoleAdminUser {
+	// A channel supplier comes with the discount the platform pays it; other
+	// roles get none.
+	var payableDiscount *float64
+	if user.Role == common.RoleChannelSupplierUser {
+		if payableDiscount = requirePayableDiscount(c, user.PayableDiscount); payableDiscount == nil {
+			return
+		}
+		auditParams["payable_discount"] = *payableDiscount
+	}
+	// Creating an administrator or a channel supplier grants privilege just
+	// like promoting one or setting one.
+	if user.Role >= common.RoleAdminUser || user.Role == common.RoleChannelSupplierUser {
 		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserCreate, service.AdminUserCreateContext{Role: user.Role})
 		if authorization == nil {
 			return
@@ -1032,10 +1066,11 @@ func CreateUser(c *gin.Context) {
 	}
 	// Even for admin users, we cannot fully trust them!
 	cleanUser := model.User{
-		Username:    user.Username,
-		Password:    user.Password,
-		DisplayName: user.DisplayName,
-		Role:        user.Role, // 保持管理员设置的角色
+		Username:        user.Username,
+		Password:        user.Password,
+		DisplayName:     user.DisplayName,
+		Role:            user.Role, // 保持管理员设置的角色
+		PayableDiscount: payableDiscount,
 	}
 	authzTouched := false
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
@@ -1067,6 +1102,19 @@ func CreateUser(c *gin.Context) {
 	return
 }
 
+// requirePayableDiscount checks the payable discount a request gives a channel
+// supplier. It writes the error response and returns nil when the discount is
+// missing or invalid; otherwise it returns the normalized value.
+func requirePayableDiscount(c *gin.Context, discount *float64) *float64 {
+	if discount != nil {
+		if normalized, ok := model.NormalizeDiscount(*discount); ok {
+			return &normalized
+		}
+	}
+	common.ApiErrorT(c, "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places")
+	return nil
+}
+
 func updateAdminPermissionsForUserInTx(c *gin.Context, tx *gorm.DB, userID int, userRole int, permissions map[string]map[string]bool) (bool, error) {
 	if permissions == nil {
 		if userRole < common.RoleAdminUser && c.GetInt("role") == common.RoleRootUser {
@@ -1088,6 +1136,8 @@ type ManageRequest struct {
 	Action string `json:"action"`
 	Value  int    `json:"value"`
 	Mode   string `json:"mode"`
+	// PayableDiscount goes with set_channel_supplier.
+	PayableDiscount *float64 `json:"payable_discount"`
 }
 
 // ManageUser Only admin user can do this
@@ -1176,6 +1226,37 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorT(c, "This user is already a common user")
 			return
 		}
+		// Only the super administrator ends a channel supplier, through
+		// unset_channel_supplier: demote would let any administrator do it.
+		if user.Role == common.RoleChannelSupplierUser {
+			common.ApiErrorT(c, "This user is not an administrator")
+			return
+		}
+		user.Role = common.RoleCommonUser
+	case "set_channel_supplier":
+		if myRole != common.RoleRootUser {
+			common.ApiErrorT(c, "Only the super administrator can change channel suppliers")
+			return
+		}
+		if user.Role != common.RoleCommonUser {
+			common.ApiErrorT(c, "Only common users can become channel suppliers")
+			return
+		}
+		payableDiscount := requirePayableDiscount(c, req.PayableDiscount)
+		if payableDiscount == nil {
+			return
+		}
+		user.Role = common.RoleChannelSupplierUser
+		user.PayableDiscount = payableDiscount
+	case "unset_channel_supplier":
+		if myRole != common.RoleRootUser {
+			common.ApiErrorT(c, "Only the super administrator can change channel suppliers")
+			return
+		}
+		if user.Role != common.RoleChannelSupplierUser {
+			common.ApiErrorT(c, "This user is not a channel supplier")
+			return
+		}
 		user.Role = common.RoleCommonUser
 	default:
 		common.ApiErrorT(c, "Invalid parameters")
@@ -1186,7 +1267,10 @@ func ManageUser(c *gin.Context) {
 	if authorization == nil {
 		return
 	}
-	if req.Action == "demote" {
+	// Role changes other than promotion also clear the user's own permission
+	// rules, and end its sessions under a reason that names the action.
+	switch req.Action {
+	case "demote", "set_channel_supplier", "unset_channel_supplier":
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
 			if err := user.UpdateWithTx(tx, false); err != nil {
 				return err
@@ -1205,11 +1289,11 @@ func ManageUser(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		if _, err := model.RevokeAllUserSessions(user.Id, "admin_demote"); err != nil {
+		if _, err := model.RevokeAllUserSessions(user.Id, "admin_"+req.Action); err != nil {
 			common.ApiError(c, err)
 			return
 		}
-	} else {
+	default:
 		if err := user.Update(false); err != nil {
 			common.ApiError(c, err)
 			return
@@ -1222,12 +1306,16 @@ func ManageUser(c *gin.Context) {
 	if err := model.InvalidateUserTokensCache(user.Id); err != nil {
 		common.SysLog(common.LogText("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
 	}
-	recordManageAuditFor(c, user.Id, "user.manage", map[string]any{
+	auditParams := map[string]any{
 		"action":              req.Action,
 		"username":            user.Username,
 		"id":                  user.Id,
 		"verification_method": authorization.Method,
-	})
+	}
+	if req.Action == "set_channel_supplier" {
+		auditParams["payable_discount"] = *user.PayableDiscount
+	}
+	recordManageAuditFor(c, user.Id, "user.manage", auditParams)
 	clearUser := model.User{
 		Role:   user.Role,
 		Status: user.Status,

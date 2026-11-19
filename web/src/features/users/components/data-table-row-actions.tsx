@@ -28,6 +28,7 @@ import {
   ShieldAlert,
   Link2,
   CreditCard,
+  Truck,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -49,7 +50,9 @@ import {
 import type { AdminUserManageAction } from '@/features/auth/secure-verification'
 import { UserSubscriptionsDialog } from '@/features/subscriptions/components/dialogs/user-subscriptions-dialog'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { manageUser, resetUserPasskey, resetUserTwoFA } from '../api'
 import {
@@ -60,6 +63,7 @@ import {
 } from '../constants'
 import { getUserActionMessage } from '../lib'
 import type { User } from '../types'
+import { SetChannelSupplierDialog } from './dialogs/set-channel-supplier-dialog'
 import { UserBindingDialog } from './dialogs/user-binding-dialog'
 import { useUsers } from './users-provider'
 
@@ -68,6 +72,14 @@ const MANAGE_ACTION_TITLES: Record<AdminUserManageAction, string> = {
   enable: 'Verify to enable user',
   promote: 'Verify to promote user',
   demote: 'Verify to demote user',
+  set_channel_supplier: 'Verify to set channel supplier',
+  unset_channel_supplier: 'Verify to unset channel supplier',
+}
+
+// Raw action keys read badly in the failure fallback; these have a menu label.
+const MANAGE_ACTION_NAMES: Partial<Record<AdminUserManageAction, string>> = {
+  set_channel_supplier: 'Set as channel supplier',
+  unset_channel_supplier: 'Unset channel supplier',
 }
 
 interface DataTableRowActionsProps {
@@ -77,6 +89,8 @@ interface DataTableRowActionsProps {
 export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const { t } = useTranslation()
   const user = row.original
+  const viewerIsRoot =
+    useAuthStore((s) => s.auth.user?.role) === ROLE.SUPER_ADMIN
   const {
     setOpen,
     setCurrentRow,
@@ -88,6 +102,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const [resetTwoFAOpen, setResetTwoFAOpen] = useState(false)
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false)
   const [subscriptionsDialogOpen, setSubscriptionsDialogOpen] = useState(false)
+  const [setSupplierOpen, setSetSupplierOpen] = useState(false)
 
   const handleEdit = () => {
     setCurrentRow(user)
@@ -116,7 +131,48 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         toast.success(t(getUserActionMessage(action)))
         triggerRefresh()
       } else {
-        handleServerError(result, t('Failed to {{action}} user', { action }))
+        const actionName = MANAGE_ACTION_NAMES[action]
+        handleServerError(
+          result,
+          t('Failed to {{action}} user', {
+            action: actionName ? t(actionName) : action,
+          })
+        )
+      }
+    } catch (error) {
+      handleServerError(
+        AuthOperationError.from(error),
+        t(ERROR_MESSAGES.UNEXPECTED)
+      )
+    }
+  }
+
+  // Setting a supplier needs its payable discount, so it goes through a dialog
+  // that collects the discount and then asks for the manage proof.
+  const handleSetChannelSupplier = async (payableDiscount: number) => {
+    try {
+      const proof = await requestVerification({
+        scope: 'admin.user.manage',
+        context: { user_id: user.id, action: 'set_channel_supplier' },
+        title: t(MANAGE_ACTION_TITLES.set_channel_supplier),
+        description: t(
+          'Confirm your identity before changing the account {{username}}.',
+          { username: user.username }
+        ),
+      })
+      if (!proof) return
+      const result = await manageUser(
+        user.id,
+        'set_channel_supplier',
+        proof.proof_token,
+        { payable_discount: payableDiscount }
+      )
+      if (result.success) {
+        toast.success(t(getUserActionMessage('set_channel_supplier')))
+        setSetSupplierOpen(false)
+        triggerRefresh()
+      } else {
+        handleServerError(result, t('Failed to set channel supplier'))
       }
     } catch (error) {
       handleServerError(
@@ -251,6 +307,31 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuItem>
         )}
 
+        {viewerIsRoot && user.role === USER_ROLE.USER && (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault()
+              setSetSupplierOpen(true)
+            }}
+          >
+            {t('Set as channel supplier')}
+            <DropdownMenuShortcut>
+              <Truck size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
+        {viewerIsRoot && user.role === USER_ROLE.CHANNEL_SUPPLIER && (
+          <DropdownMenuItem
+            onClick={() => handleManage('unset_channel_supplier')}
+          >
+            {t('Unset channel supplier')}
+            <DropdownMenuShortcut>
+              <Truck size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
         <DropdownMenuItem
           onSelect={(event) => {
             event.preventDefault()
@@ -339,6 +420,14 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         )}
         confirmText={t('Reset 2FA')}
         handleConfirm={handleResetTwoFA}
+      />
+
+      <SetChannelSupplierDialog
+        open={setSupplierOpen && !verificationActive}
+        onOpenChange={setSetSupplierOpen}
+        username={user.username}
+        currentDiscount={user.payable_discount}
+        onConfirm={handleSetChannelSupplier}
       />
 
       <UserBindingDialog

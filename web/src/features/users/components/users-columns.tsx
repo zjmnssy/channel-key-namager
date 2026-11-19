@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 
 import { ActivityTimeCell } from '@/components/activity-time-cell'
 import { BadgeCell } from '@/components/data-table'
+import { DiscountValue } from '@/components/discount-value'
 import { GroupBadge } from '@/components/group-badge'
 import { LongText } from '@/components/long-text'
 import { StatusBadge } from '@/components/status-badge'
@@ -39,6 +40,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 import {
   USER_STATUS,
   USER_STATUSES,
+  USER_ROLE,
   USER_ROLES,
   isUserDeleted,
 } from '../constants'
@@ -236,7 +238,36 @@ export function useUsersColumns(): ColumnDef<User>[] {
         meta: { mobileOrder: 20 },
       },
       {
+        accessorKey: 'payable_discount',
+        header: t('Payable Discount'),
+        cell: ({ row }) => {
+          // Unsetting a supplier keeps the old discount on the user, but it
+          // only applies while the user is a supplier.
+          if (row.original.role !== USER_ROLE.CHANNEL_SUPPLIER) {
+            return <span className='text-muted-foreground text-sm'>—</span>
+          }
+          if (row.original.payable_discount == null) {
+            return (
+              <span className='text-muted-foreground text-sm'>
+                {t('Not set')}
+              </span>
+            )
+          }
+          return (
+            <span className='text-sm tabular-nums'>
+              <DiscountValue value={row.original.payable_discount} />
+            </span>
+          )
+        },
+        enableSorting: false,
+        size: 120,
+        meta: { mobileOrder: 25 },
+      },
+      {
         id: 'invite_info',
+        // The accessor only lists the column in the View menu, where it can be
+        // shown again after being hidden by default.
+        accessorKey: 'aff_count',
         header: t('Invite Info'),
         cell: ({ row }) => {
           const user = row.original

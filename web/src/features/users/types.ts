@@ -62,6 +62,10 @@ export const userSchema = z.object({
   admin_permissions: z
     .record(z.string(), z.record(z.string(), z.boolean()))
     .optional(),
+  // What the platform pays a channel supplier, as a fraction of the list price.
+  // Nil for every user that is not a supplier and for suppliers set before the
+  // field existed.
+  payable_discount: z.number().nullable().optional(),
 })
 export type User = z.infer<typeof userSchema>
 
@@ -126,11 +130,14 @@ export interface UserFormData {
   group?: string // Only used when updating user
   remark?: string // Only used when updating user
   admin_permissions?: AdminPermissionMatrix
+  payable_discount?: number // Only sent by the super administrator
 }
 
 export type ManageUserAction =
   | 'promote'
   | 'demote'
+  | 'set_channel_supplier'
+  | 'unset_channel_supplier'
   | 'enable'
   | 'disable'
   | 'delete'

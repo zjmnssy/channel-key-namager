@@ -17,26 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import {
-  Activity,
   Box,
   ClipboardList,
-  CreditCard,
   FileText,
   FlaskConical,
+  Globe,
   Key,
-  LayoutDashboard,
   ListTodo,
   MessageSquare,
-  PlugZap,
   Radio,
   ServerCog,
   Settings,
   ShieldCheck,
-  Ticket,
   User,
   Users,
-  Wallet,
-  Workflow,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -75,16 +69,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         title: t('General'),
         items: [
           {
-            title: t('Overview'),
-            url: '/dashboard/overview',
-            icon: Activity,
-          },
-          {
-            title: t('Dashboard'),
-            url: '/dashboard/models',
-            icon: LayoutDashboard,
-          },
-          {
             title: t('API Keys'),
             url: '/keys',
             icon: Key,
@@ -113,11 +97,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         title: t('Personal'),
         items: [
           {
-            title: t('Wallet'),
-            url: '/wallet',
-            icon: Wallet,
-          },
-          {
             title: t('Profile'),
             url: '/profile',
             icon: User,
@@ -137,43 +116,30 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Channels'),
             url: '/channels',
             icon: Radio,
+            requiredRole: ROLE.CHANNEL_SUPPLIER,
+          },
+          {
+            title: t('Third-Party Sites'),
+            url: '/third-party-sites',
+            icon: Globe,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('Models'),
             url: '/models/metadata',
             icon: Box,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('Users'),
             url: '/users',
             icon: Users,
-          },
-          {
-            title: t('Redemption Codes'),
-            url: '/redemption-codes',
-            icon: Ticket,
-          },
-          {
-            title: t('Subscriptions'),
-            url: '/subscriptions',
-            icon: CreditCard,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('System Info'),
             url: '/system-info',
             icon: ServerCog,
-            requiredRole: ROLE.SUPER_ADMIN,
-          },
-          {
-            title: t('Plugins'),
-            url: '/task-plugins',
-            icon: PlugZap,
-            requiredRole: ROLE.SUPER_ADMIN,
-          },
-          {
-            title: t('Request processing'),
-            url: '/request-processing',
-            icon: Workflow,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {

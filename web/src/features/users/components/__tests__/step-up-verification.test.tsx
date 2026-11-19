@@ -24,10 +24,12 @@ import { useEffect } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { User } from '../../types'
 import { DataTableRowActions } from '../data-table-row-actions'
 import { UsersDeleteDialog } from '../users-delete-dialog'
+import { UsersMutateDrawer } from '../users-mutate-drawer'
 import { UsersProvider, useUsers } from '../users-provider'
 
 const target: User = {
@@ -105,6 +107,7 @@ async function completeTwoFactorVerification() {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  useAuthStore.getState().auth.reset()
 })
 
 it('deleting a user sends the request only with a single-use proof for that user', async () => {
@@ -197,4 +200,138 @@ it('disabling a user from the row menu binds the proof to the user and action', 
     }),
     expect.anything()
   )
+})
+
+function renderCreateDrawer(viewerRole: number) {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'operator', role: viewerRole })
+  renderInProvider(<UsersMutateDrawer open onOpenChange={() => undefined} />)
+}
+
+it('root creating a channel supplier sends the create request only with a proof bound to role 5', async () => {
+  const proof = mockVerification('admin.user.create', 'create-proof')
+  const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+    if (url === '/api/verify') return proof
+    if (url === '/api/user/') return { data: { success: true } }
+    throw new Error(`Unexpected POST ${url}`)
+  })
+  renderCreateDrawer(100)
+  await userEvent.type(await screen.findByLabelText('Username'), 'new-supplier')
+  await userEvent.type(screen.getByLabelText('Password'), 'Str0ng-Passw0rd!')
+  await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Channel Supplier' })
+  )
+  await userEvent.type(screen.getByLabelText('Payable Discount'), '0.85')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(post).not.toHaveBeenCalledWith(
+    '/api/user/',
+    expect.anything(),
+    expect.anything()
+  )
+  await completeTwoFactorVerification()
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/',
+      expect.objectContaining({ username: 'new-supplier', role: 5 }),
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'create-proof' },
+        singleUseAuthorization: true,
+      })
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'admin.user.create',
+      context: { role: 5 },
+    }),
+    expect.anything()
+  )
+})
+
+it('cancelling verification while creating a channel supplier sends no create request', async () => {
+  mockVerification('admin.user.create', 'create-proof')
+  const post = vi.spyOn(api, 'post')
+  renderCreateDrawer(100)
+  await userEvent.type(await screen.findByLabelText('Username'), 'new-supplier')
+  await userEvent.type(screen.getByLabelText('Password'), 'Str0ng-Passw0rd!')
+  await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Channel Supplier' })
+  )
+  await userEvent.type(screen.getByLabelText('Payable Discount'), '0.85')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await screen.findByLabelText('Authenticator code or backup code')
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await waitFor(() =>
+    expect(
+      screen.queryByLabelText('Authenticator code or backup code')
+    ).not.toBeInTheDocument()
+  )
+  expect(post).not.toHaveBeenCalled()
+})
+
+it('creating a channel supplier without a payable discount shows the message and sends nothing', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
+  const post = vi.spyOn(api, 'post')
+  renderCreateDrawer(100)
+  await userEvent.type(await screen.findByLabelText('Username'), 'new-supplier')
+  await userEvent.type(screen.getByLabelText('Password'), 'Str0ng-Passw0rd!')
+  await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Channel Supplier' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(
+    screen.getByText(
+      'Payable discount must be greater than 0 and at most 1, with at most 4 decimal places'
+    )
+  ).toBeInTheDocument()
+  expect(post).not.toHaveBeenCalled()
+})
+
+it('creating a channel supplier sends the payable discount with the create request', async () => {
+  const proof = mockVerification('admin.user.create', 'create-proof')
+  const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+    if (url === '/api/verify') return proof
+    if (url === '/api/user/') return { data: { success: true } }
+    throw new Error(`Unexpected POST ${url}`)
+  })
+  renderCreateDrawer(100)
+  await userEvent.type(await screen.findByLabelText('Username'), 'new-supplier')
+  await userEvent.type(screen.getByLabelText('Password'), 'Str0ng-Passw0rd!')
+  await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Channel Supplier' })
+  )
+  await userEvent.type(screen.getByLabelText('Payable Discount'), '0,85')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await completeTwoFactorVerification()
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/',
+      expect.objectContaining({
+        username: 'new-supplier',
+        role: 5,
+        payable_discount: 0.85,
+      }),
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'create-proof' },
+      })
+    )
+  )
+})
+
+it('administrator opening the create drawer is not offered the Channel Supplier role', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
+  renderCreateDrawer(10)
+  await userEvent.click(await screen.findByRole('combobox', { name: 'Role' }))
+  expect(
+    await screen.findByRole('option', { name: 'Admin' })
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByRole('option', { name: 'Channel Supplier' })
+  ).not.toBeInTheDocument()
 })

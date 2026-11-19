@@ -104,7 +104,7 @@ describe('security sidebar visibility', () => {
       result.current
         .find((group) => group.id === 'personal')
         ?.items.map((item) => item.title)
-    ).toEqual(['Wallet', 'Profile', 'Security & Access'])
+    ).toEqual(['Profile', 'Security & Access'])
     expect(
       result.current
         .flatMap((group) => group.items)
@@ -318,5 +318,104 @@ describe('model pricing badge', () => {
     ).toBeInTheDocument()
     expect(get).not.toHaveBeenCalledWith('/api/option/model_pricing/issues')
     expect(badgedEntries()).toHaveLength(0)
+  })
+})
+
+describe('Admin group visibility by role', () => {
+  // Default configuration of a newly created common user: no `admin` section.
+  const COMMON_USER_MODULES = JSON.stringify({
+    chat: { enabled: true, playground: true, chat: true },
+    console: { enabled: true, detail: true, token: true, log: true },
+    personal: { enabled: true, topup: true, personal: true },
+  })
+
+  function SidebarGroups() {
+    const { navGroups } = useSidebarView()
+    return (
+      <ul aria-label='Sidebar groups'>
+        {navGroups.map((group) => (
+          <li key={group.id}>
+            {group.id}
+            {group.id === 'admin' && (
+              <ul aria-label='Admin items'>
+                {group.items.map((item) => (
+                  <li key={item.title}>{item.title}</li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  async function renderSidebarFor(role: number) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    client.setQueryData(['status'], { SidebarModulesAdmin: '' })
+    useAuthStore.getState().auth.setUser({
+      id: 1,
+      username: 'alice',
+      role,
+      sidebar_modules: COMMON_USER_MODULES,
+    })
+    const router = createRouter({
+      routeTree: createRootRoute({ component: SidebarGroups }),
+      history: createMemoryHistory({ initialEntries: ['/dashboard/overview'] }),
+    })
+    await router.load()
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    )
+    await screen.findByRole('list', { name: 'Sidebar groups' })
+  }
+
+  function adminItemTitles() {
+    const list = screen.queryByRole('list', { name: 'Admin items' })
+    if (!list) return null
+    return [...list.querySelectorAll('li')].map((li) => li.textContent)
+  }
+
+  it('shows a channel supplier only Channels in the Admin group', async () => {
+    await renderSidebarFor(5)
+
+    expect(adminItemTitles()).toEqual(['Channels'])
+  })
+
+  it('lists the Admin group items available to administrators', async () => {
+    await renderSidebarFor(ROLE.ADMIN)
+
+    expect(adminItemTitles()).toEqual([
+      'Channels',
+      'Third-Party Sites',
+      'Models',
+      'Users',
+    ])
+  })
+
+  it('lists the Admin group items available to the super administrator', async () => {
+    // The super administrator's sidebar also loads the model pricing issues.
+    vi.spyOn(api, 'get').mockImplementation(async () => ({
+      data: { success: true, data: [] },
+    }))
+    await renderSidebarFor(ROLE.SUPER_ADMIN)
+
+    expect(adminItemTitles()).toEqual([
+      'Channels',
+      'Third-Party Sites',
+      'Models',
+      'Users',
+      'System Info',
+      'System Settings',
+    ])
+  })
+
+  it('hides the Admin group from common users', async () => {
+    await renderSidebarFor(ROLE.USER)
+
+    expect(adminItemTitles()).toBeNull()
   })
 })

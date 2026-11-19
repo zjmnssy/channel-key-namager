@@ -74,6 +74,7 @@ import {
   type AdminPermissionMatrix,
 } from '@/lib/admin-permissions'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
+import { isValidDiscountText, parseDiscountText } from '@/lib/discount'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { accountPasswordSchema } from '@/lib/password-policy'
@@ -170,7 +171,19 @@ export function UsersMutateDrawer({
   const currentQuotaRaw = form.watch('quota_dollars') || 0
   const selectedRole = form.watch('role')
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
+  const roleOptions = [
+    { value: '1', label: t('Common User') },
+    ...(canEditAdminPermissions
+      ? [{ value: '5', label: t('Channel Supplier') }]
+      : []),
+    { value: '10', label: t('Admin') },
+  ]
   const targetIsAdmin = (selectedRole ?? currentRow?.role ?? 0) >= ROLE.ADMIN
+  // Only the super administrator sets the payable discount: for a supplier
+  // being created, or a supplier being edited.
+  const targetIsSupplier =
+    (selectedRole ?? currentRow?.role ?? 0) === ROLE.CHANNEL_SUPPLIER
+  const showsPayableDiscount = canEditAdminPermissions && targetIsSupplier
 
   const onSubmit = async (data: UserFormValues) => {
     if (!isUpdate || data.password) {
@@ -178,6 +191,24 @@ export function UsersMutateDrawer({
         form.setError('password', {
           type: 'manual',
           message: t('Password must contain between 8 and 128 characters.'),
+        })
+        return
+      }
+    }
+    // A supplier needs a discount; an edit that leaves the field empty keeps
+    // the stored one. Checked before verification so a typo costs no proof.
+    const payableDiscountText = (data.payable_discount ?? '').trim()
+    if (showsPayableDiscount) {
+      if (
+        (payableDiscountText === '' && !isUpdate) ||
+        (payableDiscountText !== '' &&
+          !isValidDiscountText(payableDiscountText))
+      ) {
+        form.setError('payable_discount', {
+          type: 'manual',
+          message: t(
+            'Payable discount must be greater than 0 and at most 1, with at most 4 decimal places'
+          ),
         })
         return
       }
@@ -203,6 +234,9 @@ export function UsersMutateDrawer({
       ) {
         delete payload.admin_permissions
       }
+      if (showsPayableDiscount && payableDiscountText !== '') {
+        payload.payable_discount = parseDiscountText(payableDiscountText)
+      }
       // Resetting a password, rewriting admin permissions, or creating an
       // administrator changes who can sign in or what they may do.
       let proofToken: string | undefined
@@ -220,6 +254,17 @@ export function UsersMutateDrawer({
           if (!proof) return
           proofToken = proof.proof_token
         }
+      } else if (payload.role === ROLE.CHANNEL_SUPPLIER) {
+        const proof = await requestVerification({
+          scope: 'admin.user.create',
+          context: { role: ROLE.CHANNEL_SUPPLIER },
+          title: t('Verify to create channel supplier'),
+          description: t(
+            'Confirm your identity before creating a channel supplier account.'
+          ),
+        })
+        if (!proof) return
+        proofToken = proof.proof_token
       } else if ((payload.role ?? 0) >= ROLE.ADMIN) {
         const proof = await requestVerification({
           scope: 'admin.user.create',
@@ -336,10 +381,7 @@ export function UsersMutateDrawer({
                       <FormItem>
                         <FormLabel>{t('Role')}</FormLabel>
                         <Select
-                          items={[
-                            { value: '1', label: t('Common User') },
-                            { value: '10', label: t('Admin') },
-                          ]}
+                          items={roleOptions}
                           onValueChange={(value) =>
                             value !== null &&
                             field.onChange(Number.parseInt(value))
@@ -353,15 +395,46 @@ export function UsersMutateDrawer({
                           </FormControl>
                           <SelectContent alignItemWithTrigger={false}>
                             <SelectGroup>
-                              <SelectItem value='1'>
-                                {t('Common User')}
-                              </SelectItem>
-                              <SelectItem value='10'>{t('Admin')}</SelectItem>
+                              {roleOptions.map((option) => (
+                                <SelectItem
+                                  key={option.value}
+                                  value={option.value}
+                                >
+                                  {option.label}
+                                </SelectItem>
+                              ))}
                             </SelectGroup>
                           </SelectContent>
                         </Select>
                         <FormDescription>
                           {t("Set the user's role (cannot be Root)")}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
+
+                {showsPayableDiscount && (
+                  <FormField
+                    control={form.control}
+                    name='payable_discount'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Payable Discount')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            value={field.value ?? ''}
+                            inputMode='decimal'
+                            autoComplete='off'
+                            placeholder='0.85'
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t(
+                            'Between 0 and 1. For example, 0.85 means 85% of the list price'
+                          )}
                         </FormDescription>
                         <FormMessage />
                       </FormItem>

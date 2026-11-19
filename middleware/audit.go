@@ -68,6 +68,11 @@ var auditRouteActions = map[string]string{
 	"DELETE /api/redemption/:id":     "redemption.delete",
 	"DELETE /api/redemption/invalid": "redemption.delete_invalid",
 
+	// 第三方站点
+	"POST /api/third_party_site/":      "third_party_site.create",
+	"PUT /api/third_party_site/:id":    "third_party_site.update",
+	"DELETE /api/third_party_site/:id": "third_party_site.delete",
+
 	// 预填组
 	"POST /api/prefill_group/":      "prefill_group.create",
 	"PUT /api/prefill_group/":       "prefill_group.update",
@@ -102,8 +107,8 @@ var auditRouteActions = map[string]string{
 // 以便事后解析响应判断业务是否成功。仅对写方法（POST/PUT/PATCH/DELETE）生效；
 // 只读请求返回 nil，调用方据此跳过事后兜底记录。
 //
-// 该函数由 authHelper 在鉴权通过、c.Next() 之前调用：因为任何管理/root 接口都
-// 必然经过 AdminAuth/RootAuth，将审计兜底内聚到鉴权链路即可保证「新增接口自动留痕」，
+// 该函数由 authHelper 在鉴权通过、c.Next() 之前调用（auditWrites 为 true 时）：因为任何管理/root 接口
+// 都必然经过 AdminAuth/RootAuth 或 ChannelSupplierAuth，将审计兜底内聚到鉴权链路即可保证「新增接口自动留痕」，
 // 无需在路由上再单独挂一层审计中间件（避免漏挂）。
 func beginAdminAudit(c *gin.Context) *auditResponseWriter {
 	method := c.Request.Method
