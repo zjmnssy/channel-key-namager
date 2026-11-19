@@ -66,6 +66,8 @@ function isValidRemoteUserId(value: string): boolean {
   return Number.isSafeInteger(n) && n > 0
 }
 
+// Judged on the text so a long fraction is never rounded into range.
+
 export function getThirdPartySiteFormSchema(
   t: TFunction,
   mode: ThirdPartySiteFormMode
