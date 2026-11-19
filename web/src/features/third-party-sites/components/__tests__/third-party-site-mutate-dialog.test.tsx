@@ -195,20 +195,21 @@ describe('ThirdPartySiteMutateDialog', () => {
     )
   })
 
-  it('keeps spellcheck and autocorrect off on the ApiKey field', async () => {
-    const user = userEvent.setup()
+  it('renders the ApiKey as a plain text field rather than a password field', () => {
+    render(wrap(true))
+
+    const input = screen.getByRole('textbox', { name: 'ApiKey' })
+    expect(input).not.toHaveAttribute('type', 'password')
+  })
+
+  it('keeps autocomplete, spellcheck and autocorrect off on the ApiKey field', () => {
     render(wrap(true))
 
     const input = screen.getByLabelText('ApiKey')
+    expect(input).toHaveAttribute('autocomplete', 'off')
     expect(input).toHaveAttribute('spellcheck', 'false')
     expect(input).toHaveAttribute('autocapitalize', 'off')
     expect(input).toHaveAttribute('autocorrect', 'off')
-
-    await user.click(screen.getByRole('button', { name: 'Show password' }))
-
-    const revealed = screen.getByLabelText('ApiKey')
-    expect(revealed).toHaveAttribute('type', 'text')
-    expect(revealed).toHaveAttribute('spellcheck', 'false')
   })
 
   it('prefills an edit and omits a blank ApiKey', async () => {

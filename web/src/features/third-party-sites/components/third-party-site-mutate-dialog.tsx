@@ -25,7 +25,6 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
-import { PasswordInput } from '@/components/password-input'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -256,9 +255,9 @@ export function ThirdPartySiteMutateDialog(
               <FormItem>
                 <FormLabel>{t('ApiKey')}</FormLabel>
                 <FormControl>
-                  <PasswordInput
+                  <Input
                     {...field}
-                    autoComplete='new-password'
+                    autoComplete='off'
                     spellCheck={false}
                     autoCapitalize='off'
                     autoCorrect='off'
