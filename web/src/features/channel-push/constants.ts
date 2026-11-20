@@ -24,17 +24,40 @@ export const CHANNEL_PUSH_QUERY_KEYS = {
   options: ['channel-push', 'options'],
 } as const
 
-/** Fixed category order, matching the order the backend lists actions in. */
+/**
+ * Fixed category order, matching the order the backend lists actions in.
+ * `labelKey` titles the detail tabs; `shortLabelKey` fits the list summary.
+ */
 export const CHANNEL_PUSH_CATEGORIES: {
   value: ChannelPushCategory
   labelKey: string
+  shortLabelKey: string
 }[] = [
-  { value: 'unchanged', labelKey: 'Unchanged' },
-  { value: 'enable', labelKey: 'Enable channel' },
-  { value: 'disable', labelKey: 'Disable channel' },
-  { value: 'update_models', labelKey: 'Update model list' },
-  { value: 'create', labelKey: 'Create' },
-  { value: 'orphan', labelKey: 'Orphan channel' },
-  { value: 'auto_disabled', labelKey: 'Auto-disabled on site' },
-  { value: 'unsupported', labelKey: 'Unsupported for push' },
+  { value: 'unchanged', labelKey: 'Unchanged', shortLabelKey: 'Unchanged' },
+  { value: 'enable', labelKey: 'Enable channel', shortLabelKey: 'Enable' },
+  { value: 'disable', labelKey: 'Disable channel', shortLabelKey: 'Disable' },
+  {
+    value: 'update_models',
+    labelKey: 'Update model list',
+    shortLabelKey: 'Update models',
+  },
+  { value: 'create', labelKey: 'Create', shortLabelKey: 'Create' },
+  { value: 'orphan', labelKey: 'Orphan channel', shortLabelKey: 'Orphan' },
+  {
+    value: 'auto_disabled',
+    labelKey: 'Auto-disabled on site',
+    shortLabelKey: 'Auto-disabled',
+  },
+  {
+    value: 'unsupported',
+    labelKey: 'Unsupported for push',
+    shortLabelKey: 'Unsupported',
+  },
 ]
+
+/** Channel status values shared by this platform and NewAPI sites. */
+export const CHANNEL_PUSH_STATUS_LABELS: Record<number, string> = {
+  1: 'Enabled',
+  2: 'Manually disabled',
+  3: 'Auto disabled',
+}
