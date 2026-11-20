@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,6 +225,8 @@ type fakeResponse struct {
 	header map[string]string
 	hang   bool
 	pass   bool // consume this queue entry but let the fake answer normally
+	// applyThenFail lets the fake handle the request normally, then answers 500.
+	applyThenFail bool
 }
 
 type fakeNewAPISite struct {
@@ -301,6 +305,13 @@ func (s *fakeNewAPISite) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
+	if fault != nil && fault.applyThenFail {
+		s.mu.Lock()
+		s.routeLocked(httptest.NewRecorder(), r, raw)
+		s.mu.Unlock()
+		s.reply(w, http.StatusInternalServerError, "")
+		return
+	}
 	if fault != nil && !fault.pass {
 		if fault.hang {
 			<-r.Context().Done()
@@ -319,6 +330,12 @@ func (s *fakeNewAPISite) handle(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.routeLocked(w, r, raw)
+}
+
+// routeLocked answers a request as a NewAPI site would. The caller holds s.mu.
+func (s *fakeNewAPISite) routeLocked(w http.ResponseWriter, r *http.Request, raw []byte) {
+	key := r.Method + " " + r.URL.Path
 	switch {
 	case r.URL.Path == "/api/channel" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
 		w.Header().Set("Location", "/api/channel/")
@@ -723,10 +740,12 @@ func TestChannelPushClientPacesPerSite(t *testing.T) {
 func setupChannelPushTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupThirdPartySiteTest(t)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{},
+		&model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}))
 	clearTables := func() {
 		session := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped()
-		for _, table := range []any{&model.ChannelPushTaskSupplier{}, &model.ChannelPushTask{}, &model.Channel{}, &model.User{}} {
+		for _, table := range []any{&model.ChannelPushRunSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushTaskSupplier{},
+			&model.ChannelPushTask{}, &model.Channel{}, &model.User{}} {
 			require.NoError(t, session.Delete(table).Error)
 		}
 	}
@@ -1029,4 +1048,417 @@ func TestChannelPushOptions(t *testing.T) {
 	assert.Equal(t, []model.ChannelPushSiteOption{{Id: site.Id, Name: "alpha"}}, result.Data.Sites)
 	assert.Equal(t, []model.ChannelPushSupplierOption{{Id: s1.Id, Username: "sup-a", DisplayName: ""}}, result.Data.Suppliers)
 	assert.NotContains(t, raw, "remote-access-token")
+}
+
+// channelPushRunOnce points the task's site at the fake, claims a run for the
+// task as stored now, executes it, and returns the run as stored afterwards.
+func channelPushRunOnce(t *testing.T, db *gorm.DB, task model.ChannelPushTask, site *fakeNewAPISite) model.ChannelPushRun {
+	t.Helper()
+	require.NoError(t, db.Unscoped().Model(&model.ThirdPartySite{}).Where("id = ?", task.SiteId).Update("base_url", site.server.URL).Error)
+	var current model.ChannelPushTask
+	require.NoError(t, db.First(&current, task.Id).Error)
+	run, ok, err := model.ClaimChannelPushRun(current, common.GetTimestamp())
+	require.NoError(t, err)
+	require.True(t, ok)
+	service.ExecuteChannelPushRun(context.Background(), run, channelPushTestOptions(&fakeSleepRecorder{}))
+	var stored model.ChannelPushRun
+	require.NoError(t, db.First(&stored, run.Id).Error)
+	return stored
+}
+
+// channelPushNewTask creates a periodic task through the API and returns it as stored.
+func channelPushNewTask(t *testing.T, db *gorm.DB, siteId int, supplierIds ...int) model.ChannelPushTask {
+	t.Helper()
+	created := channelPushCreateTask(t, channelPushTaskBody(t, siteId, supplierIds, nil))
+	require.True(t, created.Success, created.Message)
+	var task model.ChannelPushTask
+	require.NoError(t, db.First(&task, created.Data.Id).Error)
+	return task
+}
+
+func channelPushRunActions(t *testing.T, run model.ChannelPushRun) []service.ChannelPushAction {
+	t.Helper()
+	var actions []service.ChannelPushAction
+	require.NoError(t, common.UnmarshalJsonStr(string(run.Actions), &actions))
+	return actions
+}
+
+func channelPushRunError(t *testing.T, run model.ChannelPushRun) common.Message {
+	t.Helper()
+	var message common.Message
+	require.NoError(t, common.UnmarshalJsonStr(run.ErrorMessage, &message))
+	return message
+}
+
+func (s *fakeNewAPISite) resetRequests() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = nil
+}
+
+func (s *fakeNewAPISite) setRemoteStatus(id int, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels[id].Status = status
+}
+
+func (s *fakeNewAPISite) writeRequests() []fakeRecordedRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var writes []fakeRecordedRequest
+	for _, request := range s.requests {
+		if request.Method != http.MethodGet {
+			writes = append(writes, request)
+		}
+	}
+	return writes
+}
+
+func (s *fakeNewAPISite) channelsNamed(name string) []fakeRemoteChannel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var matched []fakeRemoteChannel
+	for _, channel := range s.channels {
+		if channel.Name == name {
+			matched = append(matched, *channel)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
+	return matched
+}
+
+func TestChannelPushRunFirstPush(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	a := channelPushSeedChannel(t, db, supplier, "A", 1, "gpt-4o", constant.ChannelTypeOpenAI)
+	channelPushSeedChannel(t, db, supplier, "B", 2, "gpt-4o", constant.ChannelTypeOpenAI)
+	channelPushSeedChannel(t, db, supplier, "C", 1, "gpt-5", constant.ChannelTypeCodex)
+	d := channelPushSeedChannel(t, db, supplier, "D", 1, "gpt-4o", constant.ChannelTypeOpenAI)
+	require.NoError(t, db.Model(d).Updates(map[string]any{"key": "k1\nk2",
+		"channel_info": model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}}).Error)
+	e := channelPushSeedChannel(t, db, supplier, "E", 1, "claude", constant.ChannelTypeOpenAI)
+	require.NoError(t, db.Model(e).Update("setting", `{"proxy":"http://p","request_plugins":["x"],"task_plugin_key":"y"}`).Error)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+
+	run := channelPushRunOnce(t, db, task, fake)
+	assert.Equal(t, model.ChannelPushRunSuccess, run.Status)
+	assert.Equal(t, 3, run.CreateCount)
+	assert.Equal(t, 1, run.UnchangedCount)
+	assert.Equal(t, 1, run.UnsupportedCount)
+	assert.Equal(t, 0, run.SiteChannelCount)
+	assert.Equal(t, 5, run.TargetChannelCount)
+	assert.Equal(t, 0, run.FailedActionCount)
+	assert.Equal(t, "", run.ErrorMessage)
+	assert.NotZero(t, run.FinishedAt)
+
+	creates := fake.recorded(http.MethodPost, "/api/channel/")
+	require.Len(t, creates, 3)
+	bodies := map[string]map[string]any{}
+	for _, request := range creates {
+		var body map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(request.Body, &body))
+		channel := body["channel"].(map[string]any)
+		bodies[channel["name"].(string)] = body
+		assert.Equal(t, "vip", channel["group"])
+		assert.EqualValues(t, 1, channel["status"])
+		for _, field := range []string{"tag", "remark", "creator_user_id", "used_quota", "balance"} {
+			assert.NotContains(t, channel, field)
+		}
+	}
+	nameA := service.BuildChannelPushRemoteName("A", site.Id, a.Id)
+	nameD := service.BuildChannelPushRemoteName("D", site.Id, d.Id)
+	nameE := service.BuildChannelPushRemoteName("E", site.Id, e.Id)
+	require.Contains(t, bodies, nameA)
+	require.Contains(t, bodies, nameD)
+	require.Contains(t, bodies, nameE)
+	assert.Equal(t, "single", bodies[nameA]["mode"])
+	assert.Equal(t, "multi_to_single", bodies[nameD]["mode"])
+	assert.Equal(t, "polling", bodies[nameD]["multi_key_mode"])
+	assert.Equal(t, "k1\nk2", bodies[nameD]["channel"].(map[string]any)["key"])
+	assert.Equal(t, `{"proxy":"http://p"}`, bodies[nameE]["channel"].(map[string]any)["setting"])
+	assert.NotContains(t, bodies[nameA]["channel"], "setting")
+
+	remoteA := fake.channelsNamed(nameA)
+	require.Len(t, remoteA, 1)
+	for _, action := range channelPushRunActions(t, run) {
+		if action.LocalChannelID == a.Id {
+			assert.Equal(t, service.ChannelPushCreate, action.Category)
+			assert.Equal(t, "success", action.Result)
+			assert.Equal(t, remoteA[0].ID, action.RemoteChannelID)
+		}
+	}
+
+	var suppliers []model.ChannelPushRunSupplier
+	require.NoError(t, db.Where("run_id = ?", run.Id).Find(&suppliers).Error)
+	require.Len(t, suppliers, 1)
+	assert.Equal(t, supplier.Id, suppliers[0].SupplierUserId)
+	var refs []model.ChannelPushSupplierRef
+	require.NoError(t, common.UnmarshalJsonStr(run.Suppliers, &refs))
+	assert.Equal(t, []model.ChannelPushSupplierRef{{Id: supplier.Id, Username: "sup-a"}}, refs)
+	assert.Equal(t, "alpha", run.SiteName)
+	assert.Equal(t, "vip", run.TargetGroup)
+
+	var after model.ChannelPushTask
+	require.NoError(t, db.First(&after, task.Id).Error)
+	assert.Equal(t, run.FinishedAt, after.LastFinishedAt)
+	assert.Equal(t, run.FinishedAt+30*60, after.NextRunAt)
+}
+
+func TestChannelPushRunSyncsStatusAndModels(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	toEnable := channelPushSeedChannel(t, db, supplier, "enable", 1, "m1", constant.ChannelTypeOpenAI)
+	toDisable := channelPushSeedChannel(t, db, supplier, "disable", 1, "m1", constant.ChannelTypeOpenAI)
+	toUpdate := channelPushSeedChannel(t, db, supplier, "update", 1, "m1", constant.ChannelTypeOpenAI)
+	autoDisabled := channelPushSeedChannel(t, db, supplier, "auto", 1, "m1", constant.ChannelTypeOpenAI)
+	toDelete := channelPushSeedChannel(t, db, supplier, "delete", 1, "m1", constant.ChannelTypeOpenAI)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+	fake.addChannel(fakeRemoteChannel{ID: 900, Name: "manual", Status: 1, Models: "m1"})
+
+	first := channelPushRunOnce(t, db, task, fake)
+	require.Equal(t, model.ChannelPushRunSuccess, first.Status)
+	require.Equal(t, 5, first.CreateCount)
+	remoteID := func(local *model.Channel) int {
+		matched := fake.channelsNamed(service.BuildChannelPushRemoteName(local.Name, site.Id, local.Id))
+		require.Len(t, matched, 1)
+		return matched[0].ID
+	}
+
+	fake.setRemoteStatus(remoteID(toEnable), 2)
+	fake.setRemoteStatus(remoteID(autoDisabled), 3)
+	require.NoError(t, db.Model(toDisable).Update("status", 2).Error)
+	require.NoError(t, db.Model(toUpdate).Update("models", " m1,m2 ").Error)
+	deletedRemote := remoteID(toDelete)
+	require.NoError(t, db.Delete(&model.Channel{}, toDelete.Id).Error)
+	fake.resetRequests()
+
+	second := channelPushRunOnce(t, db, task, fake)
+	assert.Equal(t, model.ChannelPushRunSuccess, second.Status)
+	assert.Equal(t, 6, second.SiteChannelCount)
+	assert.Equal(t, 4, second.TargetChannelCount)
+	assert.Equal(t, 1, second.EnableCount)
+	assert.Equal(t, 1, second.DisableCount)
+	assert.Equal(t, 1, second.UpdateModelsCount)
+	assert.Equal(t, 1, second.AutoDisabledCount)
+	assert.Equal(t, 1, second.OrphanCount)
+	assert.Equal(t, 0, second.CreateCount)
+	assert.Equal(t, 0, second.UnchangedCount)
+
+	enable := fake.recorded(http.MethodPost, "/api/channel/"+strconv.Itoa(remoteID(toEnable))+"/status")
+	require.Len(t, enable, 1)
+	assert.JSONEq(t, `{"status":1}`, enable[0].Body)
+	disable := fake.recorded(http.MethodPost, "/api/channel/"+strconv.Itoa(remoteID(toDisable))+"/status")
+	require.Len(t, disable, 1)
+	assert.JSONEq(t, `{"status":2}`, disable[0].Body)
+	update := fake.recorded(http.MethodPut, "/api/channel/")
+	require.Len(t, update, 1)
+	assert.JSONEq(t, `{"id":`+strconv.Itoa(remoteID(toUpdate))+`,"models":"m1,m2"}`, update[0].Body)
+	assert.Len(t, fake.writeRequests(), 3)
+	for _, request := range fake.writeRequests() {
+		for _, untouched := range []int{remoteID(autoDisabled), deletedRemote, 900} {
+			assert.NotContains(t, request.Path, "/"+strconv.Itoa(untouched)+"/")
+			assert.NotContains(t, request.Body, `"id":`+strconv.Itoa(untouched)+`,`)
+		}
+	}
+	for _, action := range channelPushRunActions(t, second) {
+		assert.NotEqual(t, 900, action.RemoteChannelID)
+		if action.Category == service.ChannelPushOrphan {
+			assert.Equal(t, toDelete.Id, action.LocalChannelID)
+			assert.Equal(t, deletedRemote, action.RemoteChannelID)
+			assert.Equal(t, "The local channel has been deleted", action.Reason.Key)
+		}
+	}
+}
+
+func TestChannelPushRunPartialFailure(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	first := channelPushSeedChannel(t, db, supplier, "first", 1, "m1", constant.ChannelTypeOpenAI)
+	second := channelPushSeedChannel(t, db, supplier, "second", 1, "m1", constant.ChannelTypeOpenAI)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+	fake.fail(http.MethodPost, "/api/channel/", fakeResponse{status: http.StatusBadRequest, body: `{"success":false,"message":"bad channel"}`})
+
+	run := channelPushRunOnce(t, db, task, fake)
+	assert.Equal(t, model.ChannelPushRunPartial, run.Status)
+	assert.Equal(t, 1, run.FailedActionCount)
+	assert.Equal(t, 2, run.CreateCount)
+	assert.Empty(t, fake.channelsNamed(service.BuildChannelPushRemoteName("first", site.Id, first.Id)))
+	assert.Len(t, fake.channelsNamed(service.BuildChannelPushRemoteName("second", site.Id, second.Id)), 1)
+	actions := channelPushRunActions(t, run)
+	require.Len(t, actions, 2)
+	assert.Equal(t, "failed", actions[0].Result)
+	require.NotNil(t, actions[0].Error)
+	assert.Equal(t, "bad channel", actions[0].Error.Params["detail"])
+	assert.EqualValues(t, 1, actions[0].Error.Params["attempts"])
+	assert.Equal(t, "success", actions[1].Result)
+}
+
+func TestChannelPushRunCreateRetryDuplicates(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	local := channelPushSeedChannel(t, db, supplier, "dup", 1, "m1", constant.ChannelTypeOpenAI)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+	fake.fail(http.MethodPost, "/api/channel/", fakeResponse{applyThenFail: true})
+
+	run := channelPushRunOnce(t, db, task, fake)
+	assert.Equal(t, model.ChannelPushRunSuccess, run.Status)
+	actions := channelPushRunActions(t, run)
+	require.Len(t, actions, 1)
+	assert.Equal(t, "success", actions[0].Result)
+	name := service.BuildChannelPushRemoteName("dup", site.Id, local.Id)
+	require.Len(t, fake.channelsNamed(name), 2)
+
+	fake.resetRequests()
+	again := channelPushRunOnce(t, db, task, fake)
+	assert.Empty(t, fake.writeRequests())
+	againActions := channelPushRunActions(t, again)
+	require.Len(t, againActions, 2)
+	for _, action := range againActions {
+		assert.True(t, action.Duplicate)
+		assert.Equal(t, service.ChannelPushUnchanged, action.Category)
+	}
+}
+
+func TestChannelPushRunFailsBeforeActions(t *testing.T) {
+	const listKey = "The site's channel list could not be read completely: {{detail}}"
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, db *gorm.DB, site *model.ThirdPartySite, fake *fakeNewAPISite)
+		key     string
+		detail  []string // the detail must contain one of these
+	}{
+		{name: "site deleted", key: "Site does not exist", prepare: func(t *testing.T, db *gorm.DB, site *model.ThirdPartySite, _ *fakeNewAPISite) {
+			require.NoError(t, db.Delete(site).Error)
+		}},
+		{name: "total mismatch", key: listKey, prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
+			fake.fail(http.MethodGet, "/api/channel/", fakeResponse{body: `{"success":true,"data":{"items":[],"total":3}}`})
+		}},
+		{name: "unauthorized", key: listKey, detail: []string{"HTTP 401", "invalid token"}, prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
+			fake.fail(http.MethodGet, "/api/channel/", fakeResponse{status: http.StatusUnauthorized, body: `{"success":false,"message":"invalid token"}`})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupChannelPushTest(t)
+			site := channelPushSeedSite(t, db, "alpha")
+			supplier := channelPushSeedSupplier(t, db, "sup-a")
+			channelPushSeedChannel(t, db, supplier, "A", 1, "m1", constant.ChannelTypeOpenAI)
+			task := channelPushNewTask(t, db, site.Id, supplier.Id)
+			fake := newFakeNewAPISite(t)
+			tc.prepare(t, db, site, fake)
+
+			run := channelPushRunOnce(t, db, task, fake)
+			assert.Equal(t, model.ChannelPushRunFailed, run.Status)
+			message := channelPushRunError(t, run)
+			assert.Equal(t, tc.key, message.Key)
+			if len(tc.detail) > 0 {
+				detail, _ := message.Params["detail"].(string)
+				assert.True(t, slices.ContainsFunc(tc.detail, func(want string) bool { return strings.Contains(detail, want) }), detail)
+			}
+			assert.Empty(t, fake.writeRequests())
+			assert.Empty(t, string(run.Actions))
+			var after model.ChannelPushTask
+			require.NoError(t, db.First(&after, task.Id).Error)
+			assert.NotZero(t, after.LastFinishedAt)
+			assert.Equal(t, run.FinishedAt, after.LastFinishedAt)
+		})
+	}
+}
+
+func TestChannelPushRunSkipsOtherTaskChannels(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	s1 := channelPushSeedSupplier(t, db, "sup-a")
+	s2 := channelPushSeedSupplier(t, db, "sup-b")
+	channelPushSeedChannel(t, db, s1, "own", 1, "m1", constant.ChannelTypeOpenAI)
+	other := channelPushSeedChannel(t, db, s2, "other", 1, "m1", constant.ChannelTypeOpenAI)
+	task1 := channelPushNewTask(t, db, site.Id, s1.Id)
+	task2 := channelPushNewTask(t, db, site.Id, s2.Id)
+	fake := newFakeNewAPISite(t)
+	fake.addChannel(fakeRemoteChannel{ID: 50, Name: service.BuildChannelPushRemoteName("other", site.Id, other.Id), Status: 1, Models: "m1"})
+
+	assertSkipped := func(run model.ChannelPushRun) {
+		t.Helper()
+		assert.Equal(t, model.ChannelPushRunSuccess, run.Status)
+		assert.Equal(t, 0, run.OrphanCount)
+		for _, action := range channelPushRunActions(t, run) {
+			assert.NotEqual(t, other.Id, action.LocalChannelID)
+			assert.NotEqual(t, 50, action.RemoteChannelID)
+		}
+	}
+	first := channelPushRunOnce(t, db, task1, fake)
+	assertSkipped(first)
+	assert.Equal(t, 1, first.CreateCount)
+
+	_, err := model.SetChannelPushTaskEnabled(task2.Id, false)
+	require.NoError(t, err)
+	second := channelPushRunOnce(t, db, task1, fake)
+	assertSkipped(second)
+	assert.Equal(t, 1, second.UnchangedCount)
+}
+
+func TestChannelPushRunKeepsSecretsOut(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	channelPushSeedChannel(t, db, supplier, "first", 1, "m1", constant.ChannelTypeOpenAI)
+	second := channelPushSeedChannel(t, db, supplier, "second", 1, "m1", constant.ChannelTypeOpenAI)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+	fake.fail(http.MethodPost, "/api/channel/", fakeResponse{status: http.StatusBadRequest, body: `{"success":false,"message":"rejected"}`})
+
+	run := channelPushRunOnce(t, db, task, fake)
+	require.Equal(t, model.ChannelPushRunPartial, run.Status)
+	pushed := fake.channelsNamed(service.BuildChannelPushRemoteName("second", site.Id, second.Id))
+	require.Len(t, pushed, 1)
+	require.Equal(t, "sk-second", pushed[0].Key)
+	for _, text := range []string{string(run.SiteSnapshot), string(run.TargetSnapshot), string(run.Actions), run.ErrorMessage, run.Suppliers} {
+		assert.NotContains(t, text, "remote-access-token")
+		assert.NotContains(t, text, "sk-")
+	}
+	raw, result := thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/channel_push/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
+	require.True(t, result.Success, result.Message)
+	assert.NotContains(t, raw, "remote-access-token")
+	assert.NotContains(t, raw, "sk-")
+}
+
+func TestChannelPushRunDetailsFallback(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	channelPushSeedChannel(t, db, supplier, "A", 1, "m1", constant.ChannelTypeOpenAI)
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	fake := newFakeNewAPISite(t)
+
+	// Fail the run update that carries the details, as a MySQL packet limit would.
+	const callbackName = "test:channel_push_fail_details"
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "channel_push_runs" && slices.Contains(tx.Statement.Selects, "actions") {
+			_ = tx.AddError(errors.New("packet too large"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
+
+	run := channelPushRunOnce(t, db, task, fake)
+	assert.Equal(t, model.ChannelPushRunSuccess, run.Status)
+	assert.Equal(t, 1, run.CreateCount)
+	assert.Equal(t, 1, run.TargetChannelCount)
+	assert.NotZero(t, run.FinishedAt)
+	assert.Empty(t, string(run.SiteSnapshot))
+	assert.Empty(t, string(run.TargetSnapshot))
+	assert.Empty(t, string(run.Actions))
+	message := channelPushRunError(t, run)
+	assert.Equal(t, "Run details could not be saved: {{detail}}", message.Key)
+	assert.Contains(t, message.Params["detail"], "packet too large")
+	var after model.ChannelPushTask
+	require.NoError(t, db.First(&after, task.Id).Error)
+	assert.Equal(t, run.FinishedAt, after.LastFinishedAt)
 }
