@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "The requests and replies it handles",
     "The reset request stays disabled until a credit is available.": "The reset request stays disabled until a credit is available.",
     "The result was returned in the API response and was not saved as an artifact": "The result was returned in the API response and was not saved as an artifact",
+    "The run ended without saving its result": "The run ended without saving its result",
     "The run was interrupted by a service restart": "The run was interrupted by a service restart",
     "The search pattern can contain at most 2 % wildcards": "The search pattern can contain at most 2 % wildcards",
     "The search pattern cannot contain consecutive % wildcards": "The search pattern cannot contain consecutive % wildcards",

@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "Содержимое запросов и ответов, которые он обрабатывает",
     "The reset request stays disabled until a credit is available.": "Запрос сброса недоступен, пока нет доступного сброса.",
     "The result was returned in the API response and was not saved as an artifact": "Результат был возвращён в ответе API и не сохранён как артефакт",
+    "The run ended without saving its result": "Запуск завершился, но его результат не удалось сохранить",
     "The run was interrupted by a service restart": "Запуск прерван перезапуском службы",
     "The search pattern can contain at most 2 % wildcards": "Шаблон поиска может содержать не более 2 подстановочных знаков %",
     "The search pattern cannot contain consecutive % wildcards": "Шаблон поиска не может содержать подряд идущие подстановочные знаки %",

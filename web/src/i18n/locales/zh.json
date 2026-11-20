@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "经它处理的请求和回复内容",
     "The reset request stays disabled until a credit is available.": "没有可用次数时，重置请求会保持禁用。",
     "The result was returned in the API response and was not saved as an artifact": "结果已在接口响应中返回，未保存为制品",
+    "The run ended without saving its result": "执行已结束，但结果未能保存",
     "The run was interrupted by a service restart": "执行因服务重启而中断",
     "The search pattern can contain at most 2 % wildcards": "搜索模式中最多允许包含 2 个 % 通配符",
     "The search pattern cannot contain consecutive % wildcards": "搜索模式中不允许包含连续的 % 通配符",

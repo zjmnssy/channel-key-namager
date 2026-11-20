@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "Nội dung các yêu cầu và phản hồi mà nó xử lý",
     "The reset request stays disabled until a credit is available.": "Yêu cầu đặt lại sẽ bị tắt cho đến khi có lượt khả dụng.",
     "The result was returned in the API response and was not saved as an artifact": "Kết quả đã được trả về trong phản hồi API và không được lưu làm sản phẩm",
+    "The run ended without saving its result": "Lần chạy đã kết thúc nhưng không lưu được kết quả",
     "The run was interrupted by a service restart": "Lần chạy bị gián đoạn do dịch vụ khởi động lại",
     "The search pattern can contain at most 2 % wildcards": "Mẫu tìm kiếm chỉ được chứa tối đa 2 ký tự đại diện %",
     "The search pattern cannot contain consecutive % wildcards": "Mẫu tìm kiếm không được chứa các ký tự đại diện % liên tiếp",

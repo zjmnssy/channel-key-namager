@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "このプラグインが処理するリクエストと応答の内容",
     "The reset request stays disabled until a credit is available.": "リセット回数が利用可能になるまで、リセット要求は無効です。",
     "The result was returned in the API response and was not saved as an artifact": "結果は API レスポンスで返され、成果物として保存されていません",
+    "The run ended without saving its result": "実行は終了しましたが、結果を保存できませんでした",
     "The run was interrupted by a service restart": "サービスの再起動により実行が中断されました",
     "The search pattern can contain at most 2 % wildcards": "検索パターンに使用できる % ワイルドカードは最大 2 個です",
     "The search pattern cannot contain consecutive % wildcards": "検索パターンに連続した % ワイルドカードは使用できません",

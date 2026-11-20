@@ -981,6 +981,7 @@ export const STATIC_I18N_KEYS = [
   'User {{id}} is not a channel supplier',
   'Run details could not be saved: {{detail}}',
   'The run was interrupted by a service restart',
+  'The run ended without saving its result',
   'The site ID in the marker is not this site',
   "The channel's supplier is not in any task for this site, or is no longer a channel supplier",
   'The local channel has been deleted',

@@ -6761,6 +6761,7 @@
     "The requests and replies it handles": "Le contenu des requêtes et des réponses qu'il traite",
     "The reset request stays disabled until a credit is available.": "La demande de réinitialisation reste désactivée tant qu’aucun crédit n’est disponible.",
     "The result was returned in the API response and was not saved as an artifact": "Le résultat a été renvoyé dans la réponse de l'API et n'a pas été enregistré comme artefact",
+    "The run ended without saving its result": "L'exécution s'est terminée sans que son résultat soit enregistré",
     "The run was interrupted by a service restart": "L'exécution a été interrompue par un redémarrage du service",
     "The search pattern can contain at most 2 % wildcards": "Le motif de recherche peut contenir au plus 2 jokers %",
     "The search pattern cannot contain consecutive % wildcards": "Le motif de recherche ne peut pas contenir de jokers % consécutifs",
