@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "Confirm settings and finish setup",
     "confirm that I bear legal responsibility arising from deployment": "confirm that I bear legal responsibility arising from deployment",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "Confirm the final prices and removed settings. Metadata and channel access are not changed.",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Confirm the payable discount for {{username}} before making the account a channel supplier.",
     "Confirm the verification code sent to your new email address.": "Confirm the verification code sent to your new email address.",
     "Confirm Unbind": "Confirm Unbind",
     "Confirm usage reset": "Confirm usage reset",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "Failed to send reset email",
     "Failed to send verification code": "Failed to send verification code",
     "Failed to send verification email": "Failed to send verification email",
+    "Failed to set channel supplier": "Failed to set channel supplier",
     "Failed to set tag": "Failed to set tag",
     "Failed to set the audio completion ratio: {{error}}": "Failed to set the audio completion ratio: {{error}}",
     "Failed to set the audio ratio: {{error}}": "Failed to set the audio ratio: {{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "Pay {{amount}} <savings>• Save {{saved}}</savings>",
     "Pay with Balance": "Pay with Balance",
     "Pay-as-you-go with real-time usage monitoring": "Pay-as-you-go with real-time usage monitoring",
+    "Payable Discount": "Payable Discount",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places",
     "Payment": "Payment",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.",
     "Payment amount is too low": "Payment amount is too low",
@@ -7811,10 +7815,6 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom",
-    "Payable Discount": "Payable Discount",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Confirm the payable discount for {{username}} before making the account a channel supplier.",
-    "Failed to set channel supplier": "Failed to set channel supplier"
+    "Zoom": "Zoom"
   }
 }

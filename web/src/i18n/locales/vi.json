@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "Xác nhận cài đặt và hoàn tất thiết lập",
     "confirm that I bear legal responsibility arising from deployment": "xác nhận rằng tôi chịu trách nhiệm pháp lý phát sinh từ việc triển khai",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "Xác nhận giá cuối cùng và cấu hình sẽ bị xóa. Siêu dữ liệu và quyền truy cập kênh không thay đổi.",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Xác nhận chiết khấu phải trả cho {{username}} trước khi đặt tài khoản làm nhà cung cấp kênh.",
     "Confirm the verification code sent to your new email address.": "Nhập mã xác minh đã gửi đến địa chỉ email mới.",
     "Confirm Unbind": "Xác nhận hủy liên kết",
     "Confirm usage reset": "Xác nhận đặt lại mức dùng",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "Gửi email đặt lại thất bại",
     "Failed to send verification code": "Không thể gửi mã xác minh",
     "Failed to send verification email": "Gửi email xác minh thất bại",
+    "Failed to set channel supplier": "Không thể đặt nhà cung cấp kênh",
     "Failed to set tag": "Không thể đặt thẻ",
     "Failed to set the audio completion ratio: {{error}}": "Không thể đặt hệ số hoàn thành âm thanh: {{error}}",
     "Failed to set the audio ratio: {{error}}": "Không thể đặt hệ số âm thanh: {{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "Thanh toán {{amount}} <savings>• Tiết kiệm {{saved}}</savings>",
     "Pay with Balance": "Thanh toán bằng số dư",
     "Pay-as-you-go with real-time usage monitoring": "Thanh toán theo mức sử dụng với theo dõi mức sử dụng theo thời gian thực",
+    "Payable Discount": "Chiết khấu phải trả",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Chiết khấu phải trả phải lớn hơn 0 và tối đa bằng 1, với tối đa 4 chữ số thập phân",
     "Payment": "Thanh toán",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "Chế độ tổng hợp thanh toán — đăng ký bằng công ty đã đăng ký của bạn (pháp nhân offshore). Dành cho doanh nghiệp.",
     "Payment amount is too low": "Số tiền thanh toán quá thấp",
@@ -7811,10 +7815,6 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom",
-    "Payable Discount": "Chiết khấu phải trả",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Chiết khấu phải trả phải lớn hơn 0 và tối đa bằng 1, với tối đa 4 chữ số thập phân",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Xác nhận chiết khấu phải trả cho {{username}} trước khi đặt tài khoản làm nhà cung cấp kênh.",
-    "Failed to set channel supplier": "Không thể đặt nhà cung cấp kênh"
+    "Zoom": "Zoom"
   }
 }

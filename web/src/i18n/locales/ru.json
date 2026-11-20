@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "Подтвердите настройки и завершите установку",
     "confirm that I bear legal responsibility arising from deployment": "подтверждаю, что несу юридическую ответственность, возникающую из развертывания",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "Подтвердите итоговые цены и удаляемые настройки. Метаданные и доступ к каналам не изменятся.",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Подтвердите скидку к выплате для {{username}}, прежде чем сделать аккаунт поставщиком канала.",
     "Confirm the verification code sent to your new email address.": "Введите код подтверждения, отправленный на новую почту.",
     "Confirm Unbind": "Подтвердить отвязку",
     "Confirm usage reset": "Подтвердить сброс использования",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "Не удалось отправить письмо для сброса пароля",
     "Failed to send verification code": "Не удалось отправить код подтверждения",
     "Failed to send verification email": "Не удалось отправить письмо с подтверждением",
+    "Failed to set channel supplier": "Не удалось назначить поставщика канала",
     "Failed to set tag": "Не удалось установить тег",
     "Failed to set the audio completion ratio: {{error}}": "Не удалось задать коэффициент аудиодополнения: {{error}}",
     "Failed to set the audio ratio: {{error}}": "Не удалось задать коэффициент аудио: {{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "К оплате {{amount}} <savings>• Экономия {{saved}}</savings>",
     "Pay with Balance": "Оплатить балансом",
     "Pay-as-you-go with real-time usage monitoring": "Оплата по мере использования с мониторингом в реальном времени",
+    "Payable Discount": "Скидка к выплате",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Скидка к выплате должна быть больше 0 и не больше 1, не более 4 знаков после запятой",
     "Payment": "Платеж",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "Режим платежного агрегатора — подключение через вашу зарегистрированную компанию (офшорное юрлицо). Создано для Enterprise.",
     "Payment amount is too low": "Сумма оплаты слишком мала",
@@ -7811,10 +7815,6 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom",
-    "Payable Discount": "Скидка к выплате",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Скидка к выплате должна быть больше 0 и не больше 1, не более 4 знаков после запятой",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Подтвердите скидку к выплате для {{username}}, прежде чем сделать аккаунт поставщиком канала.",
-    "Failed to set channel supplier": "Не удалось назначить поставщика канала"
+    "Zoom": "Zoom"
   }
 }

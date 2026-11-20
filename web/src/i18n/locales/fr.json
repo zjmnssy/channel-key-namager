@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "Confirmez les paramètres et terminez la configuration",
     "confirm that I bear legal responsibility arising from deployment": "confirme assumer la responsabilité juridique découlant du déploiement",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "Confirmez les prix finaux et les paramètres supprimés. Les métadonnées et l’accès aux canaux restent inchangés.",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Confirmez la remise à payer de {{username}} avant de faire de ce compte un fournisseur de canal.",
     "Confirm the verification code sent to your new email address.": "Saisissez le code de vérification envoyé à votre nouvelle adresse e-mail.",
     "Confirm Unbind": "Confirmer la dissociation",
     "Confirm usage reset": "Confirmer la réinitialisation de l’utilisation",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "Échec de l'envoi de l'e-mail de réinitialisation",
     "Failed to send verification code": "Échec de l'envoi du code de vérification",
     "Failed to send verification email": "Échec de l'envoi de l'e-mail de vérification",
+    "Failed to set channel supplier": "Échec de la définition du fournisseur de canal",
     "Failed to set tag": "Échec de la définition de l'étiquette",
     "Failed to set the audio completion ratio: {{error}}": "Échec de la définition du ratio de complétion audio : {{error}}",
     "Failed to set the audio ratio: {{error}}": "Échec de la définition du ratio audio : {{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "Payer {{amount}} <savings>• Économisez {{saved}}</savings>",
     "Pay with Balance": "Payer avec le solde",
     "Pay-as-you-go with real-time usage monitoring": "Paiement à l'usage avec suivi de la consommation en temps réel",
+    "Payable Discount": "Remise à payer",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "La remise à payer doit être supérieure à 0 et au plus égale à 1, avec au plus 4 décimales",
     "Payment": "Paiement",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "Mode agrégateur de paiement — embarquez avec votre propre société enregistrée (entité offshore). Conçu pour les entreprises.",
     "Payment amount is too low": "Le montant du paiement est trop faible",
@@ -7811,10 +7815,6 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom",
-    "Payable Discount": "Remise à payer",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "La remise à payer doit être supérieure à 0 et au plus égale à 1, avec au plus 4 décimales",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "Confirmez la remise à payer de {{username}} avant de faire de ce compte un fournisseur de canal.",
-    "Failed to set channel supplier": "Échec de la définition du fournisseur de canal"
+    "Zoom": "Zoom"
   }
 }

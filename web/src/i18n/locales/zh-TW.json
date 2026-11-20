@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "確認設定並完成安裝",
     "confirm that I bear legal responsibility arising from deployment": "確認承擔因部署",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "請確認最終價格及將移除的設定。中繼資料與渠道權限不會變更。",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "將 {{username}} 設為渠道供應商之前，請確認其應付折扣。",
     "Confirm the verification code sent to your new email address.": "請輸入傳送至新信箱的驗證碼。",
     "Confirm Unbind": "確認解綁",
     "Confirm usage reset": "確認重置用量",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "發送重置郵件失敗",
     "Failed to send verification code": "發送驗證碼失敗",
     "Failed to send verification email": "發送驗證郵件失敗",
+    "Failed to set channel supplier": "設為渠道供應商失敗",
     "Failed to set tag": "設定標籤失敗",
     "Failed to set the audio completion ratio: {{error}}": "音訊補全倍率設定失敗：{{error}}",
     "Failed to set the audio ratio: {{error}}": "音訊倍率設定失敗：{{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "支付 {{amount}} <savings>• 節省 {{saved}}</savings>",
     "Pay with Balance": "使用餘額支付",
     "Pay-as-you-go with real-time usage monitoring": "按量付費，實時監控使用情況",
+    "Payable Discount": "應付折扣",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "應付折扣必須大於 0 且不超過 1，最多 4 位小數",
     "Payment": "支付",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "支付聚合模式：使用你自己的註冊公司（離岸實體）入駐。面向企業場景構建。",
     "Payment amount is too low": "儲值金額過低",
@@ -7811,10 +7815,6 @@
     "Zhipu": "智譜",
     "Zhipu GLM": "智譜GLM",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放",
-    "Payable Discount": "應付折扣",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "應付折扣必須大於 0 且不超過 1，最多 4 位小數",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "將 {{username}} 設為渠道供應商之前，請確認其應付折扣。",
-    "Failed to set channel supplier": "設為渠道供應商失敗"
+    "Zoom": "縮放"
   }
 }

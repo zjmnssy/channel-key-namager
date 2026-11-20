@@ -1528,6 +1528,7 @@
     "Confirm settings and finish setup": "設定を確認してセットアップを完了",
     "confirm that I bear legal responsibility arising from deployment": "デプロイ",
     "Confirm the final prices and removed settings. Metadata and channel access are not changed.": "最終料金と削除する設定を確認してください。メタデータとチャネル権限は変更されません。",
+    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "{{username}} をチャネルサプライヤーにする前に、支払折扣を確認してください。",
     "Confirm the verification code sent to your new email address.": "新しいメールアドレスに届いた確認コードを入力してください。",
     "Confirm Unbind": "連携解除を確認",
     "Confirm usage reset": "使用量リセットの確認",
@@ -2788,6 +2789,7 @@
     "Failed to send reset email": "リセットメールの送信に失敗しました",
     "Failed to send verification code": "認証コードの送信に失敗しました",
     "Failed to send verification email": "確認メールの送信に失敗しました",
+    "Failed to set channel supplier": "チャネルサプライヤーの設定に失敗しました",
     "Failed to set tag": "タグの設定に失敗しました",
     "Failed to set the audio completion ratio: {{error}}": "音声補完倍率の設定に失敗しました：{{error}}",
     "Failed to set the audio ratio: {{error}}": "音声倍率の設定に失敗しました：{{error}}",
@@ -4810,6 +4812,8 @@
     "Pay {{amount}} <savings>• Save {{saved}}</savings>": "支払額 {{amount}} <savings>• {{saved}} お得</savings>",
     "Pay with Balance": "残高で支払う",
     "Pay-as-you-go with real-time usage monitoring": "リアルタイム使用量監視付き従量課金制",
+    "Payable Discount": "支払折扣",
+    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "支払折扣は 0 より大きく 1 以下で、小数点以下は最大 4 桁です",
     "Payment": "支払い",
     "Payment aggregator mode — onboard with your own registered company (offshore entity). Built for Enterprise.": "決済アグリゲーターモード — 自社の登録済み法人（オフショア法人）でオンボーディングします。エンタープライズ向けです。",
     "Payment amount is too low": "支払金額が低すぎます",
@@ -7811,10 +7815,6 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム",
-    "Payable Discount": "支払折扣",
-    "Payable discount must be greater than 0 and at most 1, with at most 4 decimal places": "支払折扣は 0 より大きく 1 以下で、小数点以下は最大 4 桁です",
-    "Confirm the payable discount for {{username}} before making the account a channel supplier.": "{{username}} をチャネルサプライヤーにする前に、支払折扣を確認してください。",
-    "Failed to set channel supplier": "チャネルサプライヤーの設定に失敗しました"
+    "Zoom": "ズーム"
   }
 }
