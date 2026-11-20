@@ -743,10 +743,10 @@ func setupChannelPushTest(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{},
 		&model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}))
 	clearTables := func() {
-		session := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped()
 		for _, table := range []any{&model.ChannelPushRunSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushTaskSupplier{},
 			&model.ChannelPushTask{}, &model.Channel{}, &model.User{}} {
-			require.NoError(t, session.Delete(table).Error)
+			// A fresh session per table: GORM reuses the Statement of a stored session, so every Delete would hit the first table.
+			require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(table).Error)
 		}
 	}
 	clearTables()
