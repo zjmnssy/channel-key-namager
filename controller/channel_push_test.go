@@ -1614,3 +1614,156 @@ func supplierIdsOf(t *testing.T, db *gorm.DB, taskId int) []int {
 	require.NoError(t, db.Model(&model.ChannelPushTaskSupplier{}).Where("task_id = ?", taskId).Pluck("supplier_user_id", &ids).Error)
 	return ids
 }
+
+func TestChannelPushRunList(t *testing.T) {
+	db := setupChannelPushTest(t)
+	alpha := channelPushSeedSite(t, db, "alpha")
+	beta := channelPushSeedSite(t, db, "beta")
+	sup1 := channelPushSeedSupplier(t, db, "sup-a")
+	sup2 := channelPushSeedSupplier(t, db, "sup-b")
+	errorMessage, err := common.Marshal(common.NewMessage("Run details could not be saved: {{detail}}", map[string]any{"detail": "disk full"}))
+	require.NoError(t, err)
+	seed := func(site *model.ThirdPartySite, supplier *model.User, startedAt int64, errorText string) model.ChannelPushRun {
+		refs, err := common.Marshal([]model.ChannelPushSupplierRef{{Id: supplier.Id, Username: supplier.Username}})
+		require.NoError(t, err)
+		run := model.ChannelPushRun{TaskId: 1, SiteId: site.Id, SiteName: site.Name, TargetGroup: "vip", Suppliers: string(refs),
+			Status: model.ChannelPushRunFailed, ErrorMessage: errorText, StartedAt: startedAt, FinishedAt: startedAt + 5,
+			SiteSnapshot: `[{"name":"site_snapshot_marker"}]`, TargetSnapshot: `[{"name":"target_snapshot_marker"}]`,
+			Actions: `[{"category":"actions_marker"}]`}
+		require.NoError(t, db.Create(&run).Error)
+		require.NoError(t, db.Create(&model.ChannelPushRunSupplier{RunId: run.Id, SupplierUserId: supplier.Id}).Error)
+		return run
+	}
+	r100 := seed(alpha, sup1, 100, "")
+	r200 := seed(beta, sup2, 200, string(errorMessage))
+	r300 := seed(alpha, sup2, 300, "")
+
+	type runPage struct {
+		Total int                        `json:"total"`
+		Items []model.ChannelPushRunView `json:"items"`
+	}
+	list := func(query string) (string, []model.ChannelPushRunView, int) {
+		raw, result := thirdPartySiteCall[runPage](t, http.MethodGet, "/api/channel_push/runs?"+query, "", nil, GetChannelPushRuns)
+		require.True(t, result.Success, result.Message)
+		return raw, result.Data.Items, result.Data.Total
+	}
+	ids := func(items []model.ChannelPushRunView) []int {
+		out := make([]int, 0, len(items))
+		for _, item := range items {
+			out = append(out, item.Id)
+		}
+		return out
+	}
+
+	raw, items, total := list("p=1&page_size=10")
+	assert.Equal(t, 3, total)
+	assert.Equal(t, []int{r300.Id, r200.Id, r100.Id}, ids(items))
+	for _, text := range []string{"site_snapshot", "target_snapshot", "actions", "remote-access-token", "sk-"} {
+		assert.NotContains(t, raw, text)
+	}
+	assert.Nil(t, items[0].Error)
+	require.NotNil(t, items[1].Error)
+	assert.Equal(t, "Run details could not be saved: {{detail}}", items[1].Error.Key)
+	assert.Equal(t, "disk full", items[1].Error.Params["detail"])
+	assert.Equal(t, []model.ChannelPushSupplierRef{{Id: sup2.Id, Username: "sup-b"}}, items[1].Suppliers)
+
+	_, items, _ = list("start_from=150&start_to=250")
+	assert.Equal(t, []int{r200.Id}, ids(items))
+	_, items, _ = list("start_from=200&start_to=300")
+	assert.Equal(t, []int{r300.Id, r200.Id}, ids(items))
+	_, items, _ = list("supplier_user_id=" + strconv.Itoa(sup2.Id))
+	assert.Equal(t, []int{r300.Id, r200.Id}, ids(items))
+	_, items, _ = list("site_id=" + strconv.Itoa(alpha.Id))
+	assert.Equal(t, []int{r300.Id, r100.Id}, ids(items))
+	_, items, total = list("site_id=" + strconv.Itoa(alpha.Id) + "&supplier_user_id=" + strconv.Itoa(sup1.Id))
+	assert.Equal(t, 1, total)
+	assert.Equal(t, []int{r100.Id}, ids(items))
+	_, items, total = list("p=2&page_size=2")
+	assert.Equal(t, 3, total)
+	assert.Equal(t, []int{r100.Id}, ids(items))
+
+	_, bad := thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs?start_from=abc", "", nil, GetChannelPushRuns)
+	assert.False(t, bad.Success)
+	assert.Equal(t, "Invalid parameters", bad.MessageKey)
+}
+
+func TestChannelPushRunDetail(t *testing.T) {
+	db := setupChannelPushTest(t)
+	full := model.ChannelPushRun{TaskId: 1, SiteId: 1, SiteName: "alpha", TargetGroup: "vip", Status: model.ChannelPushRunSuccess, StartedAt: 1,
+		SiteSnapshot: `[{"id":1}]`, TargetSnapshot: `[{"id":2}]`, Actions: `[{"category":"create"}]`}
+	require.NoError(t, db.Create(&full).Error)
+	empty := model.ChannelPushRun{TaskId: 1, SiteId: 1, SiteName: "alpha", TargetGroup: "vip", Status: model.ChannelPushRunRunning, StartedAt: 2}
+	require.NoError(t, db.Create(&empty).Error)
+
+	detail := func(id int, kind string) (string, thirdPartySiteResult[any]) {
+		params := gin.Params{{Key: "id", Value: strconv.Itoa(id)}, {Key: "kind", Value: kind}}
+		return thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs/"+strconv.Itoa(id)+"/"+kind, "", params, GetChannelPushRunDetail)
+	}
+	for kind, want := range map[string]string{"site": `"data":[{"id":1}]`, "target": `"data":[{"id":2}]`, "actions": `"data":[{"category":"create"}]`} {
+		raw, result := detail(full.Id, kind)
+		require.True(t, result.Success, result.Message)
+		assert.Contains(t, raw, want, kind)
+	}
+	for _, kind := range []string{"site", "target", "actions"} {
+		raw, result := detail(empty.Id, kind)
+		require.True(t, result.Success, result.Message)
+		assert.Nil(t, result.Data)
+		assert.Contains(t, raw, `"data":null`)
+	}
+	_, result := detail(full.Id, "x")
+	assert.False(t, result.Success)
+	assert.Equal(t, "Invalid parameters", result.MessageKey)
+	_, result = detail(full.Id+1000, "site")
+	assert.False(t, result.Success)
+	assert.Equal(t, "Run does not exist", result.MessageKey)
+}
+
+func TestChannelPushSiteGroups(t *testing.T) {
+	db := setupChannelPushTest(t)
+	previous := service.ChannelPushDefaultOptions
+	service.ChannelPushDefaultOptions.Pace = 0
+	service.ChannelPushDefaultOptions.Timeout = 200 * time.Millisecond
+	service.ChannelPushDefaultOptions.Sleep = (&fakeSleepRecorder{}).sleep
+	t.Cleanup(func() { service.ChannelPushDefaultOptions = previous })
+
+	site := channelPushSeedSite(t, db, "alpha")
+	groups := func(siteId int) (string, thirdPartySiteResult[[]string]) {
+		return thirdPartySiteCall[[]string](t, http.MethodGet, "/api/channel_push/sites/"+strconv.Itoa(siteId)+"/groups", "", channelPushIdParam(siteId), GetChannelPushSiteGroups)
+	}
+	pointAt := func(fake *fakeNewAPISite) {
+		require.NoError(t, db.Model(&model.ThirdPartySite{}).Where("id = ?", site.Id).Update("base_url", fake.server.URL).Error)
+	}
+
+	healthy := newFakeNewAPISite(t)
+	pointAt(healthy)
+	raw, result := groups(site.Id)
+	require.True(t, result.Success, result.Message)
+	assert.Equal(t, []string{"default", "vip"}, result.Data)
+	assert.NotContains(t, raw, "remote-access-token")
+
+	html := newFakeNewAPISite(t)
+	html.fail(http.MethodGet, "/api/group/", fakeResponse{body: "<html>"}, fakeResponse{body: "<html>"}, fakeResponse{body: "<html>"}, fakeResponse{body: "<html>"})
+	pointAt(html)
+	raw, result = groups(site.Id)
+	assert.False(t, result.Success)
+	assert.Equal(t, "Failed to read the site's groups: {{detail}}", result.MessageKey)
+	assert.Len(t, html.recorded(http.MethodGet, "/api/group/"), 3)
+	assert.NotContains(t, raw, "remote-access-token")
+
+	unauthorized := newFakeNewAPISite(t)
+	unauthorized.fail(http.MethodGet, "/api/group/", fakeResponse{status: 401, body: `{"success":false,"message":"no auth"}`})
+	pointAt(unauthorized)
+	raw, result = groups(site.Id)
+	assert.False(t, result.Success)
+	assert.Equal(t, "Failed to read the site's groups: {{detail}}", result.MessageKey)
+	assert.Contains(t, raw, "no auth")
+	assert.Len(t, unauthorized.recorded(http.MethodGet, "/api/group/"), 1)
+
+	gone := channelPushSeedSite(t, db, "gone")
+	require.NoError(t, db.Delete(gone).Error)
+	for _, id := range []int{gone.Id, gone.Id + 1000} {
+		_, result = groups(id)
+		assert.False(t, result.Success)
+		assert.Equal(t, "Site does not exist", result.MessageKey)
+	}
+}

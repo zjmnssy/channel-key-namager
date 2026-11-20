@@ -700,8 +700,26 @@ it.each([
     '/api/third_party_site/:id',
     'Deleted a third-party site',
   ],
+  [
+    'channel_push.task_create',
+    'POST',
+    '/api/channel_push/tasks',
+    'Created a channel push task',
+  ],
+  [
+    'channel_push.task_update',
+    'PUT',
+    '/api/channel_push/tasks/:id',
+    'Updated a channel push task',
+  ],
+  [
+    'channel_push.task_toggle',
+    'POST',
+    '/api/channel_push/tasks/:id/enabled',
+    'Enabled or disabled a channel push task',
+  ],
 ])(
-  'renders third-party site audit %s as a readable summary',
+  'renders third-party site and channel push audit %s as a readable summary',
   async (action, method, route, summary) => {
     const i18n = createInstance()
     await i18n.init({ lng: 'en', resources: {} })

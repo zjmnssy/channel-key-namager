@@ -342,3 +342,88 @@ func GetChannelPushChannelForCreate(id int) (*Channel, error) {
 	}
 	return &channel, nil
 }
+
+var ErrChannelPushRunNotFound = errors.New("Run does not exist")
+
+// ChannelPushRunFilter narrows the run list; a zero field means no limit.
+// StartFrom and StartTo are a closed range on started_at.
+type ChannelPushRunFilter struct {
+	StartFrom, StartTo int64
+	SupplierUserId     int
+	SiteId             int
+}
+
+// ChannelPushRunView is a run as listed: no details, suppliers and error parsed.
+type ChannelPushRunView struct {
+	ChannelPushRun
+	Suppliers []ChannelPushSupplierRef `json:"suppliers"`
+	Error     *common.Message          `json:"error"`
+}
+
+// ListChannelPushRuns pages the runs, newest first, without the three detail columns.
+func ListChannelPushRuns(filter ChannelPushRunFilter, startIdx, num int) ([]ChannelPushRunView, int64, error) {
+	query := DB.Model(&ChannelPushRun{})
+	if filter.StartFrom > 0 {
+		query = query.Where("started_at >= ?", filter.StartFrom)
+	}
+	if filter.StartTo > 0 {
+		query = query.Where("started_at <= ?", filter.StartTo)
+	}
+	if filter.SiteId > 0 {
+		query = query.Where("site_id = ?", filter.SiteId)
+	}
+	if filter.SupplierUserId > 0 {
+		query = query.Where("id IN (?)", DB.Model(&ChannelPushRunSupplier{}).
+			Select("run_id").Where("supplier_user_id = ?", filter.SupplierUserId))
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var runs []ChannelPushRun
+	if err := query.Omit(channelPushRunDetailColumns...).Order("started_at desc").Order("id desc").
+		Limit(num).Offset(startIdx).Find(&runs).Error; err != nil {
+		return nil, 0, err
+	}
+	views := make([]ChannelPushRunView, 0, len(runs))
+	for _, run := range runs {
+		view := ChannelPushRunView{ChannelPushRun: run, Suppliers: []ChannelPushSupplierRef{}}
+		if run.Suppliers != "" {
+			if err := common.UnmarshalJsonStr(run.Suppliers, &view.Suppliers); err != nil {
+				return nil, 0, err
+			}
+		}
+		if run.ErrorMessage != "" {
+			var message common.Message
+			if err := common.UnmarshalJsonStr(run.ErrorMessage, &message); err != nil {
+				return nil, 0, err
+			}
+			view.Error = &message
+		}
+		views = append(views, view)
+	}
+	return views, total, nil
+}
+
+// GetChannelPushRunDetail reads one stored detail of a run; kind is site,
+// target or actions.
+func GetChannelPushRunDetail(id int, kind string) (LongText, error) {
+	column := map[string]string{"site": "site_snapshot", "target": "target_snapshot", "actions": "actions"}[kind]
+	if column == "" {
+		return "", errors.New("Invalid parameters")
+	}
+	var runs []ChannelPushRun
+	if err := DB.Select("id", column).Where("id = ?", id).Limit(1).Find(&runs).Error; err != nil {
+		return "", err
+	}
+	if len(runs) == 0 {
+		return "", ErrChannelPushRunNotFound
+	}
+	switch kind {
+	case "site":
+		return runs[0].SiteSnapshot, nil
+	case "target":
+		return runs[0].TargetSnapshot, nil
+	}
+	return runs[0].Actions, nil
+}

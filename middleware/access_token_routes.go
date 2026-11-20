@@ -243,6 +243,16 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"PUT /api/third_party_site/:id":    accessTokenSessionRule,
 	"DELETE /api/third_party_site/:id": accessTokenSessionRule,
 
+	// router/api-router.go: /api/channel_push
+	"GET /api/channel_push/tasks":              accessTokenSessionRule,
+	"POST /api/channel_push/tasks":             accessTokenSessionRule,
+	"PUT /api/channel_push/tasks/:id":          accessTokenSessionRule,
+	"POST /api/channel_push/tasks/:id/enabled": accessTokenSessionRule,
+	"GET /api/channel_push/runs":               accessTokenSessionRule,
+	"GET /api/channel_push/runs/:id/:kind":     accessTokenSessionRule,
+	"GET /api/channel_push/sites/:id/groups":   accessTokenSessionRule,
+	"GET /api/channel_push/options":            accessTokenSessionRule,
+
 	// router/api-router.go: /api/audit, /api/log, /api/data
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),
 	"GET /api/log/":                             accessTokenScopeRule("log:read"),
