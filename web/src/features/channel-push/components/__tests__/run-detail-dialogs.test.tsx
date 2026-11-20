@@ -174,11 +174,11 @@ describe('RunDetailDialog', () => {
 
     const tabs = await within(dialog).findAllByRole('tab')
     expect(tabs.map((tab) => tab.textContent)).toEqual([
-      'Unchanged0',
+      'No change needed0',
       'Enable channel0',
       'Disable channel0',
       'Update model list1',
-      'Create0',
+      'Create new0',
       'Orphan channel1',
       'Auto-disabled on site0',
       'Unsupported for push0',

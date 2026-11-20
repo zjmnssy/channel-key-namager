@@ -140,7 +140,7 @@ export function TaskMutateDialog(props: TaskMutateDialogProps) {
     if (task && !items.some((item) => item.value === String(task.site_id))) {
       items.push({
         value: String(task.site_id),
-        label: `${task.site_name} · ${t('Deleted')}`,
+        label: `${task.site_name} · ${t('Site deleted')}`,
       })
     }
     return items

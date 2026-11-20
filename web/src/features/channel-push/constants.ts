@@ -33,7 +33,11 @@ export const CHANNEL_PUSH_CATEGORIES: {
   labelKey: string
   shortLabelKey: string
 }[] = [
-  { value: 'unchanged', labelKey: 'Unchanged', shortLabelKey: 'Unchanged' },
+  {
+    value: 'unchanged',
+    labelKey: 'No change needed',
+    shortLabelKey: 'Unchanged',
+  },
   { value: 'enable', labelKey: 'Enable channel', shortLabelKey: 'Enable' },
   { value: 'disable', labelKey: 'Disable channel', shortLabelKey: 'Disable' },
   {
@@ -41,7 +45,7 @@ export const CHANNEL_PUSH_CATEGORIES: {
     labelKey: 'Update model list',
     shortLabelKey: 'Update models',
   },
-  { value: 'create', labelKey: 'Create', shortLabelKey: 'Create' },
+  { value: 'create', labelKey: 'Create new', shortLabelKey: 'Create' },
   { value: 'orphan', labelKey: 'Orphan channel', shortLabelKey: 'Orphan' },
   {
     value: 'auto_disabled',

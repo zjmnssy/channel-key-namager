@@ -150,7 +150,7 @@ describe('TasksTable', () => {
       'Supplier Username',
       'Third-Party Site ID',
       'Third-Party Site Name',
-      'Enabled',
+      'Is Enabled',
       'Task Type',
       'Last Push Time',
       'Created Time',
@@ -189,7 +189,7 @@ describe('TasksTable', () => {
     await renderPage([{ ...periodicTask, site_deleted: true }])
 
     expect(await screen.findByText('Alpha')).toBeInTheDocument()
-    expect(screen.getByText('Deleted')).toBeInTheDocument()
+    expect(screen.getByText('Site deleted')).toBeInTheDocument()
   })
 
   it('disables a task from the row menu and refreshes the list', async () => {
@@ -240,7 +240,7 @@ describe('TasksTable', () => {
 
     await screen.findByText('Alpha')
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Modify' }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Edit push task' })
     expect(
@@ -254,7 +254,7 @@ describe('TasksTable', () => {
 
     await screen.findByText('Alpha')
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Modify' }))
     const dialog = await screen.findByRole('dialog', { name: 'Edit push task' })
     const interval = await within(dialog).findByLabelText('Interval (minutes)')
     await user.clear(interval)

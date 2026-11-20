@@ -76,7 +76,7 @@ export function useTasksColumns(): ColumnDef<ChannelPushTask>[] {
           />
           {row.original.site_deleted && (
             <StatusBadge
-              label={t('Deleted')}
+              label={t('Site deleted')}
               variant='danger'
               copyable={false}
             />
@@ -86,7 +86,7 @@ export function useTasksColumns(): ColumnDef<ChannelPushTask>[] {
     },
     {
       accessorKey: 'enabled',
-      header: t('Enabled'),
+      header: t('Is Enabled'),
       cell: ({ row }) => (
         <StatusBadge
           label={row.original.enabled ? t('Enabled') : t('Disabled')}

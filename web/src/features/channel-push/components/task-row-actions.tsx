@@ -70,7 +70,7 @@ export function TaskRowActions(props: TaskRowActionsProps) {
           setOpen('update')
         }}
       >
-        {t('Edit')}
+        {t('Modify')}
         <DropdownMenuShortcut>
           <Edit size={16} />
         </DropdownMenuShortcut>
