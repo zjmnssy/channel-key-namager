@@ -1462,3 +1462,155 @@ func TestChannelPushRunDetailsFallback(t *testing.T) {
 	require.NoError(t, db.First(&after, task.Id).Error)
 	assert.Equal(t, run.FinishedAt, after.LastFinishedAt)
 }
+
+func TestChannelPushScheduling(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	const now = int64(10000)
+	setQueue := func(id int, enabled bool, nextRunAt int64) {
+		require.NoError(t, db.Model(&model.ChannelPushTask{}).Where("id = ?", id).
+			Select("enabled", "next_run_at").Updates(&model.ChannelPushTask{Enabled: enabled, NextRunAt: nextRunAt}).Error)
+	}
+	load := func(id int) model.ChannelPushTask {
+		var task model.ChannelPushTask
+		require.NoError(t, db.First(&task, id).Error)
+		return task
+	}
+	// newTask makes a task on its own site and supplier.
+	newTask := func(name string, overrides map[string]any) model.ChannelPushTask {
+		taskSite := channelPushSeedSite(t, db, name)
+		taskSupplier := channelPushSeedSupplier(t, db, name)
+		created := channelPushCreateTask(t, channelPushTaskBody(t, taskSite.Id, []int{taskSupplier.Id}, overrides))
+		require.True(t, created.Success, created.Message)
+		return load(created.Data.Id)
+	}
+
+	t.Run("due scan", func(t *testing.T) {
+		due := channelPushNewTask(t, db, site.Id, supplier.Id)
+		setQueue(due.Id, true, now)
+		disabled := newTask("disabled", nil)
+		setQueue(disabled.Id, false, now-5)
+		unqueued := newTask("unqueued", nil)
+		setQueue(unqueued.Id, true, 0)
+		future := newTask("future", nil)
+		setQueue(future.Id, true, now+1)
+		gone := newTask("gone", nil)
+		setQueue(gone.Id, true, now-5)
+		require.NoError(t, db.Delete(&model.ThirdPartySite{}, gone.SiteId).Error)
+
+		tasks, err := model.ListDueChannelPushTasks(now, 10)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+		assert.Equal(t, due.Id, tasks[0].Id)
+	})
+
+	t.Run("claim twice", func(t *testing.T) {
+		task := newTask("claim", nil)
+		setQueue(task.Id, true, now)
+		task = load(task.Id)
+		run, ok, err := model.ClaimChannelPushRun(task, now)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, model.ChannelPushRunRunning, run.Status)
+		_, ok, err = model.ClaimChannelPushRun(task, now)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		var count int64
+		require.NoError(t, db.Model(&model.ChannelPushRun{}).Where("task_id = ?", task.Id).Count(&count).Error)
+		assert.EqualValues(t, 1, count)
+	})
+
+	// claimAndFinish claims a queued task, runs mid, and finishes the run at 1000.
+	claimAndFinish := func(task model.ChannelPushTask, mid func(task model.ChannelPushTask)) model.ChannelPushTask {
+		setQueue(task.Id, true, now)
+		task = load(task.Id)
+		run, ok, err := model.ClaimChannelPushRun(task, now)
+		require.NoError(t, err)
+		require.True(t, ok)
+		if mid != nil {
+			mid(task)
+		}
+		run.Status = model.ChannelPushRunSuccess
+		require.NoError(t, model.FinishChannelPushRun(run, 1000))
+		return load(task.Id)
+	}
+
+	t.Run("next time after finish", func(t *testing.T) {
+		periodic := claimAndFinish(newTask("periodic", nil), nil)
+		assert.EqualValues(t, 1000+30*60, periodic.NextRunAt)
+		assert.EqualValues(t, 1000, periodic.LastFinishedAt)
+
+		once := claimAndFinish(newTask("once", map[string]any{"task_type": "once", "interval_minutes": 0}), nil)
+		assert.EqualValues(t, 0, once.NextRunAt)
+		assert.EqualValues(t, 1000, once.LastFinishedAt)
+	})
+
+	t.Run("saved during run", func(t *testing.T) {
+		for _, taskType := range []string{"periodic", "once"} {
+			task := newTask("saved-"+taskType, map[string]any{"task_type": taskType, "interval_minutes": 30})
+			before := common.GetTimestamp()
+			finished := claimAndFinish(task, func(task model.ChannelPushTask) {
+				_, err := model.UpdateChannelPushTask(task.Id, model.ChannelPushTaskInput{SiteId: task.SiteId,
+					SupplierUserIds: supplierIdsOf(t, db, task.Id), TaskType: taskType, IntervalMinutes: 30, TargetGroup: "svip"})
+				require.NoError(t, err)
+			})
+			assert.InDelta(t, before, finished.NextRunAt, 2, taskType)
+			assert.NotEqualValues(t, 1000+30*60, finished.NextRunAt, taskType)
+		}
+	})
+
+	t.Run("disabled during run", func(t *testing.T) {
+		finished := claimAndFinish(newTask("toggled", nil), func(task model.ChannelPushTask) {
+			_, err := model.SetChannelPushTaskEnabled(task.Id, false)
+			require.NoError(t, err)
+		})
+		assert.EqualValues(t, 0, finished.NextRunAt)
+		assert.False(t, finished.Enabled)
+	})
+
+	t.Run("restart recovery", func(t *testing.T) {
+		// Drop the run the claim subtest left running.
+		require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Where("status = ?", model.ChannelPushRunRunning).Delete(&model.ChannelPushRun{}).Error)
+		periodic := newTask("rec-periodic", nil)
+		once := newTask("rec-once", map[string]any{"task_type": "once", "interval_minutes": 0})
+		saved := newTask("rec-saved", nil)
+		runs := map[int]*model.ChannelPushRun{}
+		for _, task := range []model.ChannelPushTask{periodic, once, saved} {
+			setQueue(task.Id, true, now)
+			run, ok, err := model.ClaimChannelPushRun(load(task.Id), now)
+			require.NoError(t, err)
+			require.True(t, ok)
+			runs[task.Id] = run
+		}
+		// A save made while the process was down wins over the recovery.
+		setQueue(saved.Id, true, 7777)
+
+		recovered, err := model.RecoverInterruptedChannelPushRuns(5000)
+		require.NoError(t, err)
+		assert.Equal(t, 3, recovered)
+		for taskId, run := range runs {
+			var stored model.ChannelPushRun
+			require.NoError(t, db.First(&stored, run.Id).Error)
+			assert.Equal(t, model.ChannelPushRunFailed, stored.Status)
+			assert.EqualValues(t, 5000, stored.FinishedAt)
+			message := channelPushRunError(t, stored)
+			assert.Equal(t, "The run was interrupted by a service restart", message.Key)
+			assert.EqualValues(t, 5000, load(taskId).LastFinishedAt)
+		}
+		assert.EqualValues(t, 5000+30*60, load(periodic.Id).NextRunAt)
+		assert.EqualValues(t, 0, load(once.Id).NextRunAt)
+		assert.EqualValues(t, 7777, load(saved.Id).NextRunAt)
+
+		again, err := model.RecoverInterruptedChannelPushRuns(6000)
+		require.NoError(t, err)
+		assert.Equal(t, 0, again)
+	})
+}
+
+func supplierIdsOf(t *testing.T, db *gorm.DB, taskId int) []int {
+	t.Helper()
+	var ids []int
+	require.NoError(t, db.Model(&model.ChannelPushTaskSupplier{}).Where("task_id = ?", taskId).Pluck("supplier_user_id", &ids).Error)
+	return ids
+}

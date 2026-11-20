@@ -188,6 +188,64 @@ func FinishChannelPushRun(run *ChannelPushRun, finishedAt int64) error {
 		Update("next_run_at", finishedAt+int64(task.IntervalMinutes)*60).Error
 }
 
+// RecoverInterruptedChannelPushRuns fails the runs a restart left in running
+// and records the finish on their tasks. A periodic task is queued again only
+// if next_run_at is still 0, so a save made in the meantime wins. It returns
+// the number of runs recovered.
+func RecoverInterruptedChannelPushRuns(now int64) (int, error) {
+	message, err := common.Marshal(common.NewMessage("The run was interrupted by a service restart"))
+	if err != nil {
+		return 0, err
+	}
+	recovered := 0
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var runs []ChannelPushRun
+		if err := tx.Select("id", "task_id").Where("status = ?", ChannelPushRunRunning).Find(&runs).Error; err != nil {
+			return err
+		}
+		if len(runs) == 0 {
+			return nil
+		}
+		runIds := make([]int, 0, len(runs))
+		taskIds := make([]int, 0, len(runs))
+		for _, run := range runs {
+			runIds = append(runIds, run.Id)
+			if !slices.Contains(taskIds, run.TaskId) {
+				taskIds = append(taskIds, run.TaskId)
+			}
+		}
+		result := tx.Model(&ChannelPushRun{}).Where("id IN ? AND status = ?", runIds, ChannelPushRunRunning).
+			Updates(map[string]any{"status": ChannelPushRunFailed, "error_message": string(message), "finished_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		recovered = int(result.RowsAffected)
+
+		var tasks []ChannelPushTask
+		if err := tx.Where("id IN ?", taskIds).Find(&tasks).Error; err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			if err := tx.Model(&ChannelPushTask{}).Where("id = ?", task.Id).Update("last_finished_at", now).Error; err != nil {
+				return err
+			}
+			if task.TaskType != ChannelPushTaskTypePeriodic {
+				continue
+			}
+			if err := tx.Model(&ChannelPushTask{}).
+				Where("id = ? AND enabled = ? AND next_run_at = ?", task.Id, true, 0).
+				Update("next_run_at", now+int64(task.IntervalMinutes)*60).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return recovered, nil
+}
+
 // GetChannelPushSite reads a live site with its ApiKey, outside the SQL log.
 func GetChannelPushSite(id int) (*ThirdPartySite, error) {
 	var site ThirdPartySite
