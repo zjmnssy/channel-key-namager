@@ -374,4 +374,28 @@ describe('TaskMutateDialog', () => {
     )
     expect(client.getQueryState(listKey)?.isInvalidated).toBe(true)
   })
+
+  it('shows a plain saved toast when the saved task is disabled', async () => {
+    const disabledTask = { ...savedTask, enabled: false }
+    vi.mocked(updateChannelPushTask).mockResolvedValue({
+      success: true,
+      data: disabledTask,
+    })
+    const success = vi.spyOn(toast, 'success')
+    const user = userEvent.setup()
+    render(wrap(disabledTask))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: 'Target group' })
+      ).toBeEnabled()
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(success).toHaveBeenCalledWith('Saved successfully')
+    expect(success).not.toHaveBeenCalledWith(
+      'Saved. The task will start within half a minute'
+    )
+  })
 })

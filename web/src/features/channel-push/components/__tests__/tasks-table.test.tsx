@@ -214,6 +214,29 @@ describe('TasksTable', () => {
     expect(success).toHaveBeenCalledWith('Task disabled')
   })
 
+  it('enables a task from the row menu and says it will start soon', async () => {
+    const get = await renderPage([{ ...periodicTask, enabled: false }])
+    const user = userEvent.setup()
+    const success = vi.spyOn(toast, 'success').mockImplementation(() => 1)
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true } })
+
+    await screen.findByText('Alpha')
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Enable' }))
+
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/api/channel_push/tasks/1/enabled', {
+        enabled: true,
+      })
+    )
+    await waitFor(() => expect(listRequests(get)).toHaveLength(2))
+    expect(success).toHaveBeenCalledWith(
+      'Saved. The task will start within half a minute'
+    )
+  })
+
   it('keeps the task unchanged and reports the error when enabling fails', async () => {
     const get = await renderPage([{ ...periodicTask, enabled: false }])
     const user = userEvent.setup()

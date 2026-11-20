@@ -54,7 +54,12 @@ export function TaskRowActions(props: TaskRowActionsProps) {
       return res
     },
     onSuccess: () => {
-      toast.success(nextEnabled ? t('Task enabled') : t('Task disabled'))
+      // Enabling queues the task, so say when it starts.
+      toast.success(
+        nextEnabled
+          ? t('Saved. The task will start within half a minute')
+          : t('Task disabled')
+      )
       void queryClient.invalidateQueries({
         queryKey: CHANNEL_PUSH_QUERY_KEYS.tasks,
       })

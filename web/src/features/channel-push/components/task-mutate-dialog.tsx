@@ -195,8 +195,13 @@ export function TaskMutateDialog(props: TaskMutateDialogProps) {
       if (!res.success) throw createServerError(res)
       return res
     },
-    onSuccess: () => {
-      toast.success(t('Saved. The task will start within half a minute'))
+    onSuccess: (res) => {
+      // Only an enabled task is queued by saving.
+      toast.success(
+        res.data?.enabled
+          ? t('Saved. The task will start within half a minute')
+          : t('Saved successfully')
+      )
       void queryClient.invalidateQueries({
         queryKey: CHANNEL_PUSH_QUERY_KEYS.tasks,
       })
