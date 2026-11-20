@@ -377,6 +377,7 @@ func migrateDB() error {
 		&AuthzRole{},
 		&UserAccessToken{},
 		&ThirdPartySite{},
+		&ChannelPushTask{}, &ChannelPushTaskSupplier{},
 	)
 	if err != nil {
 		return err

@@ -17,8 +17,10 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestChannelPushRemoteName(t *testing.T) {
@@ -716,4 +718,315 @@ func TestChannelPushClientPacesPerSite(t *testing.T) {
 	other := service.NewChannelPushClient(channelPushTestSite(fake, 1802), options)
 	require.NoError(t, other.SetStatus(ctx, 5, 1))
 	assert.Empty(t, otherRecorder.recorded())
+}
+
+func setupChannelPushTest(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := setupThirdPartySiteTest(t)
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}))
+	clearTables := func() {
+		session := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped()
+		for _, table := range []any{&model.ChannelPushTaskSupplier{}, &model.ChannelPushTask{}, &model.Channel{}, &model.User{}} {
+			require.NoError(t, session.Delete(table).Error)
+		}
+	}
+	clearTables()
+	t.Cleanup(clearTables)
+	return db
+}
+
+func channelPushSeedSite(t *testing.T, db *gorm.DB, name string) *model.ThirdPartySite {
+	t.Helper()
+	site := &model.ThirdPartySite{Name: name, Type: model.ThirdPartySiteTypeNewAPI, BaseURL: "https://" + name + ".example.com",
+		RemoteUserID: 7, ApiKey: "remote-access-token", ReceivableDiscount: 0.85}
+	require.NoError(t, db.Create(site).Error)
+	return site
+}
+
+func channelPushSeedSupplier(t *testing.T, db *gorm.DB, username string) *model.User {
+	t.Helper()
+	user := &model.User{Username: username, Role: common.RoleChannelSupplierUser, Status: 1, AffCode: username}
+	require.NoError(t, db.Create(user).Error)
+	return user
+}
+
+func channelPushSeedChannel(t *testing.T, db *gorm.DB, supplier *model.User, name string, status int, models string, channelType int) *model.Channel {
+	t.Helper()
+	channel := &model.Channel{Name: name, Status: status, Models: models, Type: channelType, Key: "sk-" + name,
+		CreatorUserId: supplier.Id, CreatorRole: common.RoleChannelSupplierUser}
+	require.NoError(t, db.Create(channel).Error)
+	return channel
+}
+
+func channelPushTaskBody(t *testing.T, siteId int, supplierIds []int, overrides map[string]any) string {
+	t.Helper()
+	body := map[string]any{"site_id": siteId, "supplier_user_ids": supplierIds, "task_type": "periodic",
+		"interval_minutes": 30, "target_group": "vip"}
+	for key, value := range overrides {
+		body[key] = value
+	}
+	encoded, err := common.Marshal(body)
+	require.NoError(t, err)
+	return string(encoded)
+}
+
+func channelPushCreateTask(t *testing.T, body string) thirdPartySiteResult[model.ChannelPushTask] {
+	t.Helper()
+	_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPost, "/api/channel_push/tasks", body, nil, CreateChannelPushTask)
+	return result
+}
+
+func channelPushIdParam(id int) gin.Params { return gin.Params{{Key: "id", Value: strconv.Itoa(id)}} }
+
+func TestChannelPushTaskCreateValidation(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	otherSite := channelPushSeedSite(t, db, "beta")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	supplier2 := channelPushSeedSupplier(t, db, "sup-b")
+	normalUser := &model.User{Username: "normal", Role: common.RoleCommonUser, Status: 1, AffCode: "normal"}
+	require.NoError(t, db.Create(normalUser).Error)
+	deletedSupplier := channelPushSeedSupplier(t, db, "sup-deleted")
+	require.NoError(t, db.Delete(deletedSupplier).Error)
+	deletedSite := channelPushSeedSite(t, db, "gone")
+	require.NoError(t, db.Delete(deletedSite).Error)
+
+	type validationCase struct {
+		name      string
+		siteId    int
+		suppliers []int
+		overrides map[string]any
+		key       string
+		field     string
+	}
+	ok := []int{supplier.Id}
+	cases := []validationCase{
+		{name: "missing site", siteId: 9999, suppliers: ok, key: "Site does not exist", field: "site_id"},
+		{name: "deleted site", siteId: deletedSite.Id, suppliers: ok, key: "Site does not exist", field: "site_id"},
+		{name: "no supplier", siteId: site.Id, suppliers: []int{}, key: "Select at least one supplier", field: "supplier_user_ids"},
+		{name: "duplicate supplier", siteId: site.Id, suppliers: []int{supplier.Id, supplier.Id}, key: "Each supplier can be selected only once", field: "supplier_user_ids"},
+		{name: "not a supplier", siteId: site.Id, suppliers: []int{normalUser.Id}, key: "User {{id}} is not a channel supplier", field: "supplier_user_ids"},
+		{name: "deleted supplier", siteId: site.Id, suppliers: []int{deletedSupplier.Id}, key: "User {{id}} is not a channel supplier", field: "supplier_user_ids"},
+		{name: "bad type", siteId: site.Id, suppliers: ok, overrides: map[string]any{"task_type": "daily"}, key: "Unsupported task type", field: "task_type"},
+		{name: "interval 4", siteId: site.Id, suppliers: ok, overrides: map[string]any{"interval_minutes": 4}, key: "Interval must be an integer from 5 to 1440 minutes", field: "interval_minutes"},
+		{name: "interval 1441", siteId: site.Id, suppliers: ok, overrides: map[string]any{"interval_minutes": 1441}, key: "Interval must be an integer from 5 to 1440 minutes", field: "interval_minutes"},
+		{name: "blank group", siteId: site.Id, suppliers: ok, overrides: map[string]any{"target_group": "   "}, key: "Target group is required", field: "target_group"},
+		{name: "long group", siteId: site.Id, suppliers: ok, overrides: map[string]any{"target_group": strings.Repeat("组", 65)}, key: "Target group must not exceed 64 characters", field: "target_group"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := channelPushCreateTask(t, channelPushTaskBody(t, tc.siteId, tc.suppliers, tc.overrides))
+			assert.False(t, result.Success)
+			assert.Equal(t, tc.key, result.MessageKey)
+			assert.Equal(t, tc.field, result.Field)
+		})
+	}
+	var count int64
+	require.NoError(t, db.Model(&model.ChannelPushTask{}).Count(&count).Error)
+	require.EqualValues(t, 0, count)
+
+	_, malformed := thirdPartySiteCall[any](t, http.MethodPost, "/api/channel_push/tasks", "{", nil, CreateChannelPushTask)
+	assert.False(t, malformed.Success)
+	assert.Equal(t, "Invalid parameters", malformed.MessageKey)
+	assert.Empty(t, malformed.Field)
+
+	// The interval boundaries: 5 and 1440 pass.
+	for _, interval := range []int{5, 1440} {
+		sup := channelPushSeedSupplier(t, db, "sup-interval-"+strconv.Itoa(interval))
+		result := channelPushCreateTask(t, channelPushTaskBody(t, site.Id, []int{sup.Id}, map[string]any{"interval_minutes": interval}))
+		require.True(t, result.Success, result.Message)
+		assert.Equal(t, interval, result.Data.IntervalMinutes)
+	}
+
+	// A one-off task drops the interval, and the group is trimmed.
+	before := common.GetTimestamp()
+	created := channelPushCreateTask(t, channelPushTaskBody(t, otherSite.Id, []int{supplier.Id, supplier2.Id},
+		map[string]any{"task_type": "once", "interval_minutes": 99, "target_group": " vip "}))
+	require.True(t, created.Success, created.Message)
+	var stored model.ChannelPushTask
+	require.NoError(t, db.First(&stored, created.Data.Id).Error)
+	assert.Equal(t, "once", stored.TaskType)
+	assert.Equal(t, 0, stored.IntervalMinutes)
+	assert.Equal(t, "vip", stored.TargetGroup)
+	assert.True(t, stored.Enabled)
+	assert.InDelta(t, before, stored.NextRunAt, 2)
+	assert.EqualValues(t, 0, stored.LastFinishedAt)
+
+	// The same supplier cannot join a second task on the same site; another site is fine.
+	conflict := channelPushCreateTask(t, channelPushTaskBody(t, otherSite.Id, []int{supplier2.Id}, nil))
+	assert.False(t, conflict.Success)
+	assert.Equal(t, "Supplier {{username}} already belongs to task {{task_id}} for this site", conflict.MessageKey)
+	assert.Equal(t, "supplier_user_ids", conflict.Field)
+	assert.Equal(t, "Supplier sup-b already belongs to task "+strconv.Itoa(created.Data.Id)+" for this site", conflict.Message)
+	elsewhere := channelPushCreateTask(t, channelPushTaskBody(t, site.Id, []int{supplier2.Id}, nil))
+	assert.True(t, elsewhere.Success, elsewhere.Message)
+}
+
+func TestChannelPushTaskUniqueIndexRace(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+
+	require.NoError(t, db.Create(&model.ChannelPushTaskSupplier{TaskId: 999, SiteId: site.Id, SupplierUserId: supplier.Id}).Error)
+	require.Error(t, db.Create(&model.ChannelPushTaskSupplier{TaskId: 1000, SiteId: site.Id, SupplierUserId: supplier.Id}).Error)
+
+	// Task 999 does not exist, so the pre-check cannot see the row; the insert
+	// hits the unique index and still reports the supplier conflict.
+	result := channelPushCreateTask(t, channelPushTaskBody(t, site.Id, []int{supplier.Id}, nil))
+	assert.False(t, result.Success)
+	assert.Equal(t, "Supplier {{username}} already belongs to task {{task_id}} for this site", result.MessageKey)
+	assert.Equal(t, "supplier_user_ids", result.Field)
+	assert.Equal(t, "Supplier sup-a already belongs to task 999 for this site", result.Message)
+	var tasks int64
+	require.NoError(t, db.Model(&model.ChannelPushTask{}).Count(&tasks).Error)
+	assert.EqualValues(t, 0, tasks)
+}
+
+func TestChannelPushTaskUpdate(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	otherSite := channelPushSeedSite(t, db, "beta")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	supplier2 := channelPushSeedSupplier(t, db, "sup-b")
+	created := channelPushCreateTask(t, channelPushTaskBody(t, site.Id, []int{supplier.Id, supplier2.Id}, nil))
+	require.True(t, created.Success, created.Message)
+	id := created.Data.Id
+	update := func(taskId int, body string) thirdPartySiteResult[model.ChannelPushTask] {
+		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(taskId), body, channelPushIdParam(taskId), UpdateChannelPushTask)
+		return result
+	}
+
+	// Keeping its own suppliers is not a conflict.
+	require.NoError(t, db.Model(&model.ChannelPushTask{}).Where("id = ?", id).Update("next_run_at", 5).Error)
+	before := common.GetTimestamp()
+	result := update(id, channelPushTaskBody(t, site.Id, []int{supplier.Id, supplier2.Id}, map[string]any{"interval_minutes": 60}))
+	require.True(t, result.Success, result.Message)
+	var stored model.ChannelPushTask
+	require.NoError(t, db.First(&stored, id).Error)
+	assert.Equal(t, 60, stored.IntervalMinutes)
+	assert.InDelta(t, before, stored.NextRunAt, 2)
+
+	// Moving to another site moves the supplier rows with it.
+	result = update(id, channelPushTaskBody(t, otherSite.Id, []int{supplier.Id}, nil))
+	require.True(t, result.Success, result.Message)
+	var links []model.ChannelPushTaskSupplier
+	require.NoError(t, db.Where("task_id = ?", id).Find(&links).Error)
+	require.Len(t, links, 1)
+	assert.Equal(t, otherSite.Id, links[0].SiteId)
+	assert.Equal(t, supplier.Id, links[0].SupplierUserId)
+
+	missing := update(9999, channelPushTaskBody(t, site.Id, []int{supplier.Id}, nil))
+	assert.False(t, missing.Success)
+	assert.Equal(t, "Task does not exist", missing.MessageKey)
+
+	// A disabled task stays disabled and unqueued.
+	_, disabled := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(id)+"/enabled", `{"enabled":false}`, channelPushIdParam(id), SetChannelPushTaskEnabled)
+	require.True(t, disabled.Success, disabled.Message)
+	result = update(id, channelPushTaskBody(t, otherSite.Id, []int{supplier.Id}, map[string]any{"target_group": "svip"}))
+	require.True(t, result.Success, result.Message)
+	require.NoError(t, db.First(&stored, id).Error)
+	assert.False(t, stored.Enabled)
+	assert.EqualValues(t, 0, stored.NextRunAt)
+	assert.Equal(t, "svip", stored.TargetGroup)
+}
+
+func TestChannelPushTaskToggle(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	created := channelPushCreateTask(t, channelPushTaskBody(t, site.Id, []int{supplier.Id}, nil))
+	require.True(t, created.Success, created.Message)
+	id := created.Data.Id
+	toggle := func(taskId int, body string) thirdPartySiteResult[model.ChannelPushTask] {
+		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(taskId)+"/enabled", body, channelPushIdParam(taskId), SetChannelPushTaskEnabled)
+		return result
+	}
+
+	off := toggle(id, `{"enabled":false}`)
+	require.True(t, off.Success, off.Message)
+	var stored model.ChannelPushTask
+	require.NoError(t, db.First(&stored, id).Error)
+	assert.False(t, stored.Enabled)
+	assert.EqualValues(t, 0, stored.NextRunAt)
+
+	before := common.GetTimestamp()
+	on := toggle(id, `{"enabled":true}`)
+	require.True(t, on.Success, on.Message)
+	require.NoError(t, db.First(&stored, id).Error)
+	assert.True(t, stored.Enabled)
+	assert.InDelta(t, before, stored.NextRunAt, 2)
+
+	for _, body := range []string{"{", `{}`, `{"enabled":"yes"}`} {
+		bad := toggle(id, body)
+		assert.False(t, bad.Success)
+		assert.Equal(t, "Invalid parameters", bad.MessageKey)
+	}
+	assert.Equal(t, "Task does not exist", toggle(9999, `{"enabled":true}`).MessageKey)
+
+	require.NoError(t, db.Delete(site).Error)
+	gone := toggle(id, `{"enabled":true}`)
+	assert.False(t, gone.Success)
+	assert.Equal(t, "Site does not exist", gone.MessageKey)
+}
+
+func TestChannelPushTaskListShowsSuppliersAndSite(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	otherSite := channelPushSeedSite(t, db, "beta")
+	s1 := channelPushSeedSupplier(t, db, "sup-a")
+	s2 := channelPushSeedSupplier(t, db, "sup-b")
+	s3 := channelPushSeedSupplier(t, db, "sup-c")
+	ids := make([]int, 0, 3)
+	for _, body := range []string{
+		channelPushTaskBody(t, site.Id, []int{s2.Id, s1.Id}, nil),
+		channelPushTaskBody(t, otherSite.Id, []int{s1.Id}, nil),
+		channelPushTaskBody(t, otherSite.Id, []int{s3.Id}, nil),
+	} {
+		created := channelPushCreateTask(t, body)
+		require.True(t, created.Success, created.Message)
+		ids = append(ids, created.Data.Id)
+	}
+	require.NoError(t, db.Delete(s2).Error)
+	require.NoError(t, db.Delete(otherSite).Error)
+
+	type taskPage struct {
+		Total int                         `json:"total"`
+		Items []model.ChannelPushTaskView `json:"items"`
+	}
+	raw, result := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/channel_push/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
+	require.True(t, result.Success, result.Message)
+	assert.Equal(t, 3, result.Data.Total)
+	require.Len(t, result.Data.Items, 3)
+	assert.Equal(t, []int{ids[2], ids[1], ids[0]}, []int{result.Data.Items[0].Id, result.Data.Items[1].Id, result.Data.Items[2].Id})
+	assert.NotContains(t, raw, "remote-access-token")
+
+	first := result.Data.Items[2]
+	assert.Equal(t, "alpha", first.SiteName)
+	assert.False(t, first.SiteDeleted)
+	assert.Equal(t, []model.ChannelPushSupplierRef{{Id: s1.Id, Username: "sup-a"}, {Id: s2.Id, Username: "sup-b"}}, first.Suppliers)
+	assert.Equal(t, "beta", result.Data.Items[0].SiteName)
+	assert.True(t, result.Data.Items[0].SiteDeleted)
+
+	_, paged := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/channel_push/tasks?p=2&page_size=2", "", nil, GetChannelPushTasks)
+	assert.Equal(t, 3, paged.Data.Total)
+	require.Len(t, paged.Data.Items, 1)
+	assert.Equal(t, ids[0], paged.Data.Items[0].Id)
+}
+
+func TestChannelPushOptions(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	gone := channelPushSeedSite(t, db, "gone")
+	require.NoError(t, db.Delete(gone).Error)
+	s1 := channelPushSeedSupplier(t, db, "sup-a")
+	deleted := channelPushSeedSupplier(t, db, "sup-deleted")
+	require.NoError(t, db.Delete(deleted).Error)
+	require.NoError(t, db.Create(&model.User{Username: "normal", Role: common.RoleCommonUser, Status: 1, AffCode: "normal"}).Error)
+	require.NoError(t, db.Create(&model.User{Username: "admin2", Role: common.RoleAdminUser, Status: 1, AffCode: "admin2"}).Error)
+
+	raw, result := thirdPartySiteCall[model.ChannelPushOptions](t, http.MethodGet, "/api/channel_push/options", "", nil, GetChannelPushOptions)
+	require.True(t, result.Success, result.Message)
+	assert.Equal(t, []model.ChannelPushSiteOption{{Id: site.Id, Name: "alpha"}}, result.Data.Sites)
+	assert.Equal(t, []model.ChannelPushSupplierOption{{Id: s1.Id, Username: "sup-a", DisplayName: ""}}, result.Data.Suppliers)
+	assert.NotContains(t, raw, "remote-access-token")
 }
