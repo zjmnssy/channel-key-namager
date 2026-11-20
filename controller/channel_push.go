@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -136,7 +137,8 @@ func GetChannelPushRunDetail(c *gin.Context) {
 }
 
 // GetChannelPushSiteGroups reads the site's groups for the task dialog. The
-// user is waiting, so it retries at most twice whatever the environment says.
+// user is waiting, so it retries at most twice whatever the environment says,
+// and waits out a rate limit for at most 5 seconds.
 func GetChannelPushSiteGroups(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
@@ -150,6 +152,7 @@ func GetChannelPushSiteGroups(c *gin.Context) {
 	}
 	options := service.ChannelPushDefaultOptions
 	options.MaxRetries = 2
+	options.MaxRetryAfter = 5 * time.Second
 	groups, err := service.NewChannelPushClient(site, options).ListGroups(c.Request.Context())
 	if err != nil {
 		detail := err.Error()

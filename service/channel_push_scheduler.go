@@ -30,7 +30,7 @@ func StartChannelPushScheduler() {
 			return
 		}
 		ChannelPushDefaultOptions.MaxRetries = ChannelPushMaxRetriesFromEnv()
-		recovered, err := model.RecoverInterruptedChannelPushRuns(common.GetTimestamp())
+		recovered, err := model.RecoverChannelPushRuns(common.GetTimestamp(), "The run was interrupted by a service restart", nil)
 		if err != nil {
 			common.SysError(common.LogText("channel push recovery failed: %v", err))
 		} else if recovered > 0 {
@@ -47,9 +47,31 @@ func StartChannelPushScheduler() {
 	})
 }
 
-// scanChannelPushTasks claims the due tasks and runs each in its own goroutine,
-// at most channelPushMaxConcurrent at a time; the rest wait for the next scan.
+// scanChannelPushTasks fails the runs left in running that nothing executes
+// any more, then claims the due tasks and runs each in its own goroutine, at
+// most channelPushMaxConcurrent at a time; the rest wait for the next scan.
 func scanChannelPushTasks() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			common.SysError(common.LogText("channel push scan panicked: %v", recovered))
+		}
+	}()
+
+	// A task is marked busy before its run is claimed and stays busy until the
+	// run is finished, and claims happen only here, so a running record of a
+	// task not busy now can no longer be finished by anyone.
+	var busyTaskIds []int
+	channelPushRunningTasks.Range(func(taskId, _ any) bool {
+		busyTaskIds = append(busyTaskIds, taskId.(int))
+		return true
+	})
+	healed, err := model.RecoverChannelPushRuns(common.GetTimestamp(), "The run ended without saving its result", busyTaskIds)
+	if err != nil {
+		common.SysError(common.LogText("channel push stranded run recovery failed: %v", err))
+	} else if healed > 0 {
+		common.SysLog(common.LogText("channel push stranded runs recovered: count=%d", healed))
+	}
+
 	tasks, err := model.ListDueChannelPushTasks(common.GetTimestamp(), channelPushMaxConcurrent*4)
 	if err != nil {
 		common.SysError(common.LogText("channel push scan failed: %v", err))

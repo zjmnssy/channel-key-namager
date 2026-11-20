@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -406,7 +405,7 @@ func (s *fakeNewAPISite) listLocked(w http.ResponseWriter, r *http.Request) {
 	for id := range s.channels {
 		ids = append(ids, id)
 	}
-	sort.Ints(ids)
+	slices.Sort(ids)
 	start := min((page-1)*pageSize, len(ids))
 	end := min(start+pageSize, len(ids))
 	items := make([]map[string]any, 0, end-start)
@@ -504,6 +503,8 @@ func TestChannelPushClientRetryClassification(t *testing.T) {
 		{"400", fakeResponse{status: 400, body: `{"success":false,"message":"bad request"}`}, 1, true, "bad request", false},
 		{"302", fakeResponse{status: 302, header: map[string]string{"Location": "/elsewhere"}}, 1, true, "HTTP 302", false},
 		{"success false", fakeResponse{body: `{"success":false,"message":"bad"}`}, 1, true, "bad", false},
+		{"long message kept to 500 characters", fakeResponse{status: 400, body: `{"success":false,"message":"` + strings.Repeat("长", 2000) + `"}`},
+			1, true, strings.Repeat("长", 500), false},
 		{"408", fakeResponse{status: 408}, 2, false, "", true},
 		{"429", fakeResponse{status: 429}, 2, false, "", true},
 		{"500", fakeResponse{status: 500}, 2, false, "", true},
@@ -1123,7 +1124,7 @@ func (s *fakeNewAPISite) channelsNamed(name string) []fakeRemoteChannel {
 			matched = append(matched, *channel)
 		}
 	}
-	sort.Slice(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
+	slices.SortFunc(matched, func(a, b fakeRemoteChannel) int { return a.ID - b.ID })
 	return matched
 }
 
@@ -1333,16 +1334,19 @@ func TestChannelPushRunFailsBeforeActions(t *testing.T) {
 		name    string
 		prepare func(t *testing.T, db *gorm.DB, site *model.ThirdPartySite, fake *fakeNewAPISite)
 		key     string
-		detail  []string // the detail must contain one of these
+		detail  string
 	}{
 		{name: "site deleted", key: "Site does not exist", prepare: func(t *testing.T, db *gorm.DB, site *model.ThirdPartySite, _ *fakeNewAPISite) {
 			require.NoError(t, db.Delete(site).Error)
 		}},
-		{name: "total mismatch", key: listKey, prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
+		{name: "total mismatch", key: listKey, detail: "channel list ended with 0 of 3 items", prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
 			fake.fail(http.MethodGet, "/api/channel/", fakeResponse{body: `{"success":true,"data":{"items":[],"total":3}}`})
 		}},
-		{name: "unauthorized", key: listKey, detail: []string{"HTTP 401", "invalid token"}, prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
+		{name: "unauthorized", key: listKey, detail: "invalid token", prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
 			fake.fail(http.MethodGet, "/api/channel/", fakeResponse{status: http.StatusUnauthorized, body: `{"success":false,"message":"invalid token"}`})
+		}},
+		{name: "long site message", key: listKey, detail: strings.Repeat("x", 500), prepare: func(_ *testing.T, _ *gorm.DB, _ *model.ThirdPartySite, fake *fakeNewAPISite) {
+			fake.fail(http.MethodGet, "/api/channel/", fakeResponse{status: http.StatusForbidden, body: `{"success":false,"message":"` + strings.Repeat("x", 2000) + `"}`})
 		}},
 	}
 	for _, tc := range cases {
@@ -1359,9 +1363,8 @@ func TestChannelPushRunFailsBeforeActions(t *testing.T) {
 			assert.Equal(t, model.ChannelPushRunFailed, run.Status)
 			message := channelPushRunError(t, run)
 			assert.Equal(t, tc.key, message.Key)
-			if len(tc.detail) > 0 {
-				detail, _ := message.Params["detail"].(string)
-				assert.True(t, slices.ContainsFunc(tc.detail, func(want string) bool { return strings.Contains(detail, want) }), detail)
+			if tc.detail != "" {
+				assert.Equal(t, tc.detail, message.Params["detail"])
 			}
 			assert.Empty(t, fake.writeRequests())
 			assert.Empty(t, string(run.Actions))
@@ -1428,6 +1431,24 @@ func TestChannelPushRunKeepsSecretsOut(t *testing.T) {
 	require.True(t, result.Success, result.Message)
 	assert.NotContains(t, raw, "remote-access-token")
 	assert.NotContains(t, raw, "sk-")
+
+	responses := map[string]string{}
+	raw, result = thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/channel_push/runs?p=1&page_size=10", "", nil, GetChannelPushRuns)
+	require.True(t, result.Success, result.Message)
+	require.Contains(t, raw, `"id":`+strconv.Itoa(run.Id))
+	responses["runs"] = raw
+	for _, kind := range []string{"site", "target", "actions"} {
+		params := gin.Params{{Key: "id", Value: strconv.Itoa(run.Id)}, {Key: "kind", Value: kind}}
+		raw, detail := thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs/"+strconv.Itoa(run.Id)+"/"+kind, "", params, GetChannelPushRunDetail)
+		require.True(t, detail.Success, detail.Message)
+		require.NotNil(t, detail.Data, kind)
+		responses[kind] = raw
+	}
+	for name, raw := range responses {
+		for _, secret := range []string{"remote-access-token", "sk-first", "sk-second"} {
+			assert.NotContains(t, raw, secret, name)
+		}
+	}
 }
 
 func TestChannelPushRunDetailsFallback(t *testing.T) {
@@ -1461,6 +1482,112 @@ func TestChannelPushRunDetailsFallback(t *testing.T) {
 	var after model.ChannelPushTask
 	require.NoError(t, db.First(&after, task.Id).Error)
 	assert.Equal(t, run.FinishedAt, after.LastFinishedAt)
+}
+
+// channelPushFailRunUpdates makes the next n updates of channel_push_runs fail
+// (n < 0: all of them); withDetails limits it to the updates that carry the details.
+func channelPushFailRunUpdates(t *testing.T, db *gorm.DB, n int, withDetails bool) {
+	t.Helper()
+	callbackName := "test:channel_push_fail_run_updates:" + t.Name()
+	remaining := n
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table != "channel_push_runs" || remaining == 0 {
+			return
+		}
+		if withDetails && !slices.Contains(tx.Statement.Selects, "actions") {
+			return
+		}
+		if remaining > 0 {
+			remaining--
+		}
+		_ = tx.AddError(errors.New("database unavailable"))
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
+}
+
+func TestChannelPushRunFinishRetries(t *testing.T) {
+	second := time.Second
+	cases := []struct {
+		name       string
+		failures   int
+		wantStatus string
+		wantWaits  []time.Duration
+	}{
+		// The update with details and its fallback both fail once.
+		{"saved on a retry", 2, model.ChannelPushRunSuccess, []time.Duration{1 * second}},
+		{"gives up after five retries", -1, model.ChannelPushRunRunning,
+			[]time.Duration{1 * second, 2 * second, 4 * second, 8 * second, 16 * second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupChannelPushTest(t)
+			site := channelPushSeedSite(t, db, "alpha")
+			supplier := channelPushSeedSupplier(t, db, "sup-a")
+			channelPushSeedChannel(t, db, supplier, "A", 1, "m1", constant.ChannelTypeOpenAI)
+			task := channelPushNewTask(t, db, site.Id, supplier.Id)
+			fake := newFakeNewAPISite(t)
+			require.NoError(t, db.Model(&model.ThirdPartySite{}).Where("id = ?", site.Id).Update("base_url", fake.server.URL).Error)
+			require.NoError(t, db.First(&task, task.Id).Error)
+			run, ok, err := model.ClaimChannelPushRun(task, common.GetTimestamp())
+			require.NoError(t, err)
+			require.True(t, ok)
+			channelPushFailRunUpdates(t, db, tc.failures, false)
+			recorder := &fakeSleepRecorder{}
+
+			service.ExecuteChannelPushRun(context.Background(), run, channelPushTestOptions(recorder))
+
+			var stored model.ChannelPushRun
+			require.NoError(t, db.First(&stored, run.Id).Error)
+			assert.Equal(t, tc.wantStatus, stored.Status)
+			assert.Equal(t, tc.wantWaits, recorder.recorded())
+			if tc.wantStatus == model.ChannelPushRunSuccess {
+				assert.Equal(t, 1, stored.CreateCount)
+				assert.NotEmpty(t, string(stored.Actions), "a retry keeps the details")
+				assert.Empty(t, stored.ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestChannelPushRunDetailsFallbackKeepsReason(t *testing.T) {
+	db := setupChannelPushTest(t)
+	site := channelPushSeedSite(t, db, "alpha")
+	supplier := channelPushSeedSupplier(t, db, "sup-a")
+	task := channelPushNewTask(t, db, site.Id, supplier.Id)
+	reason, err := common.Marshal(common.NewMessage("Site does not exist"))
+	require.NoError(t, err)
+	claimFailed := func() *model.ChannelPushRun {
+		require.NoError(t, db.Model(&model.ChannelPushTask{}).Where("id = ?", task.Id).Update("next_run_at", 10).Error)
+		var current model.ChannelPushTask
+		require.NoError(t, db.First(&current, task.Id).Error)
+		run, ok, err := model.ClaimChannelPushRun(current, 10)
+		require.NoError(t, err)
+		require.True(t, ok)
+		run.Status, run.ErrorMessage = model.ChannelPushRunFailed, string(reason)
+		return run
+	}
+
+	t.Run("an existing reason is kept", func(t *testing.T) {
+		run := claimFailed()
+		run.Actions = `[{"category":"create"}]`
+		channelPushFailRunUpdates(t, db, 1, true)
+		require.NoError(t, model.FinishChannelPushRun(run, 1000))
+		var stored model.ChannelPushRun
+		require.NoError(t, db.First(&stored, run.Id).Error)
+		assert.Equal(t, model.ChannelPushRunFailed, stored.Status)
+		assert.EqualValues(t, 1000, stored.FinishedAt)
+		assert.Empty(t, string(stored.Actions))
+		assert.Equal(t, "Site does not exist", channelPushRunError(t, stored).Key)
+	})
+
+	t.Run("no details means no fallback", func(t *testing.T) {
+		run := claimFailed()
+		channelPushFailRunUpdates(t, db, 1, false)
+		require.Error(t, model.FinishChannelPushRun(run, 1000))
+		var stored model.ChannelPushRun
+		require.NoError(t, db.First(&stored, run.Id).Error)
+		assert.Equal(t, model.ChannelPushRunRunning, stored.Status)
+	})
 }
 
 func TestChannelPushScheduling(t *testing.T) {
@@ -1586,7 +1713,7 @@ func TestChannelPushScheduling(t *testing.T) {
 		// A save made while the process was down wins over the recovery.
 		setQueue(saved.Id, true, 7777)
 
-		recovered, err := model.RecoverInterruptedChannelPushRuns(5000)
+		recovered, err := model.RecoverChannelPushRuns(5000, "The run was interrupted by a service restart", nil)
 		require.NoError(t, err)
 		assert.Equal(t, 3, recovered)
 		for taskId, run := range runs {
@@ -1602,9 +1729,44 @@ func TestChannelPushScheduling(t *testing.T) {
 		assert.EqualValues(t, 0, load(once.Id).NextRunAt)
 		assert.EqualValues(t, 7777, load(saved.Id).NextRunAt)
 
-		again, err := model.RecoverInterruptedChannelPushRuns(6000)
+		again, err := model.RecoverChannelPushRuns(6000, "The run was interrupted by a service restart", nil)
 		require.NoError(t, err)
 		assert.Equal(t, 0, again)
+	})
+
+	t.Run("running record with nothing executing is healed", func(t *testing.T) {
+		require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Where("status = ?", model.ChannelPushRunRunning).Delete(&model.ChannelPushRun{}).Error)
+		stranded := newTask("heal-periodic", nil)
+		strandedOnce := newTask("heal-once", map[string]any{"task_type": "once", "interval_minutes": 0})
+		busy := newTask("heal-busy", nil)
+		runs := map[int]*model.ChannelPushRun{}
+		for _, task := range []model.ChannelPushTask{stranded, strandedOnce, busy} {
+			setQueue(task.Id, true, now)
+			run, ok, err := model.ClaimChannelPushRun(load(task.Id), now)
+			require.NoError(t, err)
+			require.True(t, ok)
+			runs[task.Id] = run
+		}
+
+		healed, err := model.RecoverChannelPushRuns(8000, "The run ended without saving its result", []int{busy.Id})
+		require.NoError(t, err)
+		assert.Equal(t, 2, healed)
+		for _, task := range []model.ChannelPushTask{stranded, strandedOnce} {
+			var stored model.ChannelPushRun
+			require.NoError(t, db.First(&stored, runs[task.Id].Id).Error)
+			assert.Equal(t, model.ChannelPushRunFailed, stored.Status)
+			assert.EqualValues(t, 8000, stored.FinishedAt)
+			assert.Equal(t, "The run ended without saving its result", channelPushRunError(t, stored).Key)
+			assert.EqualValues(t, 8000, load(task.Id).LastFinishedAt)
+		}
+		assert.EqualValues(t, 8000+30*60, load(stranded.Id).NextRunAt)
+		assert.EqualValues(t, 0, load(strandedOnce.Id).NextRunAt)
+
+		var busyRun model.ChannelPushRun
+		require.NoError(t, db.First(&busyRun, runs[busy.Id].Id).Error)
+		assert.Equal(t, model.ChannelPushRunRunning, busyRun.Status)
+		assert.EqualValues(t, 0, load(busy.Id).LastFinishedAt)
+		assert.EqualValues(t, 0, load(busy.Id).NextRunAt)
 	})
 }
 
@@ -1723,7 +1885,8 @@ func TestChannelPushSiteGroups(t *testing.T) {
 	previous := service.ChannelPushDefaultOptions
 	service.ChannelPushDefaultOptions.Pace = 0
 	service.ChannelPushDefaultOptions.Timeout = 200 * time.Millisecond
-	service.ChannelPushDefaultOptions.Sleep = (&fakeSleepRecorder{}).sleep
+	waits := &fakeSleepRecorder{}
+	service.ChannelPushDefaultOptions.Sleep = waits.sleep
 	t.Cleanup(func() { service.ChannelPushDefaultOptions = previous })
 
 	site := channelPushSeedSite(t, db, "alpha")
@@ -1749,6 +1912,16 @@ func TestChannelPushSiteGroups(t *testing.T) {
 	assert.Equal(t, "Failed to read the site's groups: {{detail}}", result.MessageKey)
 	assert.Len(t, html.recorded(http.MethodGet, "/api/group/"), 3)
 	assert.NotContains(t, raw, "remote-access-token")
+
+	// A rate limit is waited out for at most 5 seconds while the user waits.
+	limited := newFakeNewAPISite(t)
+	limited.fail(http.MethodGet, "/api/group/", fakeResponse{status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "120"}},
+		fakeResponse{status: http.StatusTooManyRequests})
+	pointAt(limited)
+	before := len(waits.recorded())
+	_, result = groups(site.Id)
+	require.True(t, result.Success, result.Message)
+	assert.Equal(t, []time.Duration{5 * time.Second, 5 * time.Second}, waits.recorded()[before:])
 
 	unauthorized := newFakeNewAPISite(t)
 	unauthorized.fail(http.MethodGet, "/api/group/", fakeResponse{status: 401, body: `{"success":false,"message":"no auth"}`})

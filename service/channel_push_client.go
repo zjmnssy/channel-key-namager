@@ -32,17 +32,19 @@ const (
 )
 
 type ChannelPushClientOptions struct {
-	MaxRetries int
-	Pace       time.Duration                                    // minimum gap between two requests to the same site
-	Timeout    time.Duration                                    // timeout of a single request
-	Sleep      func(ctx context.Context, d time.Duration) error // used for backoff and pacing
+	MaxRetries    int
+	Pace          time.Duration                                    // minimum gap between two requests to the same site
+	Timeout       time.Duration                                    // timeout of a single request
+	MaxRetryAfter time.Duration                                    // longest wait after a 429, whatever Retry-After says
+	Sleep         func(ctx context.Context, d time.Duration) error // used for backoff and pacing
 }
 
 var ChannelPushDefaultOptions = ChannelPushClientOptions{
-	MaxRetries: channelPushDefaultMaxRetries,
-	Pace:       time.Second,
-	Timeout:    30 * time.Second,
-	Sleep:      channelPushSleep,
+	MaxRetries:    channelPushDefaultMaxRetries,
+	Pace:          time.Second,
+	Timeout:       30 * time.Second,
+	MaxRetryAfter: channelPushMaxRetryAfter,
+	Sleep:         channelPushSleep,
 }
 
 func channelPushSleep(ctx context.Context, d time.Duration) error {
@@ -73,7 +75,7 @@ func ChannelPushMaxRetriesFromEnv() int {
 
 type ChannelPushRemoteError struct {
 	StatusCode int    // 0 when no HTTP response was received
-	Detail     string // site message, "HTTP 502", or the network error text; never request body or headers
+	Detail     string // site message, "HTTP 502", or the network error text, at most 500 characters; never request body or headers
 	Attempts   int
 	Retryable  bool
 }
@@ -133,6 +135,9 @@ func NewChannelPushClient(site *model.ThirdPartySite, options ChannelPushClientO
 	}
 	if options.Timeout <= 0 {
 		options.Timeout = ChannelPushDefaultOptions.Timeout
+	}
+	if options.MaxRetryAfter <= 0 {
+		options.MaxRetryAfter = channelPushMaxRetryAfter
 	}
 	options.MaxRetries = max(options.MaxRetries, 0)
 
@@ -239,8 +244,9 @@ func (c *ChannelPushClient) attempt(ctx context.Context, method string, path str
 		if status == http.StatusTooManyRequests {
 			retryAfter = channelPushDefaultRetryAfter
 			if seconds, convErr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); convErr == nil && seconds >= 0 {
-				retryAfter = min(time.Duration(seconds)*time.Second, channelPushMaxRetryAfter)
+				retryAfter = time.Duration(seconds) * time.Second
 			}
+			retryAfter = min(retryAfter, c.options.MaxRetryAfter)
 		}
 		return nil, retryAfter, &ChannelPushRemoteError{StatusCode: status, Detail: httpDetail, Retryable: true}
 	default:
@@ -274,6 +280,7 @@ func (c *ChannelPushClient) do(ctx context.Context, method string, path string, 
 				return envelope, nil
 			}
 			remoteErr.Attempts = attempts
+			remoteErr.Detail = truncateText(remoteErr.Detail, channelPushMaxDetailLength)
 			if ctx.Err() != nil {
 				remoteErr.Retryable = false
 			}

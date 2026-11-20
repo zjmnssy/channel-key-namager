@@ -23,7 +23,7 @@ type ChannelPushRun struct {
 	SiteName           string   `json:"site_name" gorm:"size:128;not null"`
 	TargetGroup        string   `json:"target_group" gorm:"size:64;not null"`
 	Suppliers          string   `json:"-" gorm:"type:text"` // []ChannelPushSupplierRef 的 JSON
-	Status             string   `json:"status" gorm:"size:16;not null"`
+	Status             string   `json:"status" gorm:"size:16;not null;index"`
 	ErrorMessage       string   `json:"-" gorm:"type:text"` // common.Message 的 JSON，没有错误时为 ""
 	StartedAt          int64    `json:"started_at" gorm:"not null;index"`
 	FinishedAt         int64    `json:"finished_at" gorm:"not null"`
@@ -152,20 +152,27 @@ func ClaimChannelPushRun(task ChannelPushTask, now int64) (run *ChannelPushRun, 
 
 // FinishChannelPushRun writes the run's outcome, then records the finish on
 // the task. When the details cannot be stored, the outcome is written without
-// them and error_message says why. A periodic task is queued again only if
-// nothing re-queued or disabled it during the run.
+// them; error_message then says why unless it already holds the run's own
+// reason. With no details to leave out, the error is returned as is. A
+// periodic task is queued again only if nothing re-queued or disabled it
+// during the run. The run itself is left unchanged, so the call can be retried.
 func FinishChannelPushRun(run *ChannelPushRun, finishedAt int64) error {
 	run.FinishedAt = finishedAt
 	columns := append(slices.Clone(channelPushRunResultColumns), channelPushRunDetailColumns...)
 	if err := DB.Model(&ChannelPushRun{Id: run.Id}).Select(columns).Updates(run).Error; err != nil {
-		message, marshalErr := common.Marshal(common.NewMessage("Run details could not be saved: {{detail}}",
-			map[string]any{"detail": err.Error()}))
-		if marshalErr != nil {
-			return marshalErr
+		if run.SiteSnapshot == "" && run.TargetSnapshot == "" && run.Actions == "" {
+			return err
 		}
-		run.ErrorMessage = string(message)
-		run.SiteSnapshot, run.TargetSnapshot, run.Actions = "", "", ""
-		if err := DB.Model(&ChannelPushRun{Id: run.Id}).Select(channelPushRunResultColumns).Updates(run).Error; err != nil {
+		outcome := *run
+		if outcome.ErrorMessage == "" {
+			message, marshalErr := common.Marshal(common.NewMessage("Run details could not be saved: {{detail}}",
+				map[string]any{"detail": err.Error()}))
+			if marshalErr != nil {
+				return marshalErr
+			}
+			outcome.ErrorMessage = string(message)
+		}
+		if err := DB.Model(&ChannelPushRun{Id: run.Id}).Select(channelPushRunResultColumns).Updates(&outcome).Error; err != nil {
 			return err
 		}
 	}
@@ -188,19 +195,25 @@ func FinishChannelPushRun(run *ChannelPushRun, finishedAt int64) error {
 		Update("next_run_at", finishedAt+int64(task.IntervalMinutes)*60).Error
 }
 
-// RecoverInterruptedChannelPushRuns fails the runs a restart left in running
-// and records the finish on their tasks. A periodic task is queued again only
-// if next_run_at is still 0, so a save made in the meantime wins. It returns
-// the number of runs recovered.
-func RecoverInterruptedChannelPushRuns(now int64) (int, error) {
-	message, err := common.Marshal(common.NewMessage("The run was interrupted by a service restart"))
+// RecoverChannelPushRuns fails the runs left in running whose task is not in
+// busyTaskIds, with reasonKey as the reason, and records the finish on their
+// tasks. It serves both the restart, where nothing is busy, and every scan,
+// where a run whose result could not be saved stays in running. A periodic
+// task is queued again only if next_run_at is still 0, so a save made in the
+// meantime wins. It returns the number of runs recovered.
+func RecoverChannelPushRuns(now int64, reasonKey string, busyTaskIds []int) (int, error) {
+	message, err := common.Marshal(common.NewMessage(reasonKey))
 	if err != nil {
 		return 0, err
 	}
 	recovered := 0
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		var runs []ChannelPushRun
-		if err := tx.Select("id", "task_id").Where("status = ?", ChannelPushRunRunning).Find(&runs).Error; err != nil {
+		query := tx.Select("id", "task_id").Where("status = ?", ChannelPushRunRunning)
+		if len(busyTaskIds) > 0 {
+			query = query.Where("task_id NOT IN ?", busyTaskIds)
+		}
+		if err := query.Find(&runs).Error; err != nil {
 			return err
 		}
 		if len(runs) == 0 {

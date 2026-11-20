@@ -5,9 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+)
+
+const (
+	// channelPushMaxDetailLength bounds a failure detail stored with a run, in characters.
+	channelPushMaxDetailLength = 500
+	// channelPushFinishRetries is how many more times a run's result is saved after a failure.
+	channelPushFinishRetries = 5
 )
 
 // Setting keys that bind a channel to plugins of this platform; the site has
@@ -20,14 +28,30 @@ type channelPushSiteSnapshot struct {
 }
 
 // ExecuteChannelPushRun performs one claimed run against its site and always
-// finishes the record, whatever happens on the way.
+// finishes the record, whatever happens on the way. Saving the result is
+// retried with backoff; a run that still cannot be saved stays in running
+// until the scheduler's next scan fails it.
 func ExecuteChannelPushRun(ctx context.Context, run *model.ChannelPushRun, options ChannelPushClientOptions) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			channelPushAbortRun(run, common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": fmt.Sprint(recovered)}))
+			channelPushAbortRun(run, common.NewMessage("Internal error: {{detail}}",
+				map[string]any{"detail": truncateText(fmt.Sprint(recovered), channelPushMaxDetailLength)}))
 		}
-		if err := model.FinishChannelPushRun(run, common.GetTimestamp()); err != nil {
-			common.SysError(common.LogText("channel push run could not be finished: run=%d error=%v", run.Id, err))
+		sleep := options.Sleep
+		if sleep == nil {
+			sleep = channelPushSleep
+		}
+		for retry := 0; ; retry++ {
+			err := model.FinishChannelPushRun(run, common.GetTimestamp())
+			if err == nil {
+				return
+			}
+			common.SysError(common.LogText("channel push run could not be finished: run=%d attempt=%d error=%v", run.Id, retry+1, err))
+			if retry == channelPushFinishRetries {
+				return
+			}
+			// The run's own context may have ended; the result must still be saved.
+			_ = sleep(context.Background(), min(time.Second<<retry, channelPushMaxBackoff))
 		}
 	}()
 
@@ -52,7 +76,7 @@ func channelPushAbortRun(run *model.ChannelPushRun, reason *common.Message) {
 // stops before executing any action.
 func performChannelPushRun(ctx context.Context, run *model.ChannelPushRun, options ChannelPushClientOptions) *common.Message {
 	internalError := func(err error) *common.Message {
-		return common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": err.Error()})
+		return common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})
 	}
 
 	site, err := model.GetChannelPushSite(run.SiteId)
@@ -66,7 +90,14 @@ func performChannelPushRun(ctx context.Context, run *model.ChannelPushRun, optio
 	client := NewChannelPushClient(site, options)
 	siteChannels, err := client.ListChannels(ctx)
 	if err != nil {
-		return common.NewMessage("The site's channel list could not be read completely: {{detail}}", map[string]any{"detail": err.Error()})
+		// A site failure carries its own detail; anything else says what was wrong with the list.
+		detail := err.Error()
+		var remoteErr *ChannelPushRemoteError
+		if errors.As(err, &remoteErr) {
+			detail = remoteErr.Detail
+		}
+		return common.NewMessage("The site's channel list could not be read completely: {{detail}}",
+			map[string]any{"detail": truncateText(detail, channelPushMaxDetailLength)})
 	}
 	siteSnapshot, err := common.Marshal(channelPushSiteSnapshot{FetchedAt: common.GetTimestamp(), Channels: siteChannels})
 	if err != nil {
@@ -218,7 +249,7 @@ func executeChannelPushAction(ctx context.Context, client *ChannelPushClient, ru
 		action.Error = remoteErr.Message()
 		return
 	}
-	action.Error = common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": err.Error()})
+	action.Error = common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})
 }
 
 // buildChannelPushCreateBody reads the local channel with its key and builds
@@ -226,7 +257,8 @@ func executeChannelPushAction(ctx context.Context, client *ChannelPushClient, ru
 func buildChannelPushCreateBody(run *model.ChannelPushRun, action *ChannelPushAction) (map[string]any, *common.Message) {
 	local, err := model.GetChannelPushChannelForCreate(action.LocalChannelID)
 	if err != nil {
-		return nil, common.NewMessage("The local channel could not be read: {{detail}}", map[string]any{"detail": err.Error()})
+		return nil, common.NewMessage("The local channel could not be read: {{detail}}",
+			map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})
 	}
 	if strings.TrimSpace(local.Key) == "" {
 		return nil, common.NewMessage("The local channel has no key")
@@ -262,7 +294,7 @@ func buildChannelPushCreateBody(run *model.ChannelPushRun, action *ChannelPushAc
 			if len(setting) > 0 {
 				encoded, err := common.Marshal(setting)
 				if err != nil {
-					return nil, common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": err.Error()})
+					return nil, common.NewMessage("Internal error: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})
 				}
 				channel["setting"] = string(encoded)
 			}
