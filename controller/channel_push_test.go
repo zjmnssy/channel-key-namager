@@ -1,11 +1,21 @@
 package controller
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,4 +191,529 @@ func TestChannelPushPlan(t *testing.T) {
 		assert.Equal(t, 2, actions[0].RemoteStatus)
 		assert.Equal(t, "m1", actions[0].RemoteModels)
 	})
+}
+
+type fakeRemoteChannel struct {
+	ID        int
+	Name      string
+	Status    int
+	Models    string
+	Group     string
+	UsedQuota int64
+	Type      int
+	Key       string
+}
+
+type fakeRecordedRequest struct {
+	Method        string
+	Path          string
+	Query         string
+	Authorization string
+	User          string
+	ContentType   string
+	Body          string
+}
+
+// fakeResponse is a queued reply for one (method, path). hang blocks until the client gives up.
+type fakeResponse struct {
+	status int
+	body   string
+	header map[string]string
+	hang   bool
+	pass   bool // consume this queue entry but let the fake answer normally
+}
+
+type fakeNewAPISite struct {
+	t        *testing.T
+	server   *httptest.Server
+	mu       sync.Mutex
+	channels map[int]*fakeRemoteChannel
+	nextID   int
+	requests []fakeRecordedRequest
+	faults   map[string][]fakeResponse
+	omitID   bool
+}
+
+func newFakeNewAPISite(t *testing.T) *fakeNewAPISite {
+	site := &fakeNewAPISite{
+		t:        t,
+		channels: map[int]*fakeRemoteChannel{},
+		nextID:   1,
+		faults:   map[string][]fakeResponse{},
+	}
+	site.server = httptest.NewServer(http.HandlerFunc(site.handle))
+	t.Cleanup(site.server.Close)
+	return site
+}
+
+func (s *fakeNewAPISite) addChannel(channel fakeRemoteChannel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels[channel.ID] = &channel
+	s.nextID = max(s.nextID, channel.ID+1)
+}
+
+func (s *fakeNewAPISite) fail(method string, path string, responses ...fakeResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := method + " " + path
+	s.faults[key] = append(s.faults[key], responses...)
+}
+
+func (s *fakeNewAPISite) recorded(method string, path string) []fakeRecordedRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var matched []fakeRecordedRequest
+	for _, request := range s.requests {
+		if request.Method == method && request.Path == path {
+			matched = append(matched, request)
+		}
+	}
+	return matched
+}
+
+func (s *fakeNewAPISite) reply(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
+}
+
+func (s *fakeNewAPISite) handle(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	key := r.Method + " " + r.URL.Path
+
+	s.mu.Lock()
+	s.requests = append(s.requests, fakeRecordedRequest{
+		Method:        r.Method,
+		Path:          r.URL.Path,
+		Query:         r.URL.RawQuery,
+		Authorization: r.Header.Get("Authorization"),
+		User:          r.Header.Get("New-Api-User"),
+		ContentType:   r.Header.Get("Content-Type"),
+		Body:          string(raw),
+	})
+	var fault *fakeResponse
+	if queue := s.faults[key]; len(queue) > 0 {
+		fault = &queue[0]
+		s.faults[key] = queue[1:]
+	}
+	s.mu.Unlock()
+
+	if fault != nil && !fault.pass {
+		if fault.hang {
+			<-r.Context().Done()
+			return
+		}
+		for name, value := range fault.header {
+			w.Header().Set(name, value)
+		}
+		status := fault.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.reply(w, status, fault.body)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case r.URL.Path == "/api/channel" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
+		w.Header().Set("Location", "/api/channel/")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	case key == "GET /api/channel/":
+		s.listLocked(w, r)
+	case key == "GET /api/group/":
+		s.reply(w, http.StatusOK, `{"success":true,"data":["default","vip"]}`)
+	case key == "POST /api/channel/":
+		var request struct {
+			Channel struct {
+				Name   string `json:"name"`
+				Models string `json:"models"`
+				Group  string `json:"group"`
+				Type   int    `json:"type"`
+				Key    string `json:"key"`
+			} `json:"channel"`
+		}
+		_ = common.Unmarshal(raw, &request)
+		id := s.nextID
+		s.nextID++
+		s.channels[id] = &fakeRemoteChannel{ID: id, Name: request.Channel.Name, Status: 1, Models: request.Channel.Models,
+			Group: request.Channel.Group, Type: request.Channel.Type, Key: request.Channel.Key}
+		if s.omitID {
+			s.reply(w, http.StatusOK, `{"success":true,"message":"","data":null}`)
+			return
+		}
+		s.reply(w, http.StatusOK, `{"success":true,"message":"","data":{"id":`+strconv.Itoa(id)+`}}`)
+	case key == "PUT /api/channel/":
+		var request struct {
+			ID     int    `json:"id"`
+			Models string `json:"models"`
+		}
+		_ = common.Unmarshal(raw, &request)
+		channel := s.channels[request.ID]
+		if channel == nil {
+			s.reply(w, http.StatusOK, `{"success":false,"message":"channel not found"}`)
+			return
+		}
+		channel.Models = request.Models
+		s.reply(w, http.StatusOK, `{"success":true,"message":""}`)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/channel/") && strings.HasSuffix(r.URL.Path, "/status"):
+		id, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/channel/"), "/status"))
+		var request struct {
+			Status int `json:"status"`
+		}
+		_ = common.Unmarshal(raw, &request)
+		channel := s.channels[id]
+		if channel == nil {
+			s.reply(w, http.StatusNotFound, `{"success":false,"message":"channel not found"}`)
+			return
+		}
+		channel.Status = request.Status
+		s.reply(w, http.StatusOK, `{"success":true,"message":""}`)
+	default:
+		s.reply(w, http.StatusNotFound, `{"success":false,"message":"no route"}`)
+	}
+}
+
+func (s *fakeNewAPISite) listLocked(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("p"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	page = max(page, 1)
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 100
+	}
+	ids := make([]int, 0, len(s.channels))
+	for id := range s.channels {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	start := min((page-1)*pageSize, len(ids))
+	end := min(start+pageSize, len(ids))
+	items := make([]map[string]any, 0, end-start)
+	for _, id := range ids[start:end] {
+		channel := s.channels[id]
+		items = append(items, map[string]any{
+			"id": channel.ID, "name": channel.Name, "status": channel.Status, "models": channel.Models,
+			"group": channel.Group, "used_quota": channel.UsedQuota, "type": channel.Type,
+		})
+	}
+	body, _ := common.Marshal(map[string]any{
+		"success": true,
+		"data":    map[string]any{"items": items, "total": len(ids), "page": page, "page_size": pageSize},
+	})
+	s.reply(w, http.StatusOK, string(body))
+}
+
+type fakeSleepRecorder struct {
+	mu    sync.Mutex
+	waits []time.Duration
+}
+
+func (r *fakeSleepRecorder) sleep(ctx context.Context, d time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.waits = append(r.waits, d)
+	return nil
+}
+
+func (r *fakeSleepRecorder) recorded() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.waits...)
+}
+
+func channelPushTestSite(base *fakeNewAPISite, id int) *model.ThirdPartySite {
+	return &model.ThirdPartySite{Id: id, BaseURL: base.server.URL, RemoteUserID: 7, ApiKey: "remote-access-token"}
+}
+
+func channelPushTestOptions(recorder *fakeSleepRecorder) service.ChannelPushClientOptions {
+	return service.ChannelPushClientOptions{MaxRetries: 10, Pace: 0, Timeout: 200 * time.Millisecond, Sleep: recorder.sleep}
+}
+
+func TestChannelPushClientHeadersAndPaths(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	fake.addChannel(fakeRemoteChannel{ID: 5, Name: "x", Status: 1})
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1001), channelPushTestOptions(&fakeSleepRecorder{}))
+	ctx := context.Background()
+
+	_, err := client.ListChannels(ctx)
+	require.NoError(t, err)
+	_, err = client.CreateChannel(ctx, map[string]any{"mode": "single"})
+	require.NoError(t, err)
+	require.NoError(t, client.UpdateModels(ctx, 5, "a,b"))
+	require.NoError(t, client.SetStatus(ctx, 5, 2))
+
+	fake.mu.Lock()
+	requests := append([]fakeRecordedRequest(nil), fake.requests...)
+	fake.mu.Unlock()
+	require.Len(t, requests, 4)
+	for _, request := range requests {
+		assert.Equal(t, "Bearer remote-access-token", request.Authorization)
+		assert.Equal(t, "7", request.User)
+	}
+	assert.Equal(t, "GET /api/channel/", requests[0].Method+" "+requests[0].Path)
+	assert.Contains(t, requests[0].Query, "p=1")
+	assert.Contains(t, requests[0].Query, "page_size=100")
+	assert.Contains(t, requests[0].Query, "id_sort=true")
+	assert.Empty(t, requests[0].ContentType)
+
+	assert.Equal(t, "POST /api/channel/", requests[1].Method+" "+requests[1].Path)
+	assert.Equal(t, "PUT /api/channel/", requests[2].Method+" "+requests[2].Path)
+	assert.Equal(t, "POST /api/channel/5/status", requests[3].Method+" "+requests[3].Path)
+	for _, request := range requests[1:] {
+		assert.Equal(t, "application/json", request.ContentType)
+	}
+	assert.JSONEq(t, `{"mode":"single"}`, requests[1].Body)
+	assert.Equal(t, `{"id":5,"models":"a,b"}`, requests[2].Body)
+	assert.Equal(t, `{"status":2}`, requests[3].Body)
+}
+
+func TestChannelPushClientRetryClassification(t *testing.T) {
+	const statusPath = "/api/channel/5/status"
+	cases := []struct {
+		name      string
+		first     fakeResponse
+		attempts  int
+		wantErr   bool
+		detail    string
+		retryable bool
+	}{
+		{"401", fakeResponse{status: 401, body: `{"success":false,"message":"no auth"}`}, 1, true, "no auth", false},
+		{"403", fakeResponse{status: 403, body: `{"success":false,"message":"forbidden"}`}, 1, true, "forbidden", false},
+		{"404", fakeResponse{status: 404, body: `{"success":false,"message":"gone"}`}, 1, true, "gone", false},
+		{"400", fakeResponse{status: 400, body: `{"success":false,"message":"bad request"}`}, 1, true, "bad request", false},
+		{"302", fakeResponse{status: 302, header: map[string]string{"Location": "/elsewhere"}}, 1, true, "HTTP 302", false},
+		{"success false", fakeResponse{body: `{"success":false,"message":"bad"}`}, 1, true, "bad", false},
+		{"408", fakeResponse{status: 408}, 2, false, "", true},
+		{"429", fakeResponse{status: 429}, 2, false, "", true},
+		{"500", fakeResponse{status: 500}, 2, false, "", true},
+		{"502", fakeResponse{status: 502}, 2, false, "", true},
+		{"empty body", fakeResponse{status: 200}, 2, false, "", true},
+		{"html", fakeResponse{status: 200, body: "<html>"}, 2, false, "", true},
+		{"timeout", fakeResponse{hang: true}, 2, false, "", true},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeNewAPISite(t)
+			fake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+			fake.fail("POST", statusPath, tc.first)
+			client := service.NewChannelPushClient(channelPushTestSite(fake, 1100+index), channelPushTestOptions(&fakeSleepRecorder{}))
+
+			err := client.SetStatus(context.Background(), 5, 2)
+
+			assert.Len(t, fake.recorded("POST", statusPath), tc.attempts)
+			assert.Empty(t, fake.recorded("GET", "/elsewhere"))
+			if !tc.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			var remoteErr *service.ChannelPushRemoteError
+			require.ErrorAs(t, err, &remoteErr)
+			assert.Equal(t, tc.detail, remoteErr.Detail)
+			assert.Equal(t, tc.retryable, remoteErr.Retryable)
+			assert.Equal(t, 1, remoteErr.Attempts)
+		})
+	}
+}
+
+func TestChannelPushClientBackoff(t *testing.T) {
+	const statusPath = "/api/channel/5/status"
+	run := func(t *testing.T, siteID int, responses ...fakeResponse) (*fakeNewAPISite, []time.Duration, error) {
+		fake := newFakeNewAPISite(t)
+		fake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+		fake.fail("POST", statusPath, responses...)
+		recorder := &fakeSleepRecorder{}
+		client := service.NewChannelPushClient(channelPushTestSite(fake, siteID), channelPushTestOptions(recorder))
+		err := client.SetStatus(context.Background(), 5, 2)
+		return fake, recorder.recorded(), err
+	}
+
+	t.Run("exponential backoff capped at 60s", func(t *testing.T) {
+		responses := make([]fakeResponse, 20)
+		for i := range responses {
+			responses[i] = fakeResponse{status: 500}
+		}
+		fake, waits, err := run(t, 1201, responses...)
+		assert.Len(t, fake.recorded("POST", statusPath), 11)
+		second := time.Second
+		assert.Equal(t, []time.Duration{1 * second, 2 * second, 4 * second, 8 * second, 16 * second, 32 * second,
+			60 * second, 60 * second, 60 * second, 60 * second}, waits)
+		var remoteErr *service.ChannelPushRemoteError
+		require.ErrorAs(t, err, &remoteErr)
+		assert.Equal(t, 11, remoteErr.Attempts)
+		assert.Equal(t, 500, remoteErr.StatusCode)
+		assert.Equal(t, 11, remoteErr.Message().Params["attempts"])
+		assert.Equal(t, "Site request failed after {{attempts}} attempt(s): {{detail}}", remoteErr.Message().Key)
+	})
+
+	retryAfterCases := []struct {
+		name   string
+		header map[string]string
+		want   time.Duration
+	}{
+		{"Retry-After 7", map[string]string{"Retry-After": "7"}, 7 * time.Second},
+		{"no Retry-After", nil, 30 * time.Second},
+		{"Retry-After capped", map[string]string{"Retry-After": "999"}, 180 * time.Second},
+		{"Retry-After not an integer", map[string]string{"Retry-After": "soon"}, 30 * time.Second},
+	}
+	for index, tc := range retryAfterCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, waits, err := run(t, 1210+index, fakeResponse{status: 429, header: tc.header})
+			require.NoError(t, err)
+			assert.Equal(t, []time.Duration{tc.want}, waits)
+		})
+	}
+}
+
+func TestChannelPushMaxRetriesFromEnv(t *testing.T) {
+	cases := []struct {
+		value string
+		want  int
+	}{
+		{"", 10},
+		{"0", 0},
+		{"3", 3},
+		{"-1", 10},
+		{"abc", 10},
+		{"101", 100},
+	}
+	for _, tc := range cases {
+		t.Run("value "+tc.value, func(t *testing.T) {
+			t.Setenv("CHANNEL_PUSH_REMOTE_MAX_RETRIES", tc.value)
+			assert.Equal(t, tc.want, service.ChannelPushMaxRetriesFromEnv())
+		})
+	}
+
+	t.Setenv("CHANNEL_PUSH_REMOTE_MAX_RETRIES", "0")
+	fake := newFakeNewAPISite(t)
+	fake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+	fake.fail("POST", "/api/channel/5/status", fakeResponse{status: 500}, fakeResponse{status: 500})
+	options := channelPushTestOptions(&fakeSleepRecorder{})
+	options.MaxRetries = service.ChannelPushMaxRetriesFromEnv()
+	err := service.NewChannelPushClient(channelPushTestSite(fake, 1301), options).SetStatus(context.Background(), 5, 2)
+	require.Error(t, err)
+	assert.Len(t, fake.recorded("POST", "/api/channel/5/status"), 1)
+}
+
+func TestChannelPushClientListPages(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	for id := 250; id >= 1; id-- {
+		fake.addChannel(fakeRemoteChannel{ID: id, Name: "c" + strconv.Itoa(id), Status: 1, Models: "m"})
+	}
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1401), channelPushTestOptions(&fakeSleepRecorder{}))
+
+	items, err := client.ListChannels(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 250)
+	for index, item := range items {
+		require.Equal(t, index+1, item.ID)
+	}
+	assert.Len(t, fake.recorded("GET", "/api/channel/"), 3)
+}
+
+func TestChannelPushClientListRetriesFailedPage(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	for id := 1; id <= 250; id++ {
+		fake.addChannel(fakeRemoteChannel{ID: id, Status: 1})
+	}
+	fake.fail("GET", "/api/channel/", fakeResponse{pass: true}, fakeResponse{status: 503})
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1402), channelPushTestOptions(&fakeSleepRecorder{}))
+
+	items, err := client.ListChannels(context.Background())
+
+	require.NoError(t, err)
+	assert.Len(t, items, 250)
+	assert.Len(t, fake.recorded("GET", "/api/channel/"), 4)
+}
+
+func TestChannelPushClientListRejectsIncomplete(t *testing.T) {
+	page := func(total int, items ...map[string]any) fakeResponse {
+		body, _ := common.Marshal(map[string]any{"success": true, "data": map[string]any{"items": items, "total": total}})
+		return fakeResponse{body: string(body)}
+	}
+	item := func(id int) map[string]any { return map[string]any{"id": id, "name": "c", "status": 1} }
+	cases := []struct {
+		name       string
+		maxRetries int
+		responses  []fakeResponse
+	}{
+		{"total larger than actual", 10, []fakeResponse{page(3, item(1)), page(3)}},
+		{"duplicate id across pages", 10, []fakeResponse{page(2, item(1)), page(2, item(1))}},
+		{"total changed", 10, []fakeResponse{page(2, item(1)), page(3, item(2))}},
+		{"items missing", 10, []fakeResponse{{body: `{"success":true,"data":{"total":1}}`}}},
+		{"id is zero", 10, []fakeResponse{page(1, item(0))}},
+		{"success false", 10, []fakeResponse{{body: `{"success":false,"message":"denied"}`}}},
+		{"unauthorized", 10, []fakeResponse{{status: 401, body: `{"success":false,"message":"no auth"}`}}},
+		{"timeouts exhaust retries", 2, []fakeResponse{{hang: true}, {hang: true}, {hang: true}}},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeNewAPISite(t)
+			fake.fail("GET", "/api/channel/", tc.responses...)
+			options := channelPushTestOptions(&fakeSleepRecorder{})
+			options.MaxRetries = tc.maxRetries
+			client := service.NewChannelPushClient(channelPushTestSite(fake, 1500+index), options)
+
+			items, err := client.ListChannels(context.Background())
+
+			require.Error(t, err)
+			assert.Nil(t, items)
+		})
+	}
+}
+
+func TestChannelPushClientListToleratesNullFields(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	fake.fail("GET", "/api/channel/", fakeResponse{body: `{"success":true,"data":{"items":[{"id":5,"name":"x","status":1,"models":null}],"total":1}}`})
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1601), channelPushTestOptions(&fakeSleepRecorder{}))
+
+	items, err := client.ListChannels(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, service.ChannelPushSiteChannel{ID: 5, Name: "x", Status: 1}, items[0])
+}
+
+func TestChannelPushClientCreateReturnsID(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1701), channelPushTestOptions(&fakeSleepRecorder{}))
+	body := map[string]any{"mode": "single", "channel": map[string]any{"name": "n", "models": "a"}}
+
+	id, err := client.CreateChannel(context.Background(), body)
+	require.NoError(t, err)
+	assert.Equal(t, 1, id)
+
+	fake.mu.Lock()
+	fake.omitID = true
+	fake.mu.Unlock()
+	id, err = client.CreateChannel(context.Background(), body)
+	require.NoError(t, err)
+	assert.Equal(t, 0, id)
+}
+
+func TestChannelPushClientPacesPerSite(t *testing.T) {
+	fake := newFakeNewAPISite(t)
+	fake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+	recorder := &fakeSleepRecorder{}
+	options := channelPushTestOptions(recorder)
+	options.Pace = time.Second
+	ctx := context.Background()
+
+	client := service.NewChannelPushClient(channelPushTestSite(fake, 1801), options)
+	for range 3 {
+		require.NoError(t, client.SetStatus(ctx, 5, 1))
+	}
+	waits := recorder.recorded()
+	require.Len(t, waits, 2)
+	for _, wait := range waits {
+		assert.Greater(t, wait, time.Duration(0))
+		assert.LessOrEqual(t, wait, time.Second)
+	}
+
+	otherRecorder := &fakeSleepRecorder{}
+	options.Sleep = otherRecorder.sleep
+	other := service.NewChannelPushClient(channelPushTestSite(fake, 1802), options)
+	require.NoError(t, other.SetStatus(ctx, 5, 1))
+	assert.Empty(t, otherRecorder.recorded())
 }
