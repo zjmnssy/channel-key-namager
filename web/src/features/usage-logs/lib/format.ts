@@ -541,6 +541,10 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'third_party_site.create': 'Created a third-party site',
   'third_party_site.update': 'Updated a third-party site',
   'third_party_site.delete': 'Deleted a third-party site',
+  // Channel push
+  'channel_push.task_create': 'Created a channel push task',
+  'channel_push.task_update': 'Updated a channel push task',
+  'channel_push.task_toggle': 'Enabled or disabled a channel push task',
   // Prefill groups
   'prefill_group.create': 'Created a prefill group',
   'prefill_group.update': 'Updated a prefill group',

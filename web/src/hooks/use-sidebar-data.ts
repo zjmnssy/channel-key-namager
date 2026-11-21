@@ -30,6 +30,7 @@ import {
   MessageSquare,
   PlugZap,
   Radio,
+  Send,
   ServerCog,
   Settings,
   ShieldCheck,
@@ -144,6 +145,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Third-Party Sites'),
             url: '/third-party-sites',
             icon: Globe,
+            requiredRole: ROLE.ADMIN,
+          },
+          {
+            title: t('Channel Push'),
+            url: '/channel-push',
+            icon: Send,
             requiredRole: ROLE.ADMIN,
           },
           {

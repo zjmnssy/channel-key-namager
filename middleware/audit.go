@@ -73,6 +73,11 @@ var auditRouteActions = map[string]string{
 	"PUT /api/third_party_site/:id":    "third_party_site.update",
 	"DELETE /api/third_party_site/:id": "third_party_site.delete",
 
+	// 渠道推送
+	"POST /api/channel_push/tasks":             "channel_push.task_create",
+	"PUT /api/channel_push/tasks/:id":          "channel_push.task_update",
+	"POST /api/channel_push/tasks/:id/enabled": "channel_push.task_toggle",
+
 	// 预填组
 	"POST /api/prefill_group/":      "prefill_group.create",
 	"PUT /api/prefill_group/":       "prefill_group.update",

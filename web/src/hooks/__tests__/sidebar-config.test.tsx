@@ -383,6 +383,7 @@ describe('Admin group visibility by role', () => {
     await renderSidebarFor(5)
 
     expect(adminItemTitles()).toEqual(['Channels'])
+    expect(adminItemTitles()).not.toContain('Channel Push')
   })
 
   it('lists the Admin group items available to administrators', async () => {
@@ -391,6 +392,7 @@ describe('Admin group visibility by role', () => {
     expect(adminItemTitles()).toEqual([
       'Channels',
       'Third-Party Sites',
+      'Channel Push',
       'Models',
       'Users',
       'Redemption Codes',
@@ -408,6 +410,7 @@ describe('Admin group visibility by role', () => {
     expect(adminItemTitles()).toEqual([
       'Channels',
       'Third-Party Sites',
+      'Channel Push',
       'Models',
       'Users',
       'Redemption Codes',

@@ -111,7 +111,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		common.RedisEnabled, common.SessionSecret, common.IsMasterNode = previousRedis, previousSecret, wasMaster
 		assert.NoError(t, sqlDB.Close())
 	})
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	require.NoError(t, authz.Init(db))
 	sessions := map[int]string{}
 	for _, role := range []int{common.RoleCommonUser, common.RoleChannelSupplierUser, common.RoleAdminUser, common.RoleRootUser} {
@@ -149,6 +149,14 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodPost, path: "/api/third_party_site/", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/third_party_site/1", supplierStatus: http.StatusForbidden},
 		{method: http.MethodDelete, path: "/api/third_party_site/1", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/channel_push/tasks", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/channel_push/tasks", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPut, path: "/api/channel_push/tasks/1", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/channel_push/tasks/1/enabled", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/channel_push/runs", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/channel_push/runs/1/site", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/channel_push/sites/site/groups", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/channel_push/options", supplierStatus: http.StatusForbidden},
 	}
 	for _, route := range channelPermissionRoutes {
 		if route.adminOnly {
@@ -159,17 +167,25 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	// harmless here are sent: empty bodies and missing tables make those
 	// handlers answer on their own, never with an authorization error.
 	adminRoutes := map[string]bool{
-		"GET /api/group/":                        true,
-		"GET /api/prefill_group/":                true,
-		"POST /api/prefill_group/":               true,
-		"PUT /api/prefill_group/":                true,
-		"DELETE /api/prefill_group/1":            true,
-		"GET /api/channel/priority/order":        true,
-		"GET /api/channel/update_balance/task/1": true,
-		"GET /api/third_party_site/":             true,
-		"POST /api/third_party_site/":            true,
-		"PUT /api/third_party_site/1":            true,
-		"DELETE /api/third_party_site/1":         true,
+		"GET /api/group/":                         true,
+		"GET /api/prefill_group/":                 true,
+		"POST /api/prefill_group/":                true,
+		"PUT /api/prefill_group/":                 true,
+		"DELETE /api/prefill_group/1":             true,
+		"GET /api/channel/priority/order":         true,
+		"GET /api/channel/update_balance/task/1":  true,
+		"GET /api/third_party_site/":              true,
+		"POST /api/third_party_site/":             true,
+		"PUT /api/third_party_site/1":             true,
+		"DELETE /api/third_party_site/1":          true,
+		"GET /api/channel_push/tasks":             true,
+		"POST /api/channel_push/tasks":            true,
+		"PUT /api/channel_push/tasks/1":           true,
+		"POST /api/channel_push/tasks/1/enabled":  true,
+		"GET /api/channel_push/runs":              true,
+		"GET /api/channel_push/runs/1/site":       true,
+		"GET /api/channel_push/sites/site/groups": true,
+		"GET /api/channel_push/options":           true,
 	}
 	for _, test := range tests {
 		key := test.method + " " + test.path
@@ -198,6 +214,10 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "third_party_site.%").Order("id").Pluck("action", &actions).Error)
 	assert.Equal(t, []string{"third_party_site.create", "third_party_site.create", "third_party_site.update",
 		"third_party_site.update", "third_party_site.delete", "third_party_site.delete"}, actions)
+	actions = nil
+	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "channel_push.%").Order("id").Pluck("action", &actions).Error)
+	assert.Equal(t, []string{"channel_push.task_create", "channel_push.task_create", "channel_push.task_update",
+		"channel_push.task_update", "channel_push.task_toggle", "channel_push.task_toggle"}, actions)
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {

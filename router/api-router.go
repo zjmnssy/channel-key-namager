@@ -335,6 +335,18 @@ func SetApiRouter(router *gin.Engine) {
 			thirdPartySiteRoute.PUT("/:id", controller.UpdateThirdPartySite)
 			thirdPartySiteRoute.DELETE("/:id", controller.DeleteThirdPartySite)
 		}
+		channelPushRoute := apiRouter.Group("/channel_push")
+		channelPushRoute.Use(middleware.AdminAuth())
+		{
+			channelPushRoute.GET("/tasks", controller.GetChannelPushTasks)
+			channelPushRoute.POST("/tasks", controller.CreateChannelPushTask)
+			channelPushRoute.PUT("/tasks/:id", controller.UpdateChannelPushTask)
+			channelPushRoute.POST("/tasks/:id/enabled", controller.SetChannelPushTaskEnabled)
+			channelPushRoute.GET("/runs", controller.GetChannelPushRuns)
+			channelPushRoute.GET("/runs/:id/:kind", controller.GetChannelPushRunDetail)
+			channelPushRoute.GET("/sites/:id/groups", controller.GetChannelPushSiteGroups)
+			channelPushRoute.GET("/options", controller.GetChannelPushOptions)
+		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
 		logRoute := apiRouter.Group("/log")

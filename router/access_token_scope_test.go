@@ -208,3 +208,15 @@ func TestThirdPartySiteRoutesRequireDashboardSession(t *testing.T) {
 		assert.Equal(t, "session", rule.Kind(), key)
 	}
 }
+
+func TestChannelPushRoutesRequireDashboardSession(t *testing.T) {
+	for _, key := range []string{
+		"GET /api/channel_push/tasks", "POST /api/channel_push/tasks", "PUT /api/channel_push/tasks/:id",
+		"POST /api/channel_push/tasks/:id/enabled", "GET /api/channel_push/runs", "GET /api/channel_push/runs/:id/:kind",
+		"GET /api/channel_push/sites/:id/groups", "GET /api/channel_push/options",
+	} {
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "session", rule.Kind(), key)
+	}
+}
