@@ -243,15 +243,15 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"PUT /api/third_party_site/:id":    accessTokenSessionRule,
 	"DELETE /api/third_party_site/:id": accessTokenSessionRule,
 
-	// router/api-router.go: /api/channel_push
-	"GET /api/channel_push/tasks":              accessTokenSessionRule,
-	"POST /api/channel_push/tasks":             accessTokenSessionRule,
-	"PUT /api/channel_push/tasks/:id":          accessTokenSessionRule,
-	"POST /api/channel_push/tasks/:id/enabled": accessTokenSessionRule,
-	"GET /api/channel_push/runs":               accessTokenSessionRule,
-	"GET /api/channel_push/runs/:id/:kind":     accessTokenSessionRule,
-	"GET /api/channel_push/sites/:id/groups":   accessTokenSessionRule,
-	"GET /api/channel_push/options":            accessTokenSessionRule,
+	// router/api-router.go: /api/push/channel
+	"GET /api/push/channel/tasks":              accessTokenSessionRule,
+	"POST /api/push/channel/tasks":             accessTokenSessionRule,
+	"PUT /api/push/channel/tasks/:id":          accessTokenSessionRule,
+	"POST /api/push/channel/tasks/:id/enabled": accessTokenSessionRule,
+	"GET /api/push/channel/runs":               accessTokenSessionRule,
+	"GET /api/push/channel/runs/:id/:kind":     accessTokenSessionRule,
+	"GET /api/push/channel/sites/:id/groups":   accessTokenSessionRule,
+	"GET /api/push/channel/options":            accessTokenSessionRule,
 
 	// router/api-router.go: /api/audit, /api/log, /api/data
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),

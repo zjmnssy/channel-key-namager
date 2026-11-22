@@ -32,14 +32,14 @@ export async function getChannelPushTasks(params: {
   p: number
   page_size: number
 }): Promise<ApiResponse<Page<ChannelPushTask>>> {
-  const res = await api.get('/api/channel_push/tasks', { params })
+  const res = await api.get('/api/push/channel/tasks', { params })
   return res.data
 }
 
 export async function createChannelPushTask(
   payload: ChannelPushTaskPayload
 ): Promise<ApiResponse<ChannelPushTask>> {
-  const res = await api.post('/api/channel_push/tasks', payload)
+  const res = await api.post('/api/push/channel/tasks', payload)
   return res.data
 }
 
@@ -47,7 +47,7 @@ export async function updateChannelPushTask(
   id: number,
   payload: ChannelPushTaskPayload
 ): Promise<ApiResponse<ChannelPushTask>> {
-  const res = await api.put(`/api/channel_push/tasks/${id}`, payload)
+  const res = await api.put(`/api/push/channel/tasks/${id}`, payload)
   return res.data
 }
 
@@ -55,7 +55,7 @@ export async function setChannelPushTaskEnabled(
   id: number,
   enabled: boolean
 ): Promise<ApiResponse<ChannelPushTask>> {
-  const res = await api.post(`/api/channel_push/tasks/${id}/enabled`, {
+  const res = await api.post(`/api/push/channel/tasks/${id}/enabled`, {
     enabled,
   })
   return res.data
@@ -69,7 +69,7 @@ export async function getChannelPushRuns(params: {
   supplier_user_id?: number
   site_id?: number
 }): Promise<ApiResponse<Page<ChannelPushRun>>> {
-  const res = await api.get('/api/channel_push/runs', { params })
+  const res = await api.get('/api/push/channel/runs', { params })
   return res.data
 }
 
@@ -77,20 +77,20 @@ export async function getChannelPushRunDetail<T>(
   id: number,
   kind: RunDetailKind
 ): Promise<ApiResponse<T | null>> {
-  const res = await api.get(`/api/channel_push/runs/${id}/${kind}`)
+  const res = await api.get(`/api/push/channel/runs/${id}/${kind}`)
   return res.data
 }
 
 export async function getChannelPushSiteGroups(
   siteId: number
 ): Promise<ApiResponse<string[]>> {
-  const res = await api.get(`/api/channel_push/sites/${siteId}/groups`)
+  const res = await api.get(`/api/push/channel/sites/${siteId}/groups`)
   return res.data
 }
 
 export async function getChannelPushOptions(): Promise<
   ApiResponse<ChannelPushOptions>
 > {
-  const res = await api.get('/api/channel_push/options')
+  const res = await api.get('/api/push/channel/options')
   return res.data
 }

@@ -211,9 +211,9 @@ func TestThirdPartySiteRoutesRequireDashboardSession(t *testing.T) {
 
 func TestChannelPushRoutesRequireDashboardSession(t *testing.T) {
 	for _, key := range []string{
-		"GET /api/channel_push/tasks", "POST /api/channel_push/tasks", "PUT /api/channel_push/tasks/:id",
-		"POST /api/channel_push/tasks/:id/enabled", "GET /api/channel_push/runs", "GET /api/channel_push/runs/:id/:kind",
-		"GET /api/channel_push/sites/:id/groups", "GET /api/channel_push/options",
+		"GET /api/push/channel/tasks", "POST /api/push/channel/tasks", "PUT /api/push/channel/tasks/:id",
+		"POST /api/push/channel/tasks/:id/enabled", "GET /api/push/channel/runs", "GET /api/push/channel/runs/:id/:kind",
+		"GET /api/push/channel/sites/:id/groups", "GET /api/push/channel/options",
 	} {
 		rule, ok := middleware.AccessTokenRouteRule(key)
 		require.True(t, ok, key)

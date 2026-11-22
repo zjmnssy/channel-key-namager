@@ -67,6 +67,23 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 	})
 }
 
+// The console requests /api/channel without the trailing slash. A sibling
+// route that extends the /api/channel prefix (such as /api/channel_push)
+// stops gin from redirecting it to /api/channel/ once the root-level
+// /:mode relay routes exist, so the request falls through to 404.
+func TestChannelRootWithoutTrailingSlashRedirects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	SetRouter(engine, WebAssets{IndexPage: []byte("dashboard")})
+
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(method, "/api/channel", nil))
+		assert.Contains(t, []int{http.StatusMovedPermanently, http.StatusTemporaryRedirect}, recorder.Code, method)
+		assert.Equal(t, "/api/channel/", recorder.Header().Get("Location"), method)
+	}
+}
+
 func TestChannelGlobalOperationsAreAdminOnly(t *testing.T) {
 	want := map[string]bool{
 		"GET /priority/order":               true,
@@ -149,14 +166,14 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodPost, path: "/api/third_party_site/", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/third_party_site/1", supplierStatus: http.StatusForbidden},
 		{method: http.MethodDelete, path: "/api/third_party_site/1", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/channel_push/tasks", supplierStatus: http.StatusForbidden},
-		{method: http.MethodPost, path: "/api/channel_push/tasks", supplierStatus: http.StatusForbidden},
-		{method: http.MethodPut, path: "/api/channel_push/tasks/1", supplierStatus: http.StatusForbidden},
-		{method: http.MethodPost, path: "/api/channel_push/tasks/1/enabled", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/channel_push/runs", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/channel_push/runs/1/site", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/channel_push/sites/site/groups", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/channel_push/options", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/push/channel/tasks", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/push/channel/tasks", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPut, path: "/api/push/channel/tasks/1", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/push/channel/tasks/1/enabled", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/push/channel/runs", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/push/channel/runs/1/site", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/push/channel/sites/site/groups", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/push/channel/options", supplierStatus: http.StatusForbidden},
 	}
 	for _, route := range channelPermissionRoutes {
 		if route.adminOnly {
@@ -178,14 +195,14 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"POST /api/third_party_site/":             true,
 		"PUT /api/third_party_site/1":             true,
 		"DELETE /api/third_party_site/1":          true,
-		"GET /api/channel_push/tasks":             true,
-		"POST /api/channel_push/tasks":            true,
-		"PUT /api/channel_push/tasks/1":           true,
-		"POST /api/channel_push/tasks/1/enabled":  true,
-		"GET /api/channel_push/runs":              true,
-		"GET /api/channel_push/runs/1/site":       true,
-		"GET /api/channel_push/sites/site/groups": true,
-		"GET /api/channel_push/options":           true,
+		"GET /api/push/channel/tasks":             true,
+		"POST /api/push/channel/tasks":            true,
+		"PUT /api/push/channel/tasks/1":           true,
+		"POST /api/push/channel/tasks/1/enabled":  true,
+		"GET /api/push/channel/runs":              true,
+		"GET /api/push/channel/runs/1/site":       true,
+		"GET /api/push/channel/sites/site/groups": true,
+		"GET /api/push/channel/options":           true,
 	}
 	for _, test := range tests {
 		key := test.method + " " + test.path

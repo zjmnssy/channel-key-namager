@@ -703,19 +703,19 @@ it.each([
   [
     'channel_push.task_create',
     'POST',
-    '/api/channel_push/tasks',
+    '/api/push/channel/tasks',
     'Created a channel push task',
   ],
   [
     'channel_push.task_update',
     'PUT',
-    '/api/channel_push/tasks/:id',
+    '/api/push/channel/tasks/:id',
     'Updated a channel push task',
   ],
   [
     'channel_push.task_toggle',
     'POST',
-    '/api/channel_push/tasks/:id/enabled',
+    '/api/push/channel/tasks/:id/enabled',
     'Enabled or disabled a channel push task',
   ],
 ])(
