@@ -141,6 +141,28 @@ describe('security sidebar visibility', () => {
   })
 })
 
+describe('removed menu entries', () => {
+  it('the menu never lists Playground, Chat, Redemption Codes, Subscriptions or Request processing, even when every module is enabled', () => {
+    // sidebarFor skips role filtering, so this covers the entries every role could see.
+    const { result } = sidebarFor({
+      chat: { enabled: true, playground: true, chat: true },
+      admin: { enabled: true, redemption: true, subscription: true },
+    })
+    const entries = result.current.flatMap((group) => group.items)
+
+    expect(result.current.map((group) => group.id)).not.toContain('chat')
+    const removed = new Set([
+      'Playground',
+      'Chat',
+      'Redemption Codes',
+      'Subscriptions',
+      'Request processing',
+    ])
+    expect(entries.filter((item) => removed.has(item.title))).toEqual([])
+    expect(entries.some((item) => item.type === 'chat-presets')).toBe(false)
+  })
+})
+
 describe('audit log sidebar entry', () => {
   it('admin settings default Audit Logs to visible and preserve its independent toggle when saved', () => {
     const config = parseSidebarModulesAdmin(
@@ -395,8 +417,6 @@ describe('Admin group visibility by role', () => {
       'Channel Push',
       'Models',
       'Users',
-      'Redemption Codes',
-      'Subscriptions',
     ])
   })
 
@@ -413,11 +433,8 @@ describe('Admin group visibility by role', () => {
       'Channel Push',
       'Models',
       'Users',
-      'Redemption Codes',
-      'Subscriptions',
       'System Info',
       'Plugins',
-      'Request processing',
       'System Settings',
     ])
   })
