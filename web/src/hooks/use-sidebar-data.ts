@@ -20,25 +20,20 @@ import {
   Activity,
   Box,
   ClipboardList,
-  CreditCard,
   FileText,
-  FlaskConical,
   Globe,
   Key,
   LayoutDashboard,
   ListTodo,
-  MessageSquare,
   PlugZap,
   Radio,
   Send,
   ServerCog,
   Settings,
   ShieldCheck,
-  Ticket,
   User,
   Users,
   Wallet,
-  Workflow,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -50,28 +45,15 @@ import { ROLE } from '@/lib/roles'
  *
  * These are shown when the URL does not match any nested sidebar view
  * registered in `layout/lib/sidebar-view-registry.ts`.
+ *
+ * Playground, Chat, Redemption Codes, Subscriptions and Request processing
+ * are intentionally left out of the menu for every role.
  */
 export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
   const { t } = useTranslation()
 
   return {
     navGroups: [
-      {
-        id: 'chat',
-        title: t('Chat'),
-        items: [
-          {
-            title: t('Playground'),
-            url: '/playground',
-            icon: FlaskConical,
-          },
-          {
-            title: t('Chat'),
-            icon: MessageSquare,
-            type: 'chat-presets',
-          },
-        ],
-      },
       {
         id: 'general',
         title: t('General'),
@@ -166,18 +148,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             requiredRole: ROLE.ADMIN,
           },
           {
-            title: t('Redemption Codes'),
-            url: '/redemption-codes',
-            icon: Ticket,
-            requiredRole: ROLE.ADMIN,
-          },
-          {
-            title: t('Subscriptions'),
-            url: '/subscriptions',
-            icon: CreditCard,
-            requiredRole: ROLE.ADMIN,
-          },
-          {
             title: t('System Info'),
             url: '/system-info',
             icon: ServerCog,
@@ -187,12 +157,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Plugins'),
             url: '/task-plugins',
             icon: PlugZap,
-            requiredRole: ROLE.SUPER_ADMIN,
-          },
-          {
-            title: t('Request processing'),
-            url: '/request-processing',
-            icon: Workflow,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {

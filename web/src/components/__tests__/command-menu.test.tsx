@@ -35,13 +35,16 @@ import { useAuthStore } from '@/stores/auth-store'
 import { CommandMenu } from '../command-menu'
 import { Search } from '../search'
 
-const adminEntries = ['Channels', 'Models', 'Users', 'Redemption Codes']
-const superAdminEntries = [
-  'System Info',
-  'Plugins',
+const adminEntries = ['Channels', 'Models', 'Users']
+const superAdminEntries = ['System Info', 'Plugins', 'System Settings']
+// Removed from the menu for every role, so search must not offer them either.
+const removedEntries = new Set([
+  'Playground',
+  'Chat',
+  'Redemption Codes',
+  'Subscriptions',
   'Request processing',
-  'System Settings',
-]
+])
 
 // jsdom lacks the Web Animations API the menu's scroll area waits on.
 const getAnimationsDescriptor = Object.getOwnPropertyDescriptor(
@@ -124,13 +127,11 @@ test('admins find admin pages in search but not super admin pages', async () => 
   }
 })
 
-test('super admins find Request processing right after Plugins', async () => {
+test('super admins find super admin pages but none of the removed menu entries', async () => {
   const entries = await searchEntriesFor(ROLE.SUPER_ADMIN)
 
   expect(entries).toEqual(expect.arrayContaining(superAdminEntries))
-  expect(entries.indexOf('Request processing')).toBe(
-    entries.indexOf('Plugins') + 1
-  )
+  expect(entries.filter((entry) => removedEntries.has(entry))).toEqual([])
 })
 
 test('pages hidden in the sidebar settings stay out of search', async () => {
