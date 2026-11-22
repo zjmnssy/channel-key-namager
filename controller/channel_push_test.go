@@ -792,7 +792,7 @@ func channelPushTaskBody(t *testing.T, siteId int, supplierIds []int, overrides 
 
 func channelPushCreateTask(t *testing.T, body string) thirdPartySiteResult[model.ChannelPushTask] {
 	t.Helper()
-	_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPost, "/api/channel_push/tasks", body, nil, CreateChannelPushTask)
+	_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPost, "/api/push/channel/tasks", body, nil, CreateChannelPushTask)
 	return result
 }
 
@@ -845,7 +845,7 @@ func TestChannelPushTaskCreateValidation(t *testing.T) {
 	require.NoError(t, db.Model(&model.ChannelPushTask{}).Count(&count).Error)
 	require.EqualValues(t, 0, count)
 
-	_, malformed := thirdPartySiteCall[any](t, http.MethodPost, "/api/channel_push/tasks", "{", nil, CreateChannelPushTask)
+	_, malformed := thirdPartySiteCall[any](t, http.MethodPost, "/api/push/channel/tasks", "{", nil, CreateChannelPushTask)
 	assert.False(t, malformed.Success)
 	assert.Equal(t, "Invalid parameters", malformed.MessageKey)
 	assert.Empty(t, malformed.Field)
@@ -912,7 +912,7 @@ func TestChannelPushTaskUpdate(t *testing.T) {
 	require.True(t, created.Success, created.Message)
 	id := created.Data.Id
 	update := func(taskId int, body string) thirdPartySiteResult[model.ChannelPushTask] {
-		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(taskId), body, channelPushIdParam(taskId), UpdateChannelPushTask)
+		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/push/channel/tasks/"+strconv.Itoa(taskId), body, channelPushIdParam(taskId), UpdateChannelPushTask)
 		return result
 	}
 
@@ -940,7 +940,7 @@ func TestChannelPushTaskUpdate(t *testing.T) {
 	assert.Equal(t, "Task does not exist", missing.MessageKey)
 
 	// A disabled task stays disabled and unqueued.
-	_, disabled := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(id)+"/enabled", `{"enabled":false}`, channelPushIdParam(id), SetChannelPushTaskEnabled)
+	_, disabled := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/push/channel/tasks/"+strconv.Itoa(id)+"/enabled", `{"enabled":false}`, channelPushIdParam(id), SetChannelPushTaskEnabled)
 	require.True(t, disabled.Success, disabled.Message)
 	result = update(id, channelPushTaskBody(t, otherSite.Id, []int{supplier.Id}, map[string]any{"target_group": "svip"}))
 	require.True(t, result.Success, result.Message)
@@ -958,7 +958,7 @@ func TestChannelPushTaskToggle(t *testing.T) {
 	require.True(t, created.Success, created.Message)
 	id := created.Data.Id
 	toggle := func(taskId int, body string) thirdPartySiteResult[model.ChannelPushTask] {
-		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/channel_push/tasks/"+strconv.Itoa(taskId)+"/enabled", body, channelPushIdParam(taskId), SetChannelPushTaskEnabled)
+		_, result := thirdPartySiteCall[model.ChannelPushTask](t, http.MethodPut, "/api/push/channel/tasks/"+strconv.Itoa(taskId)+"/enabled", body, channelPushIdParam(taskId), SetChannelPushTaskEnabled)
 		return result
 	}
 
@@ -1013,7 +1013,7 @@ func TestChannelPushTaskListShowsSuppliersAndSite(t *testing.T) {
 		Total int                         `json:"total"`
 		Items []model.ChannelPushTaskView `json:"items"`
 	}
-	raw, result := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/channel_push/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
+	raw, result := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/push/channel/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
 	require.True(t, result.Success, result.Message)
 	assert.Equal(t, 3, result.Data.Total)
 	require.Len(t, result.Data.Items, 3)
@@ -1027,7 +1027,7 @@ func TestChannelPushTaskListShowsSuppliersAndSite(t *testing.T) {
 	assert.Equal(t, "beta", result.Data.Items[0].SiteName)
 	assert.True(t, result.Data.Items[0].SiteDeleted)
 
-	_, paged := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/channel_push/tasks?p=2&page_size=2", "", nil, GetChannelPushTasks)
+	_, paged := thirdPartySiteCall[taskPage](t, http.MethodGet, "/api/push/channel/tasks?p=2&page_size=2", "", nil, GetChannelPushTasks)
 	assert.Equal(t, 3, paged.Data.Total)
 	require.Len(t, paged.Data.Items, 1)
 	assert.Equal(t, ids[0], paged.Data.Items[0].Id)
@@ -1044,7 +1044,7 @@ func TestChannelPushOptions(t *testing.T) {
 	require.NoError(t, db.Create(&model.User{Username: "normal", Role: common.RoleCommonUser, Status: 1, AffCode: "normal"}).Error)
 	require.NoError(t, db.Create(&model.User{Username: "admin2", Role: common.RoleAdminUser, Status: 1, AffCode: "admin2"}).Error)
 
-	raw, result := thirdPartySiteCall[model.ChannelPushOptions](t, http.MethodGet, "/api/channel_push/options", "", nil, GetChannelPushOptions)
+	raw, result := thirdPartySiteCall[model.ChannelPushOptions](t, http.MethodGet, "/api/push/channel/options", "", nil, GetChannelPushOptions)
 	require.True(t, result.Success, result.Message)
 	assert.Equal(t, []model.ChannelPushSiteOption{{Id: site.Id, Name: "alpha"}}, result.Data.Sites)
 	assert.Equal(t, []model.ChannelPushSupplierOption{{Id: s1.Id, Username: "sup-a", DisplayName: ""}}, result.Data.Suppliers)
@@ -1427,19 +1427,19 @@ func TestChannelPushRunKeepsSecretsOut(t *testing.T) {
 		assert.NotContains(t, text, "remote-access-token")
 		assert.NotContains(t, text, "sk-")
 	}
-	raw, result := thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/channel_push/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
+	raw, result := thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/push/channel/tasks?p=1&page_size=10", "", nil, GetChannelPushTasks)
 	require.True(t, result.Success, result.Message)
 	assert.NotContains(t, raw, "remote-access-token")
 	assert.NotContains(t, raw, "sk-")
 
 	responses := map[string]string{}
-	raw, result = thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/channel_push/runs?p=1&page_size=10", "", nil, GetChannelPushRuns)
+	raw, result = thirdPartySiteCall[map[string]any](t, http.MethodGet, "/api/push/channel/runs?p=1&page_size=10", "", nil, GetChannelPushRuns)
 	require.True(t, result.Success, result.Message)
 	require.Contains(t, raw, `"id":`+strconv.Itoa(run.Id))
 	responses["runs"] = raw
 	for _, kind := range []string{"site", "target", "actions"} {
 		params := gin.Params{{Key: "id", Value: strconv.Itoa(run.Id)}, {Key: "kind", Value: kind}}
-		raw, detail := thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs/"+strconv.Itoa(run.Id)+"/"+kind, "", params, GetChannelPushRunDetail)
+		raw, detail := thirdPartySiteCall[any](t, http.MethodGet, "/api/push/channel/runs/"+strconv.Itoa(run.Id)+"/"+kind, "", params, GetChannelPushRunDetail)
 		require.True(t, detail.Success, detail.Message)
 		require.NotNil(t, detail.Data, kind)
 		responses[kind] = raw
@@ -1805,7 +1805,7 @@ func TestChannelPushRunList(t *testing.T) {
 		Items []model.ChannelPushRunView `json:"items"`
 	}
 	list := func(query string) (string, []model.ChannelPushRunView, int) {
-		raw, result := thirdPartySiteCall[runPage](t, http.MethodGet, "/api/channel_push/runs?"+query, "", nil, GetChannelPushRuns)
+		raw, result := thirdPartySiteCall[runPage](t, http.MethodGet, "/api/push/channel/runs?"+query, "", nil, GetChannelPushRuns)
 		require.True(t, result.Success, result.Message)
 		return raw, result.Data.Items, result.Data.Total
 	}
@@ -1844,7 +1844,7 @@ func TestChannelPushRunList(t *testing.T) {
 	assert.Equal(t, 3, total)
 	assert.Equal(t, []int{r100.Id}, ids(items))
 
-	_, bad := thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs?start_from=abc", "", nil, GetChannelPushRuns)
+	_, bad := thirdPartySiteCall[any](t, http.MethodGet, "/api/push/channel/runs?start_from=abc", "", nil, GetChannelPushRuns)
 	assert.False(t, bad.Success)
 	assert.Equal(t, "Invalid parameters", bad.MessageKey)
 }
@@ -1859,7 +1859,7 @@ func TestChannelPushRunDetail(t *testing.T) {
 
 	detail := func(id int, kind string) (string, thirdPartySiteResult[any]) {
 		params := gin.Params{{Key: "id", Value: strconv.Itoa(id)}, {Key: "kind", Value: kind}}
-		return thirdPartySiteCall[any](t, http.MethodGet, "/api/channel_push/runs/"+strconv.Itoa(id)+"/"+kind, "", params, GetChannelPushRunDetail)
+		return thirdPartySiteCall[any](t, http.MethodGet, "/api/push/channel/runs/"+strconv.Itoa(id)+"/"+kind, "", params, GetChannelPushRunDetail)
 	}
 	for kind, want := range map[string]string{"site": `"data":[{"id":1}]`, "target": `"data":[{"id":2}]`, "actions": `"data":[{"category":"create"}]`} {
 		raw, result := detail(full.Id, kind)
@@ -1891,7 +1891,7 @@ func TestChannelPushSiteGroups(t *testing.T) {
 
 	site := channelPushSeedSite(t, db, "alpha")
 	groups := func(siteId int) (string, thirdPartySiteResult[[]string]) {
-		return thirdPartySiteCall[[]string](t, http.MethodGet, "/api/channel_push/sites/"+strconv.Itoa(siteId)+"/groups", "", channelPushIdParam(siteId), GetChannelPushSiteGroups)
+		return thirdPartySiteCall[[]string](t, http.MethodGet, "/api/push/channel/sites/"+strconv.Itoa(siteId)+"/groups", "", channelPushIdParam(siteId), GetChannelPushSiteGroups)
 	}
 	pointAt := func(fake *fakeNewAPISite) {
 		require.NoError(t, db.Model(&model.ThirdPartySite{}).Where("id = ?", site.Id).Update("base_url", fake.server.URL).Error)

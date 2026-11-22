@@ -69,7 +69,7 @@ let i18n: I18n
 
 async function renderPage(items: ChannelPushTask[] = [periodicTask]) {
   const get = vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
-    if (url === '/api/channel_push/options') {
+    if (url === '/api/push/channel/options') {
       return {
         data: {
           success: true,
@@ -80,7 +80,7 @@ async function renderPage(items: ChannelPushTask[] = [periodicTask]) {
         },
       }
     }
-    if (url === '/api/channel_push/sites/9/groups') {
+    if (url === '/api/push/channel/sites/9/groups') {
       return { data: { success: true, data: ['default'] } }
     }
     return {
@@ -136,7 +136,7 @@ afterEach(() => {
 })
 
 function listRequests(get: { mock: { calls: unknown[][] } }) {
-  return get.mock.calls.filter((call) => call[0] === '/api/channel_push/tasks')
+  return get.mock.calls.filter((call) => call[0] === '/api/push/channel/tasks')
 }
 
 describe('TasksTable', () => {
@@ -206,7 +206,7 @@ describe('TasksTable', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Disable' }))
 
     await waitFor(() =>
-      expect(post).toHaveBeenCalledWith('/api/channel_push/tasks/1/enabled', {
+      expect(post).toHaveBeenCalledWith('/api/push/channel/tasks/1/enabled', {
         enabled: false,
       })
     )
@@ -227,7 +227,7 @@ describe('TasksTable', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Enable' }))
 
     await waitFor(() =>
-      expect(post).toHaveBeenCalledWith('/api/channel_push/tasks/1/enabled', {
+      expect(post).toHaveBeenCalledWith('/api/push/channel/tasks/1/enabled', {
         enabled: true,
       })
     )

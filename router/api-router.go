@@ -335,7 +335,7 @@ func SetApiRouter(router *gin.Engine) {
 			thirdPartySiteRoute.PUT("/:id", controller.UpdateThirdPartySite)
 			thirdPartySiteRoute.DELETE("/:id", controller.DeleteThirdPartySite)
 		}
-		channelPushRoute := apiRouter.Group("/channel_push")
+		channelPushRoute := apiRouter.Group("/push/channel")
 		channelPushRoute.Use(middleware.AdminAuth())
 		{
 			channelPushRoute.GET("/tasks", controller.GetChannelPushTasks)
