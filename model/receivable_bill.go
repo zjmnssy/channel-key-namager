@@ -113,6 +113,19 @@ func ClaimReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok boo
 	return lease, result.RowsAffected == 1, nil
 }
 
+// ClaimDueReceivableRow 是扫描用的认领：除租约外还要求这一行仍在重试中且已到重试时间。
+// 扫描读到到期行与认领之间，手动重新同步可能已让它变成成功，而只有手动重新同步能让成功行离开成功。
+func ClaimDueReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok bool, err error) {
+	lease = now + ReceivableBillLeaseSeconds
+	result := DB.Model(new(T)).
+		Where("id = ? AND lease_until < ? AND status = ? AND next_retry_at <= ?", id, now, ReceivableBillStatusRetrying, now).
+		Update("lease_until", lease)
+	if result.Error != nil {
+		return 0, false, result.Error
+	}
+	return lease, result.RowsAffected == 1, nil
+}
+
 // FinishReceivableRow 在仍持有租约时写入 updates 并释放租约，返回是否写入。
 func FinishReceivableRow[T ReceivableRow](id int, lease int64, updates map[string]any) (bool, error) {
 	values := make(map[string]any, len(updates)+2)

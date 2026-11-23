@@ -244,7 +244,7 @@ func (turn *receivableSiteTurn) retryDay(bill model.ReceivableBill) bool {
 	if !ok {
 		return turn.fail(fmt.Errorf("bill %d has invalid date %d", bill.Id, bill.BillDate))
 	}
-	lease, claimed, err := model.ClaimReceivableRow[model.ReceivableBill](bill.Id, turn.now)
+	lease, claimed, err := model.ClaimDueReceivableRow[model.ReceivableBill](bill.Id, turn.now)
 	if err != nil {
 		return turn.fail(err)
 	}
@@ -285,7 +285,7 @@ func (turn *receivableSiteTurn) insertHour(hour time.Time) bool {
 // retryHour retries a due hour once it holds the row's lease; a row someone else is
 // syncing is left to them.
 func (turn *receivableSiteTurn) retryHour(row model.ReceivableBillHour) bool {
-	lease, claimed, err := model.ClaimReceivableRow[model.ReceivableBillHour](row.Id, turn.now)
+	lease, claimed, err := model.ClaimDueReceivableRow[model.ReceivableBillHour](row.Id, turn.now)
 	if err != nil {
 		return turn.fail(err)
 	}

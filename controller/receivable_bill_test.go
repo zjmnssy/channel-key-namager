@@ -132,6 +132,28 @@ func TestReceivableBillLeaseAdmitsOneSyncAtATime(t *testing.T) {
 	finished, err = model.FinishReceivableRow[model.ReceivableBill](row.Id, 1300, map[string]any{"status": model.ReceivableBillStatusFailed})
 	require.NoError(t, err)
 	assert.False(t, finished)
+
+	// 扫描只认领仍在重试且到期的行：并发的手动重新同步可能已让它变成成功，只有手动重新同步能让成功行离开成功
+	for _, tc := range []struct {
+		name        string
+		status      string
+		nextRetryAt int64
+		claimed     bool
+	}{
+		{"成功", model.ReceivableBillStatusSuccess, 0, false},
+		{"重试中但未到期", model.ReceivableBillStatusRetrying, 1001, false},
+		{"重试中且到期", model.ReceivableBillStatusRetrying, 1000, true},
+		{"失败", model.ReceivableBillStatusFailed, 0, false},
+	} {
+		require.NoError(t, db.Model(&model.ReceivableBill{}).Where("id = ?", row.Id).
+			Updates(map[string]any{"status": tc.status, "next_retry_at": tc.nextRetryAt, "lease_until": 0}).Error)
+		lease, ok, err := model.ClaimDueReceivableRow[model.ReceivableBill](row.Id, 1000)
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.claimed, ok, tc.name)
+		if tc.claimed {
+			assert.Equal(t, int64(1300), lease, tc.name)
+		}
+	}
 }
 
 type fakeStatRequest struct {
