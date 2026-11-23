@@ -1,10 +1,18 @@
 package controller
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -13,6 +21,9 @@ import (
 func setupReceivableBillTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupThirdPartySiteTest(t)
+	originalOptions := service.ReceivableBillClientOptions
+	service.ReceivableBillClientOptions = service.ChannelPushClientOptions{Pace: 0, Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute}
+	t.Cleanup(func() { service.ReceivableBillClientOptions = originalOptions })
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.AuditLog{}))
 	clearTables := func() {
 		for _, table := range []any{&model.ReceivableBillHour{}, &model.ReceivableBill{}, &model.AuditLog{}, &model.User{}} {
@@ -119,4 +130,143 @@ func TestReceivableBillLeaseAdmitsOneSyncAtATime(t *testing.T) {
 	finished, err = model.FinishReceivableRow[model.ReceivableBill](row.Id, 1300, map[string]any{"status": model.ReceivableBillStatusFailed})
 	require.NoError(t, err)
 	assert.False(t, finished)
+}
+
+type fakeStatRequest struct {
+	Method        string
+	Path          string
+	Query         url.Values
+	Authorization string
+	User          string
+}
+
+type fakeStatSite struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	requests []fakeStatRequest
+	respond  func(start, end int64) (status int, body string, header http.Header)
+}
+
+func newFakeStatSite(t *testing.T) *fakeStatSite {
+	t.Helper()
+	site := &fakeStatSite{respond: func(start, end int64) (int, string, http.Header) {
+		return http.StatusOK, `{"success":true,"data":{"quota":500000}}`, nil
+	}}
+	site.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		start, _ := strconv.ParseInt(query.Get("start_timestamp"), 10, 64)
+		end, _ := strconv.ParseInt(query.Get("end_timestamp"), 10, 64)
+		site.mu.Lock()
+		site.requests = append(site.requests, fakeStatRequest{
+			Method: r.Method, Path: r.URL.Path, Query: query,
+			Authorization: r.Header.Get("Authorization"), User: r.Header.Get("New-Api-User"),
+		})
+		respond := site.respond
+		site.mu.Unlock()
+		status, body, header := respond(start, end)
+		for name, values := range header {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(site.server.Close)
+	return site
+}
+
+func (s *fakeStatSite) recorded() []fakeStatRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]fakeStatRequest(nil), s.requests...)
+}
+
+// windows returns the requested [start, end] pairs in request order.
+func (s *fakeStatSite) windows() [][2]int64 {
+	var windows [][2]int64
+	for _, request := range s.recorded() {
+		start, _ := strconv.ParseInt(request.Query.Get("start_timestamp"), 10, 64)
+		end, _ := strconv.ParseInt(request.Query.Get("end_timestamp"), 10, 64)
+		windows = append(windows, [2]int64{start, end})
+	}
+	return windows
+}
+
+func TestReceivableStatAttempt(t *testing.T) {
+	const remoteFailure = "Site request failed: {{detail}}"
+	const noQuota = "Site returned no valid quota"
+	quotaBody := func(quota string) string { return `{"success":true,"data":{"quota":` + quota + `}}` }
+	json200 := func(body string) func() (int, string, http.Header) {
+		return func() (int, string, http.Header) { return http.StatusOK, body, nil }
+	}
+	tests := []struct {
+		name      string
+		reply     func() (int, string, http.Header)
+		quota     int64
+		key       string
+		detail    string
+		retryable bool
+		wait      time.Duration
+	}{
+		{name: "quota", reply: json200(quotaBody("61728394")), quota: 61728394},
+		{name: "zero", reply: json200(quotaBody("0"))},
+		{name: "refusal", reply: json200(`{"success":false,"message":"无权进行此操作"}`), key: remoteFailure, detail: "无权进行此操作"},
+		{name: "fractional", reply: json200(quotaBody("1.5")), key: noQuota},
+		{name: "negative", reply: json200(quotaBody("-1")), key: noQuota},
+		{name: "string", reply: json200(quotaBody(`"12"`)), key: noQuota},
+		{name: "missing", reply: json200(`{"success":true,"data":{}}`), key: noQuota},
+		{name: "null data", reply: json200(`{"success":true,"data":null}`), key: noQuota},
+		{name: "not json", reply: json200("<html>"), key: remoteFailure, detail: "invalid response body", retryable: true},
+		{name: "bad gateway", reply: func() (int, string, http.Header) { return http.StatusBadGateway, "", nil }, key: remoteFailure, detail: "HTTP 502", retryable: true},
+		{name: "rate limited", reply: func() (int, string, http.Header) {
+			return http.StatusTooManyRequests, "", http.Header{"Retry-After": {"120"}}
+		}, key: remoteFailure, detail: "HTTP 429", retryable: true, wait: 120 * time.Second},
+		{name: "rate limit capped", reply: func() (int, string, http.Header) {
+			return http.StatusTooManyRequests, "", http.Header{"Retry-After": {"7200"}}
+		}, key: remoteFailure, detail: "HTTP 429", retryable: true, wait: 30 * time.Minute},
+		{name: "unauthorized", reply: func() (int, string, http.Header) {
+			return http.StatusUnauthorized, `{"success":false,"message":"未登录"}`, nil
+		}, key: remoteFailure, detail: "未登录"},
+		{name: "redirect", reply: func() (int, string, http.Header) {
+			return http.StatusFound, "", http.Header{"Location": {"https://example.com"}}
+		}, key: remoteFailure, detail: "HTTP 302"},
+		{name: "long reason", reply: json200(`{"success":false,"message":"` + strings.Repeat("错", 600) + `"}`), key: remoteFailure, detail: strings.Repeat("错", 500)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupReceivableBillTest(t)
+			fake := newFakeStatSite(t)
+			fake.respond = func(start, end int64) (int, string, http.Header) { return tt.reply() }
+			site := receivableSeedSite(t, db, "rb-stat", fake.server.URL, 1)
+
+			client := service.NewChannelPushClient(site, service.ChannelPushClientOptions{Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute})
+			got := client.ReadLogStatQuota(context.Background(), 1795190400, 1795276800)
+
+			assert.Equal(t, tt.quota, got.Quota)
+			assert.Equal(t, tt.retryable, got.Retryable)
+			assert.Equal(t, tt.wait, got.RetryAfter)
+			if tt.key == "" {
+				assert.Nil(t, got.Failure)
+			} else {
+				require.NotNil(t, got.Failure)
+				assert.Equal(t, tt.key, got.Failure.Key)
+				if tt.detail == "" {
+					assert.Empty(t, got.Failure.Params)
+				} else {
+					assert.Equal(t, tt.detail, got.Failure.Params["detail"])
+				}
+			}
+
+			requests := fake.recorded()
+			require.Len(t, requests, 1)
+			assert.Equal(t, http.MethodGet, requests[0].Method)
+			assert.Equal(t, "/api/log/stat", requests[0].Path)
+			assert.Equal(t, url.Values{"p": {"1"}, "page_size": {"1"}, "start_timestamp": {"1795190400"}, "end_timestamp": {"1795276800"}}, requests[0].Query)
+			assert.Equal(t, "Bearer remote-access-token", requests[0].Authorization)
+			assert.Equal(t, "7", requests[0].User)
+			assert.Equal(t, [][2]int64{{1795190400, 1795276800}}, fake.windows())
+		})
+	}
 }

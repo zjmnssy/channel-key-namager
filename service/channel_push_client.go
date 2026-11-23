@@ -400,3 +400,48 @@ func (c *ChannelPushClient) SetStatus(ctx context.Context, remoteID int, status 
 	_, err := c.do(ctx, http.MethodPost, "/api/channel/"+strconv.Itoa(remoteID)+"/status", nil, body)
 	return err
 }
+
+// ReceivableBillClientOptions is what the receivable bill sync uses to read a site.
+var ReceivableBillClientOptions = ChannelPushClientOptions{Pace: time.Second, Timeout: 30 * time.Second, MaxRetryAfter: 30 * time.Minute, Sleep: channelPushSleep}
+
+// ReceivableStatAttempt is the outcome of one read of a site's log quota.
+type ReceivableStatAttempt struct {
+	Quota      int64
+	Failure    *common.Message // nil on success
+	Retryable  bool
+	RetryAfter time.Duration // only set after a 429, already capped by MaxRetryAfter
+}
+
+// ReadLogStatQuota reads the site's consumed quota between start and end (Unix seconds)
+// with a single request and no retry; the caller decides what to do with a failure.
+func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int64) ReceivableStatAttempt {
+	query := url.Values{}
+	query.Set("p", "1")
+	query.Set("page_size", "1")
+	query.Set("start_timestamp", strconv.FormatInt(start, 10))
+	query.Set("end_timestamp", strconv.FormatInt(end, 10))
+
+	const path = "/api/log/stat"
+	if err := c.pace(ctx); err != nil {
+		return ReceivableStatAttempt{Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})}
+	}
+	envelope, retryAfter, remoteErr := c.attempt(ctx, http.MethodGet, path, query, nil)
+	if remoteErr != nil {
+		common.SysError(common.LogText("receivable bill site request failed: site=%d path=%s status=%d", c.site.Id, path, remoteErr.StatusCode))
+		return ReceivableStatAttempt{
+			Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{
+				"detail": truncateText(remoteErr.Detail, channelPushMaxDetailLength),
+			}),
+			Retryable:  remoteErr.Retryable && ctx.Err() == nil,
+			RetryAfter: retryAfter,
+		}
+	}
+
+	var data struct {
+		Quota *int64 `json:"quota"`
+	}
+	if common.Unmarshal(envelope.Data, &data) != nil || data.Quota == nil || *data.Quota < 0 {
+		return ReceivableStatAttempt{Failure: common.NewMessage("Site returned no valid quota")}
+	}
+	return ReceivableStatAttempt{Quota: *data.Quota}
+}
