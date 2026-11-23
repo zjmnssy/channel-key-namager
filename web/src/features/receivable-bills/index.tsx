@@ -23,6 +23,7 @@ import { SectionPageLayout } from '@/components/layout'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import { DailyBillsTable } from './components/daily-bills-table'
+import { TrendPanel } from './components/trend-panel'
 
 const route = getRouteApi('/_authenticated/receivable-bills/')
 
@@ -50,7 +51,7 @@ export function ReceivableBills() {
             </TabsList>
           </Tabs>
           <div className='min-h-0 flex-1'>
-            {tab === 'daily' ? <DailyBillsTable /> : null}
+            {tab === 'daily' ? <DailyBillsTable /> : <TrendPanel />}
           </div>
         </div>
       </SectionPageLayout.Content>

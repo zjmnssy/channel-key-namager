@@ -39,6 +39,8 @@ import type { ReceivableBill } from '../../types'
 import { DailyBillsTable } from '../daily-bills-table'
 
 vi.mock('../../api')
+// The page route pulls in the trend chart, which VChart cannot load under node.
+vi.mock('@visactor/react-vchart', () => ({ VChart: () => null }))
 
 const baseBill: ReceivableBill = {
   id: 1,

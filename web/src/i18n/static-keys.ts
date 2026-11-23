@@ -992,6 +992,7 @@ export const STATIC_I18N_KEYS = [
   'Site returned no valid quota',
   'The site has been deleted',
   'Bill does not exist',
+  'Date range cannot exceed 366 days',
   'This bill is being synced, please try again later',
   'Retrying',
   'Success',
