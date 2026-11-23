@@ -991,6 +991,8 @@ export const STATIC_I18N_KEYS = [
   'Site request failed: {{detail}}',
   'Site returned no valid quota',
   'The site has been deleted',
+  'Bill does not exist',
+  'This bill is being synced, please try again later',
   'Retrying',
   'Success',
   'Internal error: {{detail}}',

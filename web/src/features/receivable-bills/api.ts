@@ -16,10 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import i18n from 'i18next'
+
+import { toIntlLocale } from '@/i18n/languages'
 import { api } from '@/lib/api'
+import { createServerError } from '@/lib/server-error-message'
 
 import type {
   ApiResponse,
+  DailyBillFilter,
   DailyBillQuery,
   Page,
   ReceivableBill,
@@ -46,6 +51,32 @@ export async function listReceivableBills(
       statuses: joinList(query.statuses),
     },
   })
+  return res.data
+}
+
+// Returns the xlsx file; parameter errors come back as a JSON body instead.
+export async function exportReceivableBills(
+  filter: DailyBillFilter
+): Promise<Blob> {
+  const res = await api.get<Blob>('/api/receivable_bill/daily/export', {
+    params: {
+      start_date: filter.start_date,
+      end_date: filter.end_date,
+      site_ids: joinList(filter.site_ids),
+      statuses: joinList(filter.statuses),
+    },
+    headers: {
+      // Without a saved language preference the file follows the interface.
+      'Accept-Language': toIntlLocale(i18n.resolvedLanguage || i18n.language),
+    },
+    responseType: 'blob',
+    disableDuplicate: true,
+    skipErrorHandler: true,
+    skipBusinessError: true,
+  })
+  if (res.data.type.includes('json')) {
+    throw createServerError(JSON.parse(await res.data.text()))
+  }
   return res.data
 }
 

@@ -33,6 +33,7 @@ import { formatTimestampToDate } from '@/lib/format'
 import { BILL_STATUS_DISPLAY } from '../constants'
 import { formatBillDate } from '../lib/bill-date'
 import type { ReceivableBill } from '../types'
+import { ResyncBillButton } from './resync-bill-button'
 
 const EMPTY = '—'
 
@@ -133,6 +134,11 @@ export function useDailyBillsColumns(): ColumnDef<ReceivableBill>[] {
         accessorKey: 'synced_at',
         header: t('Sync Time'),
         cell: ({ row }) => formatTimestampToDate(row.original.synced_at),
+      },
+      {
+        id: 'actions',
+        header: () => <span className='sr-only'>{t('Actions')}</span>,
+        cell: ({ row }) => <ResyncBillButton bill={row.original} />,
       },
     ],
     [t]

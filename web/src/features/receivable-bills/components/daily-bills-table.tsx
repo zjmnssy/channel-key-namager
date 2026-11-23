@@ -39,6 +39,7 @@ import { beijingToday, monthStart } from '../lib/bill-date'
 import type { DailyBillQuery } from '../types'
 import { BillDateRangePicker } from './bill-date-range-picker'
 import { useDailyBillsColumns } from './daily-bills-columns'
+import { ExportBillsButton } from './export-bills-button'
 
 const route = getRouteApi('/_authenticated/receivable-bills/')
 // The shared toolbar reads column filters; this list filters on the server.
@@ -145,6 +146,22 @@ export function DailyBillsTable() {
           table={table}
           hideViewOptions
           hasAdditionalFilters={hasFilters}
+          preActions={
+            <ExportBillsButton
+              filter={{
+                start_date: startDate,
+                end_date: endDate,
+                site_ids:
+                  siteValues.length > 0 ? siteValues.map(Number) : undefined,
+                statuses: statusValues.length > 0 ? statusValues : undefined,
+              }}
+              siteNames={siteValues.map(
+                (id) =>
+                  (sitesQuery.data ?? []).find((site) => String(site.id) === id)
+                    ?.name ?? id
+              )}
+            />
+          }
           onReset={() =>
             updateFilters({
               start: undefined,

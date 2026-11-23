@@ -179,6 +179,38 @@ describe('DailyBillsTable', () => {
     )
   })
 
+  it('exports the current filters', async () => {
+    vi.mocked(billApi.exportReceivableBills).mockResolvedValue(
+      new Blob(['xlsx'])
+    )
+    const createObjectURL = vi.fn(() => 'blob:bills')
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() })
+    const downloads: string[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      downloads.push(this.download)
+    })
+    await renderBills()
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Export Excel' })
+    )
+
+    await waitFor(() =>
+      expect(billApi.exportReceivableBills).toHaveBeenCalledWith({
+        start_date: 20261101,
+        end_date: 20261123,
+      })
+    )
+    await waitFor(() =>
+      expect(downloads).toEqual([
+        'All Sites-Receivable Bills-20261101-20261123.xlsx',
+      ])
+    )
+  })
+
   it('labels deleted sites in the site filter', async () => {
     await renderBills()
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
