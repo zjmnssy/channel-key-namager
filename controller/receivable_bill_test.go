@@ -851,3 +851,111 @@ func TestReceivableBillResync(t *testing.T) {
 	assert.False(t, reply.Success)
 	assert.Equal(t, "Invalid ID", reply.MessageKey)
 }
+
+func TestReceivableBillTrend(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	siteA := receivableSeedSite(t, db, "rb-trend-a", "https://rb-trend-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "rb-trend-b", "https://rb-trend-b.example.com", 1)
+	siteC := receivableSeedSite(t, db, "rb-trend-c", "https://rb-trend-c.example.com", 1)
+	siteD := receivableSeedSite(t, db, "rb-trend-d", "https://rb-trend-d.example.com", 1)
+	require.NoError(t, db.Delete(siteB).Error)
+	require.NoError(t, db.Delete(siteC).Error)
+
+	hour := func(date, clock int) int64 {
+		day, ok := model.ReceivableBillDayStart(date)
+		require.True(t, ok)
+		return day.Add(time.Duration(clock) * time.Hour).Unix()
+	}
+	success, retrying := model.ReceivableBillStatusSuccess, model.ReceivableBillStatusRetrying
+	for _, row := range []any{
+		&model.ReceivableBill{SiteId: siteA.Id, BillDate: 20261121, Quota: 1000000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBill{SiteId: siteA.Id, BillDate: 20261122, Status: retrying},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261122, 0), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261122, 1), Status: retrying},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261122, 3), Quota: 250000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261123, 0), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261123, 1), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261123, 2), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBill{SiteId: siteB.Id, BillDate: 20261122, Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteB.Id, BillHour: hour(20261122, 2), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+	} {
+		require.NoError(t, db.Create(row).Error)
+	}
+	now := time.Unix(1795401000, 0).UTC() // Beijing 11-23 10:30
+	str := func(s string) *string { return &s }
+
+	trend, err := service.BuildReceivableBillTrend(service.ReceivableTrendQuery{View: "day", Date: 20261122}, now)
+	require.NoError(t, err)
+	require.Len(t, trend.Labels, 24)
+	assert.Equal(t, "00:00", trend.Labels[0])
+	assert.Equal(t, "23:00", trend.Labels[23])
+	require.Len(t, trend.Series, 3)
+	a, b, d := trend.Series[0], trend.Series[1], trend.Series[2]
+	assert.Equal(t, []int{siteA.Id, siteB.Id, siteD.Id}, []int{a.SiteID, b.SiteID, d.SiteID})
+	assert.Equal(t, siteA.Name, a.SiteName)
+	assert.False(t, a.Deleted)
+	assert.True(t, b.Deleted)
+	assert.Equal(t, str("1.000000"), a.Amounts[0])
+	assert.Nil(t, a.Amounts[1])
+	assert.Equal(t, str("0.500000"), a.Amounts[3])
+	assert.Equal(t, str("1.000000"), b.Amounts[2])
+	for _, amount := range d.Amounts {
+		assert.Nil(t, amount)
+	}
+	assert.NotContains(t, a.Provisional, true)
+	assert.Equal(t, 22, trend.MissingCount)
+
+	// Today: the hours after the last one read (09:00) are neither shown nor missing.
+	trend, err = service.BuildReceivableBillTrend(service.ReceivableTrendQuery{View: "day", Date: 20261123}, now)
+	require.NoError(t, err)
+	require.Len(t, trend.Series, 2)
+	assert.Equal(t, siteA.Id, trend.Series[0].SiteID)
+	assert.Equal(t, 7, trend.MissingCount)
+
+	trend, err = service.BuildReceivableBillTrend(service.ReceivableTrendQuery{View: "month", StartDate: 20261120, EndDate: 20261123}, now)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"}, trend.Labels)
+	require.Len(t, trend.Series, 3)
+	assert.Equal(t, []*string{nil, str("2.000000"), str("1.500000"), str("3.000000")}, trend.Series[0].Amounts)
+	assert.Equal(t, []bool{false, false, true, true}, trend.Series[0].Provisional)
+	assert.Equal(t, []*string{nil, nil, str("1.000000"), nil}, trend.Series[1].Amounts)
+	assert.Equal(t, []bool{false, false, false, false}, trend.Series[1].Provisional)
+	assert.Zero(t, trend.MissingCount)
+
+	// site_ids picks the series itself and skips ids that do not exist.
+	trend, err = service.BuildReceivableBillTrend(service.ReceivableTrendQuery{
+		View: "month", StartDate: 20261120, EndDate: 20261123, SiteIDs: []int{siteD.Id, 99999},
+	}, now)
+	require.NoError(t, err)
+	require.Len(t, trend.Series, 1)
+	assert.Equal(t, siteD.Id, trend.Series[0].SiteID)
+	for _, amount := range trend.Series[0].Amounts {
+		assert.Nil(t, amount)
+	}
+	assert.Zero(t, trend.MissingCount)
+
+	trend, err = service.BuildReceivableBillTrend(service.ReceivableTrendQuery{View: "day", Date: 20261122, SiteIDs: []int{99999}}, now)
+	require.NoError(t, err)
+	assert.Empty(t, trend.Series)
+
+	trendRequest := func(query string) receivableReply {
+		return receivableReplyOf(t, receivableRequest(t, http.MethodGet, "/api/receivable_bill/trend?"+query, nil, nil, GetReceivableBillTrend))
+	}
+	reply := trendRequest("view=month&start_date=20261120&end_date=20261123&site_ids=" + strconv.Itoa(siteA.Id))
+	require.True(t, reply.Success)
+	assert.Contains(t, string(reply.Data), `"missing_count":0`)
+	for _, query := range []string{
+		"view=year&date=20261122",
+		"view=day&date=20261131",
+		"view=day",
+		"view=month&start_date=20261123&end_date=20261120",
+		"view=day&date=20261122&site_ids=x",
+	} {
+		reply := trendRequest(query)
+		assert.False(t, reply.Success, query)
+		assert.Equal(t, "Invalid parameters", reply.MessageKey, query)
+	}
+	reply = trendRequest("view=month&start_date=20251101&end_date=20261123")
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Date range cannot exceed 366 days", reply.MessageKey)
+}

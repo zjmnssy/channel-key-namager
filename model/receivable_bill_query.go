@@ -65,3 +65,15 @@ func ListReceivableBillSiteOptions() ([]ReceivableBillSiteOption, error) {
 	})
 	return options, nil
 }
+
+// ListSuccessfulReceivableBillHours 返回 bill_hour 在 [from, to) 内的成功小时数据，siteIDs 为空时不按站点筛选，
+// 按站点 id、小时升序。
+func ListSuccessfulReceivableBillHours(siteIDs []int, from, to int64) ([]*ReceivableBillHour, error) {
+	query := DB.Where("bill_hour >= ? AND bill_hour < ? AND status = ?", from, to, ReceivableBillStatusSuccess)
+	if len(siteIDs) > 0 {
+		query = query.Where("site_id IN ?", siteIDs)
+	}
+	var hours []*ReceivableBillHour
+	err := query.Order("site_id, bill_hour").Find(&hours).Error
+	return hours, err
+}

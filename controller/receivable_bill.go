@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -36,6 +37,22 @@ func newReceivableBillView(bill *model.ReceivableBill, deleted bool) receivableB
 	return view
 }
 
+// parseReceivableSiteIDs 解析逗号分隔的 site_ids，空串返回 nil，含非正整数时返回 false。
+func parseReceivableSiteIDs(raw string) ([]int, bool) {
+	if raw == "" {
+		return nil, true
+	}
+	var ids []int
+	for part := range strings.SplitSeq(raw, ",") {
+		id, err := strconv.Atoi(part)
+		if err != nil || id <= 0 {
+			return nil, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
 // parseReceivableBillFilter 读取列表和导出共用的筛选参数，参数不合法时已回复错误并返回 false。
 func parseReceivableBillFilter(c *gin.Context) (model.ReceivableBillFilter, bool) {
 	var filter model.ReceivableBillFilter
@@ -49,16 +66,12 @@ func parseReceivableBillFilter(c *gin.Context) (model.ReceivableBillFilter, bool
 	}
 	filter.StartDate, filter.EndDate = startDate, endDate
 
-	if siteIDs := c.Query("site_ids"); siteIDs != "" {
-		for part := range strings.SplitSeq(siteIDs, ",") {
-			id, err := strconv.Atoi(part)
-			if err != nil || id <= 0 {
-				common.ApiErrorT(c, "Invalid parameters")
-				return filter, false
-			}
-			filter.SiteIDs = append(filter.SiteIDs, id)
-		}
+	siteIDs, ok := parseReceivableSiteIDs(c.Query("site_ids"))
+	if !ok {
+		common.ApiErrorT(c, "Invalid parameters")
+		return filter, false
 	}
+	filter.SiteIDs = siteIDs
 	if statuses := c.Query("statuses"); statuses != "" {
 		valid := []string{model.ReceivableBillStatusSuccess, model.ReceivableBillStatusRetrying, model.ReceivableBillStatusFailed}
 		for part := range strings.SplitSeq(statuses, ",") {
@@ -110,6 +123,30 @@ func GetReceivableBills(c *gin.Context) {
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(views)
 	common.ApiSuccess(c, pageInfo)
+}
+
+func GetReceivableBillTrend(c *gin.Context) {
+	siteIDs, ok := parseReceivableSiteIDs(c.Query("site_ids"))
+	if !ok {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	// A date that is not a number stays 0, which the service rejects with the other bad dates.
+	date, _ := strconv.Atoi(c.Query("date"))
+	startDate, _ := strconv.Atoi(c.Query("start_date"))
+	endDate, _ := strconv.Atoi(c.Query("end_date"))
+	trend, err := service.BuildReceivableBillTrend(service.ReceivableTrendQuery{
+		View: c.Query("view"), Date: date, StartDate: startDate, EndDate: endDate, SiteIDs: siteIDs,
+	}, time.Now())
+	if errors.Is(err, service.ErrReceivableTrendInvalidQuery) || errors.Is(err, service.ErrReceivableTrendRangeTooLong) {
+		common.ApiErrorT(c, err.Error())
+		return
+	}
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, trend)
 }
 
 func GetReceivableBillSites(c *gin.Context) {

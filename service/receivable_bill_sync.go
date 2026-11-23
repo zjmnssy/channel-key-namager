@@ -102,11 +102,7 @@ func syncReceivableBillSite(ctx context.Context, now time.Time, site *model.Thir
 		createdDay = receivableBeijingDay(time.Unix(site.CreatedTime, 0))
 	}
 
-	// Yesterday's bill falls due at 1:00; before that the latest bill due is the day before's.
-	lastDay := today.AddDate(0, 0, -1)
-	if now.Before(today.Add(receivableBillIssueTime)) {
-		lastDay = lastDay.AddDate(0, 0, -1)
-	}
+	lastDay := receivableLatestBillDay(now)
 	// Bills start with the site's first bill. A site without one starts with the later
 	// of its creation day and the latest day due, so days before this feature are not
 	// filled in.
@@ -125,7 +121,7 @@ func syncReceivableBillSite(ctx context.Context, now time.Time, site *model.Thir
 
 	// Hours run from the site's first hour, or else from the later of its creation day
 	// and today, to the last hour that ended at least receivableBillHourDelay ago.
-	lastHour := now.Add(-time.Hour - receivableBillHourDelay).Truncate(time.Hour)
+	lastHour := receivableLatestBillHour(now)
 	firstHour := today
 	if createdDay.After(today) {
 		firstHour = createdDay
@@ -137,6 +133,23 @@ func syncReceivableBillSite(ctx context.Context, now time.Time, site *model.Thir
 	if turn.syncDays(firstDay, lastDay, daily.PeriodCount) {
 		turn.syncHours(firstHour, lastHour, hourly.PeriodCount)
 	}
+}
+
+// receivableLatestBillDay returns the latest day whose bill is due at now. Yesterday's
+// bill falls due at 1:00; before that the latest due is the day before's.
+func receivableLatestBillDay(now time.Time) time.Time {
+	today := receivableBeijingDay(now)
+	lastDay := today.AddDate(0, 0, -1)
+	if now.Before(today.Add(receivableBillIssueTime)) {
+		lastDay = lastDay.AddDate(0, 0, -1)
+	}
+	return lastDay
+}
+
+// receivableLatestBillHour returns the latest hour that ended at least
+// receivableBillHourDelay before now.
+func receivableLatestBillHour(now time.Time) time.Time {
+	return now.Add(-time.Hour - receivableBillHourDelay).Truncate(time.Hour)
 }
 
 // receivableBeijingDay returns the Beijing midnight that starts t's day.
