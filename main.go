@@ -170,6 +170,9 @@ func main() {
 	// Channel push scheduler, on the master node every 15 seconds
 	service.StartChannelPushScheduler()
 
+	// Receivable bill scheduler, on the master node every minute
+	service.StartReceivableBillScheduler()
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()

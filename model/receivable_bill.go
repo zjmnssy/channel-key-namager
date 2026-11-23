@@ -2,11 +2,14 @@ package model
 
 import (
 	"errors"
+	"maps"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -113,9 +116,7 @@ func ClaimReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok boo
 // FinishReceivableRow 在仍持有租约时写入 updates 并释放租约，返回是否写入。
 func FinishReceivableRow[T ReceivableRow](id int, lease int64, updates map[string]any) (bool, error) {
 	values := make(map[string]any, len(updates)+2)
-	for column, value := range updates {
-		values[column] = value
-	}
+	maps.Copy(values, updates)
 	values["lease_until"] = int64(0)
 	values["updated_time"] = common.GetTimestamp()
 	result := DB.Model(new(T)).Where("id = ? AND lease_until = ?", id, lease).Updates(values)
@@ -130,12 +131,17 @@ func InsertReceivableRow[T ReceivableRow](row *T) error {
 	return DB.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
+// receivablePeriodColumn 返回 T 存放周期的列名。
+func receivablePeriodColumn[T ReceivableRow]() string {
+	if _, isDaily := any(new(T)).(*ReceivableBill); isDaily {
+		return "bill_date"
+	}
+	return "bill_hour"
+}
+
 // ReceivableRowCoverage 返回每个站点的最早周期和行数。
 func ReceivableRowCoverage[T ReceivableRow]() (map[int]ReceivableCoverage, error) {
-	periodColumn := "bill_hour"
-	if _, isDaily := any(new(T)).(*ReceivableBill); isDaily {
-		periodColumn = "bill_date"
-	}
+	periodColumn := receivablePeriodColumn[T]()
 	var rows []struct {
 		SiteId      int
 		FirstPeriod int64
@@ -151,4 +157,70 @@ func ReceivableRowCoverage[T ReceivableRow]() (map[int]ReceivableCoverage, error
 		coverage[row.SiteId] = ReceivableCoverage{FirstPeriod: row.FirstPeriod, PeriodCount: row.PeriodCount}
 	}
 	return coverage, nil
+}
+
+// ListReceivableSyncSites 返回需要同步账单的站点：未删除、类型为 NewAPI，带 ApiKey，读取时不写 SQL 日志。
+func ListReceivableSyncSites() ([]*ThirdPartySite, error) {
+	var sites []*ThirdPartySite
+	err := DB.Session(&gorm.Session{Logger: logger.Discard}).Where("type = ?", ThirdPartySiteTypeNewAPI).Order("id").Find(&sites).Error
+	return sites, err
+}
+
+// ReceivableRowPeriods 返回站点在 [from, to] 内已有行的周期，升序。
+func ReceivableRowPeriods[T ReceivableRow](siteID int, from, to int64) ([]int64, error) {
+	periodColumn := receivablePeriodColumn[T]()
+	var periods []int64
+	err := DB.Model(new(T)).Where("site_id = ? AND "+periodColumn+" >= ? AND "+periodColumn+" <= ?", siteID, from, to).
+		Order(periodColumn).Pluck(periodColumn, &periods).Error
+	return periods, err
+}
+
+// DueReceivableRows 返回站点已到重试时间、且没有人在同步的重试中的行，按下次重试时间、id 升序，最多 limit 行。
+func DueReceivableRows[T ReceivableRow](siteID int, now int64, limit int) ([]T, error) {
+	var rows []T
+	err := DB.Where("site_id = ? AND status = ? AND next_retry_at <= ? AND lease_until < ?", siteID, ReceivableBillStatusRetrying, now, now).
+		Order("next_retry_at, id").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// FailReceivableRowsOfDeletedSites 把已删除站点在两张表中重试中的行改为失败，原因是站点已删除。
+// 每轮扫描也会先调用它：删除站点时仍在进行的同步把重试中写了回来，下一轮会再改为失败。
+func FailReceivableRowsOfDeletedSites(tx *gorm.DB) error {
+	lastError, err := common.Marshal(common.NewMessage(ErrReceivableBillSiteDeleted.Error()))
+	if err != nil {
+		return err
+	}
+	updates := map[string]any{
+		"status":        ReceivableBillStatusFailed,
+		"last_error":    string(lastError),
+		"next_retry_at": 0,
+		"updated_time":  common.GetTimestamp(),
+	}
+	for _, table := range []any{&ReceivableBill{}, &ReceivableBillHour{}} {
+		// 用 IN 已删除的站点，不用 NOT IN 在线的站点：没有在线站点时 GORM 会生成 NOT IN (NULL)，一行都不匹配。
+		deletedSites := tx.Unscoped().Model(&ThirdPartySite{}).Select("id").Where("deleted_at IS NOT NULL")
+		err := tx.Model(table).Where("status = ? AND site_id IN (?)", ReceivableBillStatusRetrying, deletedSites).Updates(updates).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retryFailedReceivableRowsOfSite 把站点在两张表中失败的行改为重试中、立即重试，尝试次数重新计。
+// 编辑站点多半修好了失败的原因（ApiKey、地址或权限）。
+func retryFailedReceivableRowsOfSite(tx *gorm.DB, siteID int, now int64) error {
+	updates := map[string]any{
+		"status":        ReceivableBillStatusRetrying,
+		"attempts":      0,
+		"next_retry_at": 0,
+		"updated_time":  now,
+	}
+	for _, table := range []any{&ReceivableBill{}, &ReceivableBillHour{}} {
+		err := tx.Model(table).Where("site_id = ? AND status = ?", siteID, ReceivableBillStatusFailed).Updates(updates).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

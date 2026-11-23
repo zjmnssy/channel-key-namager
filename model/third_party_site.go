@@ -190,7 +190,10 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 			site.ApiKey = normalized.ApiKey
 			columns = append(columns, "api_key")
 		}
-		return tx.Model(&site).Select(columns).Updates(&site).Error
+		if err := tx.Model(&site).Select(columns).Updates(&site).Error; err != nil {
+			return err
+		}
+		return retryFailedReceivableRowsOfSite(tx, id, site.UpdatedTime)
 	})
 	if err != nil {
 		return nil, err
@@ -198,7 +201,8 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 	return &site, nil
 }
 
-// DeleteThirdPartySite soft-deletes a site and wipes its ApiKey in the same update.
+// DeleteThirdPartySite soft-deletes a site and wipes its ApiKey in the same update,
+// then fails the receivable bill rows of deleted sites that still wait for a retry.
 func DeleteThirdPartySite(id int) error {
 	// Keep the ApiKey out of SQL logs even with DEBUG=true; failed SQL is dropped too.
 	return DB.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
@@ -209,6 +213,9 @@ func DeleteThirdPartySite(id int) error {
 			}
 			return err
 		}
-		return tx.Model(&site).Updates(map[string]any{"api_key": "", "deleted_at": time.Now()}).Error
+		if err := tx.Model(&site).Updates(map[string]any{"api_key": "", "deleted_at": time.Now()}).Error; err != nil {
+			return err
+		}
+		return FailReceivableRowsOfDeletedSites(tx)
 	})
 }
