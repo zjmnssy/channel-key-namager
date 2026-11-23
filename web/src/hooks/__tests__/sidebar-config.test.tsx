@@ -431,6 +431,7 @@ describe('Admin group visibility by role', () => {
       'Channels',
       'Third-Party Sites',
       'Channel Push',
+      'Receivable Bills',
       'Models',
       'Users',
       'System Info',

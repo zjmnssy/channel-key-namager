@@ -379,6 +379,7 @@ func migrateDB() error {
 		&ThirdPartySite{},
 		&ChannelPushTask{}, &ChannelPushTaskSupplier{},
 		&ChannelPushRun{}, &ChannelPushRunSupplier{},
+		&ReceivableBill{}, &ReceivableBillHour{},
 	)
 	if err != nil {
 		return err

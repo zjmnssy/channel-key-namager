@@ -52,6 +52,10 @@ type DataTableFacetedFilterProps<TData, TValue> = {
   }[]
   /** Enable single select mode (only one option can be selected at a time) */
   singleSelect?: boolean
+  /** Controlled selection, only used when `column` is not provided */
+  value?: string[]
+  /** Controlled change handler, only used when `column` is not provided */
+  onValueChange?: (value: string[] | undefined) => void
 }
 
 function DataTableFacetedFilterInner<TData, TValue>({
@@ -59,11 +63,23 @@ function DataTableFacetedFilterInner<TData, TValue>({
   title,
   options,
   singleSelect = false,
+  value,
+  onValueChange,
 }: DataTableFacetedFilterProps<TData, TValue>) {
   const { t } = useTranslation()
   const facets = column?.getFacetedUniqueValues()
-  const filterValue = column?.getFilterValue() as string[] | undefined
+  const filterValue = column
+    ? (column.getFilterValue() as string[] | undefined)
+    : value
   const selectedValues = new Set(filterValue)
+
+  const setFilterValue = (next: string[] | undefined) => {
+    if (column) {
+      column.setFilterValue(next)
+      return
+    }
+    onValueChange?.(next)
+  }
 
   const handleOptionSelect = (optionValue: string) => {
     const nextSelectedValues = getNextSelectedValues(
@@ -72,9 +88,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
       singleSelect
     )
 
-    column?.setFilterValue(
-      nextSelectedValues.length ? nextSelectedValues : undefined
-    )
+    setFilterValue(nextSelectedValues.length ? nextSelectedValues : undefined)
   }
 
   return (
@@ -174,7 +188,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
                 <CommandSeparator />
                 <CommandGroup>
                   <CommandItem
-                    onSelect={() => column?.setFilterValue(undefined)}
+                    onSelect={() => setFilterValue(undefined)}
                     className='justify-center text-center'
                   >
                     {t('Clear filters')}

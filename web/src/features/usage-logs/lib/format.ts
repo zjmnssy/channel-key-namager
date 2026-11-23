@@ -545,6 +545,8 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'channel_push.task_create': 'Created a channel push task',
   'channel_push.task_update': 'Updated a channel push task',
   'channel_push.task_toggle': 'Enabled or disabled a channel push task',
+  // Receivable bills
+  'receivable_bill.sync': 'Resynced receivable bill #{{bill_id}}',
   // Prefill groups
   'prefill_group.create': 'Created a prefill group',
   'prefill_group.update': 'Updated a prefill group',
@@ -631,6 +633,12 @@ export function renderAuditContent(
       return t('Batch deleted {{count}} redemption codes', { count })
     }
     return t('Batch deleted redemption codes (count not recorded)')
+  }
+  if (
+    op.action === 'receivable_bill.sync' &&
+    other?.audit_info?.success === false
+  ) {
+    return t('Failed receivable bill resync')
   }
   const template = AUDIT_TEMPLATES[op.action]
   if (!template) return null

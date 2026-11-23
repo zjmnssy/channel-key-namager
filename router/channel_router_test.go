@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -128,8 +129,9 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		common.RedisEnabled, common.SessionSecret, common.IsMasterNode = previousRedis, previousSecret, wasMaster
 		assert.NoError(t, sqlDB.Close())
 	})
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	require.NoError(t, authz.Init(db))
+	require.NoError(t, i18n.Init())
 	sessions := map[int]string{}
 	for _, role := range []int{common.RoleCommonUser, common.RoleChannelSupplierUser, common.RoleAdminUser, common.RoleRootUser} {
 		name := fmt.Sprintf("route-gate-%d", role)
@@ -174,6 +176,11 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/push/channel/runs/1/site", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/push/channel/sites/site/groups", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/push/channel/options", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/receivable_bill/daily?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/receivable_bill/daily/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/receivable_bill/daily/1/sync", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/receivable_bill/trend?view=day&date=20261122", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/receivable_bill/sites", supplierStatus: http.StatusForbidden},
 	}
 	for _, route := range channelPermissionRoutes {
 		if route.adminOnly {
@@ -204,6 +211,14 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/push/channel/sites/site/groups": true,
 		"GET /api/push/channel/options":           true,
 	}
+	// Receivable bills are for root users only: an administrator is refused too.
+	rootRoutes := map[string]bool{
+		"GET /api/receivable_bill/daily?start_date=20261101&end_date=20261123":        true,
+		"GET /api/receivable_bill/daily/export?start_date=20261101&end_date=20261123": true,
+		"POST /api/receivable_bill/daily/1/sync":                                      true,
+		"GET /api/receivable_bill/trend?view=day&date=20261122":                       true,
+		"GET /api/receivable_bill/sites":                                              true,
+	}
 	for _, test := range tests {
 		key := test.method + " " + test.path
 		t.Run(key, func(t *testing.T) {
@@ -215,6 +230,14 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 			if test.supplierStatus == http.StatusForbidden {
 				assert.Contains(t, response.Body.String(), `"code":"AUTH_INSUFFICIENT_PRIVILEGE"`)
 			}
+			if rootRoutes[key] {
+				response = request(test.method, test.path, sessions[common.RoleAdminUser])
+				assert.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+				assert.Contains(t, response.Body.String(), "AUTH_INSUFFICIENT_PRIVILEGE")
+				response = request(test.method, test.path, sessions[common.RoleRootUser])
+				assert.NotContains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, response.Code, response.Body.String())
+				return
+			}
 			if !adminRoutes[key] {
 				return
 			}
@@ -225,8 +248,10 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 			}
 		})
 		delete(adminRoutes, key)
+		delete(rootRoutes, key)
 	}
 	assert.Empty(t, adminRoutes, "every administrator route must be in the table")
+	assert.Empty(t, rootRoutes, "every root route must be in the table")
 	var actions []string
 	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "third_party_site.%").Order("id").Pluck("action", &actions).Error)
 	assert.Equal(t, []string{"third_party_site.create", "third_party_site.create", "third_party_site.update",
@@ -235,6 +260,9 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "channel_push.%").Order("id").Pluck("action", &actions).Error)
 	assert.Equal(t, []string{"channel_push.task_create", "channel_push.task_create", "channel_push.task_update",
 		"channel_push.task_update", "channel_push.task_toggle", "channel_push.task_toggle"}, actions)
+	actions = nil
+	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "receivable_bill.%").Order("id").Pluck("action", &actions).Error)
+	assert.Equal(t, []string{"receivable_bill.sync"}, actions)
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {

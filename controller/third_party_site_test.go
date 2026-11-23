@@ -59,7 +59,8 @@ func setupThirdPartySiteTest(t *testing.T) *gorm.DB {
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	model.LOG_DB = database
 	common.SetLogDatabaseType(common.MainDatabaseType())
-	require.NoError(t, database.AutoMigrate(&model.ThirdPartySite{}))
+	// Editing and deleting a site also update its receivable bill rows in the same transaction.
+	require.NoError(t, database.AutoMigrate(&model.ThirdPartySite{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}))
 	clearSites := func() {
 		require.NoError(t, database.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&model.ThirdPartySite{}).Error)
 	}

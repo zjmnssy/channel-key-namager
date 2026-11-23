@@ -197,6 +197,18 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Payable Discount')
     case 'provider_id':
       return t('Provider ID')
+    case 'bill_id':
+      return t('Bill ID')
+    case 'site_id':
+      return t('Site ID')
+    case 'site_name':
+      return t('Site Name')
+    case 'bill_date':
+      return t('Bill Date')
+    case 'previous_status':
+      return t('Previous Status')
+    case 'previous_quota':
+      return t('Previous Quota')
     default:
       return key
   }
@@ -523,6 +535,17 @@ export function buildAuditDetails(
     else if (params.status === 2) params.status = t('Disabled')
     else if (params.status === 3) params.status = t('Auto Disabled')
   }
+  if (action.startsWith('receivable_bill.')) {
+    const statuses: Record<string, string> = {
+      success: t('Success'),
+      retrying: t('Retrying'),
+      failed: t('Failed'),
+    }
+    for (const key of ['status', 'previous_status']) {
+      const value = params[key]
+      if (typeof value === 'string') params[key] = statuses[value] ?? value
+    }
+  }
   if (
     typeof params.role === 'number' &&
     [0, 1, 5, 10, 100].includes(params.role)
@@ -567,6 +590,19 @@ export function buildAuditDetails(
       scope_denied: t('The access token lacks the required permission'),
       route_undeclared: t('Access tokens cannot use this feature'),
       session_required: t('This feature requires signing in to the dashboard'),
+    }
+    params.failure_reason =
+      reasons[params.failure_reason] ?? params.failure_reason
+  }
+  if (
+    action === 'receivable_bill.sync' &&
+    typeof params.failure_reason === 'string'
+  ) {
+    const reasons: Record<string, string> = {
+      not_found: t('Bill does not exist'),
+      site_deleted: t('The site has been deleted'),
+      syncing: t('This bill is being synced, please try again later'),
+      database_error: t('Database error, please contact the administrator'),
     }
     params.failure_reason =
       reasons[params.failure_reason] ?? params.failure_reason

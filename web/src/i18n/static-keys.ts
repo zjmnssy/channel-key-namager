@@ -970,6 +970,8 @@ export const STATIC_I18N_KEYS = [
   'Created a channel push task',
   'Updated a channel push task',
   'Enabled or disabled a channel push task',
+  // Receivable bill audit template.
+  'Resynced receivable bill #{{bill_id}}',
   // Channel push API errors, action reasons and run errors.
   'Task does not exist',
   'Run does not exist',
@@ -988,6 +990,14 @@ export const STATIC_I18N_KEYS = [
   "Codex channels rotate their credentials automatically, so once pushed each side would invalidate the other's credentials",
   'Task plugin channels depend on plugins installed on this platform, which the site may not have',
   'Site request failed after {{attempts}} attempt(s): {{detail}}',
+  'Site request failed: {{detail}}',
+  'Site returned no valid quota',
+  'The site has been deleted',
+  'Bill does not exist',
+  'Date range cannot exceed 366 days',
+  'This bill is being synced, please try again later',
+  'Retrying',
+  'Success',
   'Internal error: {{detail}}',
   "The site's channel list could not be read completely: {{detail}}",
   'The local channel could not be read: {{detail}}',

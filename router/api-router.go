@@ -347,6 +347,15 @@ func SetApiRouter(router *gin.Engine) {
 			channelPushRoute.GET("/sites/:id/groups", controller.GetChannelPushSiteGroups)
 			channelPushRoute.GET("/options", controller.GetChannelPushOptions)
 		}
+		receivableBillRoute := apiRouter.Group("/receivable_bill")
+		receivableBillRoute.Use(middleware.RootAuth())
+		{
+			receivableBillRoute.GET("/daily", controller.GetReceivableBills)
+			receivableBillRoute.GET("/daily/export", controller.ExportReceivableBills)
+			receivableBillRoute.POST("/daily/:id/sync", controller.ResyncReceivableBill)
+			receivableBillRoute.GET("/trend", controller.GetReceivableBillTrend)
+			receivableBillRoute.GET("/sites", controller.GetReceivableBillSites)
+		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
 		logRoute := apiRouter.Group("/log")

@@ -97,3 +97,18 @@ channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
 
 channel.notify_scheduled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) plugin notification"
+
+receivable_bill.export.bill_date: "Bill Date"
+receivable_bill.export.site_name: "Site Name"
+receivable_bill.export.site_url: "Site URL"
+receivable_bill.export.amount: "Amount Before Discount ($)"
+receivable_bill.export.receivable_discount: "Receivable Discount"
+receivable_bill.export.status: "Sync Result"
+receivable_bill.export.failure_reason: "Failure Reason"
+receivable_bill.export.synced_at: "Sync Time"
+receivable_bill.status.success: "Success"
+receivable_bill.status.retrying: "Retrying"
+receivable_bill.status.failed: "Failed"
+receivable_bill.error.request_failed: "Site request failed: {{.Detail}}"
+receivable_bill.error.no_valid_quota: "Site returned no valid quota"
+receivable_bill.error.site_deleted: "The site has been deleted"

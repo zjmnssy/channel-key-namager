@@ -39,21 +39,28 @@ const calendarLocales = {
   vi,
 } as const
 
+// eslint-disable-next-line react-refresh/only-export-components
+export function getCalendarLocale(language: string) {
+  return calendarLocales[language as keyof typeof calendarLocales] ?? enUS
+}
+
 type DatePickerProps = {
   selected: Date | undefined
   onSelect: (date: Date | undefined) => void
   placeholder?: string
+  /** Latest selectable date; defaults to now */
+  maxDate?: Date
 }
 
 export function DatePicker({
   selected,
   onSelect,
   placeholder,
+  maxDate,
 }: DatePickerProps) {
   const { t, i18n } = useTranslation()
   const placeholderText = placeholder ?? t('Pick a date')
-  const calendarLocale =
-    calendarLocales[i18n.language as keyof typeof calendarLocales] ?? enUS
+  const calendarLocale = getCalendarLocale(i18n.language)
   return (
     <Popover>
       <PopoverTrigger
@@ -80,7 +87,7 @@ export function DatePicker({
           onSelect={onSelect}
           locale={calendarLocale}
           disabled={(date: Date) =>
-            date > new Date() || date < new Date('1900-01-01')
+            date > (maxDate ?? new Date()) || date < new Date('1900-01-01')
           }
         />
       </PopoverContent>

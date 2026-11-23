@@ -220,3 +220,14 @@ func TestChannelPushRoutesRequireDashboardSession(t *testing.T) {
 		assert.Equal(t, "session", rule.Kind(), key)
 	}
 }
+
+func TestReceivableBillRoutesRequireDashboardSession(t *testing.T) {
+	for _, key := range []string{
+		"GET /api/receivable_bill/daily", "GET /api/receivable_bill/daily/export", "POST /api/receivable_bill/daily/:id/sync",
+		"GET /api/receivable_bill/trend", "GET /api/receivable_bill/sites",
+	} {
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "session", rule.Kind(), key)
+	}
+}
