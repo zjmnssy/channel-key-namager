@@ -78,6 +78,7 @@ export function BillDateRangePicker(props: BillDateRangePickerProps) {
       <PopoverContent className='w-auto p-0'>
         <Calendar
           mode='range'
+          resetOnSelect
           captionLayout='dropdown'
           numberOfMonths={2}
           defaultMonth={committed.from}
