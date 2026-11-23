@@ -98,3 +98,18 @@ channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
 
 channel.notify_scheduled_subject: "渠道“{{.Name}}” (#{{.Id}}) 插件通知"
+
+receivable_bill.export.bill_date: "账单日期"
+receivable_bill.export.site_name: "站点名称"
+receivable_bill.export.site_url: "站点URL"
+receivable_bill.export.amount: "金额(折前)($)"
+receivable_bill.export.receivable_discount: "应收折扣"
+receivable_bill.export.status: "同步结果"
+receivable_bill.export.failure_reason: "失败原因"
+receivable_bill.export.synced_at: "同步时间"
+receivable_bill.status.success: "成功"
+receivable_bill.status.retrying: "重试中"
+receivable_bill.status.failed: "失败"
+receivable_bill.error.request_failed: "站点请求失败：{{.Detail}}"
+receivable_bill.error.no_valid_quota: "站点没有返回有效的额度"
+receivable_bill.error.site_deleted: "站点已删除"

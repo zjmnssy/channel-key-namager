@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -13,11 +14,13 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
 )
 
@@ -648,16 +651,17 @@ func receivableRowKeys(items []map[string]any) []string {
 	return keys
 }
 
-func TestReceivableBillList(t *testing.T) {
-	db := setupReceivableBillTest(t)
-	siteA := receivableSeedSite(t, db, "rb-list-a", "https://rb-list-a.example.com", 1)
-	siteB := receivableSeedSite(t, db, "rb-list-b", "https://rb-list-b.example.com", 1)
+// receivableSeedListBills 写入列表和导出测试共用的数据：A 站 1122 成功、1121 重试中、1031 成功，已删除的 B 站 1122 失败。
+func receivableSeedListBills(t *testing.T, db *gorm.DB) (siteA, siteB *model.ThirdPartySite) {
+	t.Helper()
+	siteA = receivableSeedSite(t, db, "rb-list-a", "https://rb-list-a.example.com", 1)
+	siteB = receivableSeedSite(t, db, "rb-list-b", "https://rb-list-b.example.com", 1)
 	require.Less(t, siteA.Id, siteB.Id)
 	require.NoError(t, db.Delete(siteB).Error)
 	const badGateway = `{"key":"Site request failed: {{detail}}","params":{"detail":"HTTP 502"}}`
 	for _, bill := range []*model.ReceivableBill{
-		{SiteId: siteA.Id, BillDate: 20261122, SiteName: siteA.Name, Quota: 61728394, QuotaPerUnit: 500000, ReceivableDiscount: 0.85,
-			Status: model.ReceivableBillStatusSuccess, Attempts: 1, LeaseUntil: 99},
+		{SiteId: siteA.Id, BillDate: 20261122, SiteName: siteA.Name, SiteBaseURL: siteA.BaseURL, Quota: 61728394, QuotaPerUnit: 500000, ReceivableDiscount: 0.85,
+			Status: model.ReceivableBillStatusSuccess, Attempts: 1, LeaseUntil: 99, SyncedAt: 1795366805},
 		{SiteId: siteA.Id, BillDate: 20261121, SiteName: siteA.Name, Status: model.ReceivableBillStatusRetrying, Attempts: 3, LastError: badGateway},
 		{SiteId: siteB.Id, BillDate: 20261122, SiteName: siteB.Name, Status: model.ReceivableBillStatusFailed, Attempts: 5,
 			LastError: `{"key":"The site has been deleted"}`},
@@ -665,6 +669,12 @@ func TestReceivableBillList(t *testing.T) {
 	} {
 		require.NoError(t, db.Create(bill).Error)
 	}
+	return siteA, siteB
+}
+
+func TestReceivableBillList(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	siteA, siteB := receivableSeedListBills(t, db)
 	a1122, a1121, b1122 := receivableRowKey(siteA.Id, 20261122), receivableRowKey(siteA.Id, 20261121), receivableRowKey(siteB.Id, 20261122)
 	list := func(query string) *httptest.ResponseRecorder {
 		return receivableRequest(t, http.MethodGet, "/api/receivable_bill/daily?"+query, nil, nil, GetReceivableBills)
@@ -977,4 +987,70 @@ func TestReceivableBillTrend(t *testing.T) {
 	reply = trendRequest("view=month&start_date=20251101&end_date=20261123")
 	assert.False(t, reply.Success)
 	assert.Equal(t, "Date range cannot exceed 366 days", reply.MessageKey)
+}
+
+func TestReceivableBillExport(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupReceivableBillTest(t)
+	siteA, siteB := receivableSeedListBills(t, db)
+	export := func(query, language string) *httptest.ResponseRecorder {
+		header := http.Header{}
+		header.Set("Accept-Language", language)
+		return receivableRequest(t, http.MethodGet, "/api/receivable_bill/daily/export?"+query, header, nil, ExportReceivableBills)
+	}
+	rowsOf := func(response *httptest.ResponseRecorder) (*excelize.File, [][]string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", response.Header().Get("Content-Type"))
+		assert.Equal(t, `attachment; filename="receivable-bills.xlsx"`, response.Header().Get("Content-Disposition"))
+		file, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = file.Close() })
+		rows, err := file.GetRows(file.GetSheetName(0), excelize.Options{RawCellValue: true})
+		require.NoError(t, err)
+		return file, rows
+	}
+
+	file, rows := rowsOf(export("start_date=20261101&end_date=20261123", "zh-CN"))
+	sheet := file.GetSheetName(0)
+	require.Len(t, rows, 4)
+	assert.Equal(t, []string{"账单日期", "站点名称", "站点URL", "金额(折前)($)", "应收折扣", "同步结果", "失败原因", "同步时间"}, rows[0])
+	assert.Equal(t, []string{"2026-11-22", siteA.Name, siteA.BaseURL, "123.456788", "0.85", "成功", "", "2026-11-23 01:00:05"}, rows[1])
+	// Rows without a success carry no amount or discount, and a bill that never synced has no sync time.
+	assert.Equal(t, []string{"2026-11-22", siteB.Name, "", "", "", "失败", "站点已删除"}, rows[2])
+	assert.Equal(t, []string{"2026-11-21", siteA.Name, "", "", "", "重试中", "站点请求失败：HTTP 502"}, rows[3])
+
+	cellType, err := file.GetCellType(sheet, "D2")
+	require.NoError(t, err)
+	assert.Contains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType)
+	styleID, err := file.GetCellStyle(sheet, "D2")
+	require.NoError(t, err)
+	style, err := file.GetStyle(styleID)
+	require.NoError(t, err)
+	require.NotNil(t, style.CustomNumFmt)
+	assert.Equal(t, "0.000000", *style.CustomNumFmt)
+	cellType, err = file.GetCellType(sheet, "E2")
+	require.NoError(t, err)
+	assert.Contains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType)
+	cellType, err = file.GetCellType(sheet, "A2")
+	require.NoError(t, err)
+	assert.NotContains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType, "the bill date is text")
+
+	// A language the backend does not support is written in common.DefaultLanguage.
+	originalLanguage := common.DefaultLanguage
+	common.DefaultLanguage = "en"
+	t.Cleanup(func() { common.DefaultLanguage = originalLanguage })
+	_, rows = rowsOf(export("start_date=20261101&end_date=20261123", "fr"))
+	assert.Equal(t, "Bill Date", rows[0][0])
+	assert.Equal(t, "Success", rows[1][5])
+	assert.Equal(t, "The site has been deleted", rows[2][6])
+	assert.Equal(t, "Site request failed: HTTP 502", rows[3][6])
+
+	// An empty result still downloads a file that holds only the header.
+	_, rows = rowsOf(export("start_date=20261101&end_date=20261123&statuses=success&site_ids="+strconv.Itoa(siteB.Id), "zh-CN"))
+	assert.Len(t, rows, 1)
+
+	reply := receivableReplyOf(t, export("end_date=20261123", "zh-CN"))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Invalid parameters", reply.MessageKey)
 }
