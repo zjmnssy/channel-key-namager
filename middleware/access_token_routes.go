@@ -253,6 +253,13 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/push/channel/sites/:id/groups":   accessTokenSessionRule,
 	"GET /api/push/channel/options":            accessTokenSessionRule,
 
+	// router/api-router.go: /api/receivable_bill
+	"GET /api/receivable_bill/daily":           accessTokenSessionRule,
+	"GET /api/receivable_bill/daily/export":    accessTokenSessionRule,
+	"POST /api/receivable_bill/daily/:id/sync": accessTokenSessionRule,
+	"GET /api/receivable_bill/trend":           accessTokenSessionRule,
+	"GET /api/receivable_bill/sites":           accessTokenSessionRule,
+
 	// router/api-router.go: /api/audit, /api/log, /api/data
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),
 	"GET /api/log/":                             accessTokenScopeRule("log:read"),
