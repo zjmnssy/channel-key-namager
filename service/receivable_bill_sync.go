@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 
 	"github.com/bytedance/gopkg/util/gopool"
+	"gorm.io/gorm"
 )
 
 const (
@@ -383,4 +385,56 @@ func receivableBillUpdates(result receivableSyncResult, site *model.ThirdPartySi
 		updates["receivable_discount"] = site.ReceivableDiscount
 	}
 	return updates
+}
+
+// ResyncReceivableBill 手动重新同步一张日账单：认领该行，向站点读取一次，把结果写回，
+// 再让同一天里失败的小时数据重新重试。尝试次数从 1 重新计，成功时取站点当前的名称、地址和折扣。
+// before 是认领前的行，读到该行之后的错误都带着它，供审计使用；after 只在结果已写回时有值，
+// 结果可以是成功，也可以是重试中或失败。
+func ResyncReceivableBill(ctx context.Context, billID int) (before model.ReceivableBill, after *model.ReceivableBill, err error) {
+	err = model.DB.First(&before, billID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return before, nil, model.ErrReceivableBillNotFound
+	}
+	if err != nil {
+		return before, nil, err
+	}
+	site, err := model.GetChannelPushSite(before.SiteId)
+	if errors.Is(err, model.ErrThirdPartySiteNotFound) {
+		return before, nil, model.ErrReceivableBillSiteDeleted
+	}
+	if err != nil {
+		return before, nil, err
+	}
+	day, ok := model.ReceivableBillDayStart(before.BillDate)
+	if !ok {
+		return before, nil, fmt.Errorf("bill %d has invalid date %d", before.Id, before.BillDate)
+	}
+
+	now := time.Now().Unix()
+	lease, claimed, err := model.ClaimReceivableRow[model.ReceivableBill](before.Id, now)
+	if err != nil {
+		return before, nil, err
+	}
+	if !claimed {
+		return before, nil, model.ErrReceivableBillSyncing
+	}
+	attempt := NewChannelPushClient(site, ReceivableBillClientOptions).ReadLogStatQuota(ctx, day.Unix(), day.Add(receivableBillDay).Unix())
+	result := newReceivableSyncResult(attempt, 1, now)
+	finished, err := model.FinishReceivableRow[model.ReceivableBill](before.Id, lease, receivableBillUpdates(result, site))
+	if err != nil {
+		return before, nil, err
+	}
+	if !finished {
+		return before, nil, model.ErrReceivableBillSyncing
+	}
+	if err := model.RetryFailedReceivableHoursOfDay(site.Id, day.Unix(), now); err != nil {
+		return before, nil, err
+	}
+
+	var stored model.ReceivableBill
+	if err := model.DB.First(&stored, before.Id).Error; err != nil {
+		return before, nil, err
+	}
+	return before, &stored, nil
 }

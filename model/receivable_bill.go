@@ -220,6 +220,21 @@ func FailReceivableRowsOfDeletedSites(tx *gorm.DB) error {
 	return nil
 }
 
+// RetryFailedReceivableHoursOfDay 把站点在北京日 dayStart（Unix 秒）内失败的小时行改为重试中、立即重试，尝试次数重新计。
+// 重新同步某天的账单时，这一天里失败的小时数据也一并重试。
+func RetryFailedReceivableHoursOfDay(siteID int, dayStart, now int64) error {
+	updates := map[string]any{
+		"status":        ReceivableBillStatusRetrying,
+		"attempts":      0,
+		"next_retry_at": 0,
+		"updated_time":  now,
+	}
+	return DB.Model(&ReceivableBillHour{}).
+		Where("site_id = ? AND status = ? AND bill_hour >= ? AND bill_hour < ?",
+			siteID, ReceivableBillStatusFailed, dayStart, dayStart+int64(24*60*60)).
+		Updates(updates).Error
+}
+
 // retryFailedReceivableRowsOfSite 把站点在两张表中失败的行改为重试中、立即重试，尝试次数重新计。
 // 编辑站点多半修好了失败的原因（ApiKey、地址或权限）。
 func retryFailedReceivableRowsOfSite(tx *gorm.DB, siteID int, now int64) error {

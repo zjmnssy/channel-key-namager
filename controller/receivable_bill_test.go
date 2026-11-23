@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -583,4 +585,269 @@ func TestReceivableBillSiteEditAndDeleteHooks(t *testing.T) {
 	assert.Equal(t, model.ReceivableBillStatusFailed, retrying.Status)
 	assert.Zero(t, retrying.NextRetryAt)
 	assert.Equal(t, siteDeleted, receivableLastError(t, retrying.LastError))
+}
+
+// receivableRequest 以超级管理员身份直接调用处理函数，header 为空时不加请求头。
+func receivableRequest(t *testing.T, method, target string, header http.Header, params gin.Params, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(method, target, nil)
+	for name, values := range header {
+		for _, value := range values {
+			c.Request.Header.Add(name, value)
+		}
+	}
+	c.Params = params
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+	c.Set("username", "root")
+	c.Set("session_id", "dashboard-session")
+	c.Set("auth_version", int64(1))
+	c.Set("session_version", int64(1))
+	handler(c)
+	return response
+}
+
+type receivableReply struct {
+	Success    bool            `json:"success"`
+	MessageKey string          `json:"message_key"`
+	Data       json.RawMessage `json:"data"`
+}
+
+func receivableReplyOf(t *testing.T, response *httptest.ResponseRecorder) receivableReply {
+	t.Helper()
+	var reply receivableReply
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &reply))
+	return reply
+}
+
+// receivableListOf 解码列表响应，返回总数和各行。
+func receivableListOf(t *testing.T, response *httptest.ResponseRecorder) (int, []map[string]any) {
+	t.Helper()
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var page struct {
+		Total int              `json:"total"`
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, common.Unmarshal(reply.Data, &page))
+	return page.Total, page.Items
+}
+
+// receivableRowKey 把站点和日期写成 "站点id/日期"，用来比较行的顺序。
+func receivableRowKey(siteID, date int) string {
+	return strconv.Itoa(siteID) + "/" + strconv.Itoa(date)
+}
+
+func receivableRowKeys(items []map[string]any) []string {
+	keys := make([]string, len(items))
+	for i, item := range items {
+		keys[i] = receivableRowKey(int(item["site_id"].(float64)), int(item["bill_date"].(float64)))
+	}
+	return keys
+}
+
+func TestReceivableBillList(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	siteA := receivableSeedSite(t, db, "rb-list-a", "https://rb-list-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "rb-list-b", "https://rb-list-b.example.com", 1)
+	require.Less(t, siteA.Id, siteB.Id)
+	require.NoError(t, db.Delete(siteB).Error)
+	const badGateway = `{"key":"Site request failed: {{detail}}","params":{"detail":"HTTP 502"}}`
+	for _, bill := range []*model.ReceivableBill{
+		{SiteId: siteA.Id, BillDate: 20261122, SiteName: siteA.Name, Quota: 61728394, QuotaPerUnit: 500000, ReceivableDiscount: 0.85,
+			Status: model.ReceivableBillStatusSuccess, Attempts: 1, LeaseUntil: 99},
+		{SiteId: siteA.Id, BillDate: 20261121, SiteName: siteA.Name, Status: model.ReceivableBillStatusRetrying, Attempts: 3, LastError: badGateway},
+		{SiteId: siteB.Id, BillDate: 20261122, SiteName: siteB.Name, Status: model.ReceivableBillStatusFailed, Attempts: 5,
+			LastError: `{"key":"The site has been deleted"}`},
+		{SiteId: siteA.Id, BillDate: 20261031, SiteName: siteA.Name, Quota: 500000, QuotaPerUnit: 500000, Status: model.ReceivableBillStatusSuccess},
+	} {
+		require.NoError(t, db.Create(bill).Error)
+	}
+	a1122, a1121, b1122 := receivableRowKey(siteA.Id, 20261122), receivableRowKey(siteA.Id, 20261121), receivableRowKey(siteB.Id, 20261122)
+	list := func(query string) *httptest.ResponseRecorder {
+		return receivableRequest(t, http.MethodGet, "/api/receivable_bill/daily?"+query, nil, nil, GetReceivableBills)
+	}
+
+	response := list("start_date=20261101&end_date=20261123&p=1&page_size=10")
+	total, items := receivableListOf(t, response)
+	assert.Equal(t, 3, total)
+	require.Equal(t, []string{a1122, b1122, a1121}, receivableRowKeys(items))
+	assert.Equal(t, "123.456788", items[0]["amount"])
+	assert.Nil(t, items[0]["error"])
+	assert.Equal(t, false, items[0]["site_deleted"])
+	assert.Nil(t, items[2]["amount"])
+	assert.EqualValues(t, 3, items[2]["attempts"])
+	assert.Equal(t, map[string]any{"key": "Site request failed: {{detail}}", "params": map[string]any{"detail": "HTTP 502"}}, items[2]["error"])
+	assert.Equal(t, true, items[1]["site_deleted"])
+	for _, secret := range []string{"remote-access-token", "lease_until", "last_error"} {
+		assert.NotContains(t, response.Body.String(), secret)
+	}
+
+	_, items = receivableListOf(t, list("start_date=20261101&end_date=20261123&site_ids="+strconv.Itoa(siteB.Id)))
+	assert.Equal(t, []string{b1122}, receivableRowKeys(items))
+	_, items = receivableListOf(t, list("start_date=20261101&end_date=20261123&statuses=success,failed"))
+	assert.Equal(t, []string{a1122, b1122}, receivableRowKeys(items))
+	total, items = receivableListOf(t, list("start_date=20261101&end_date=20261123&page_size=1&p=2"))
+	assert.Equal(t, 3, total)
+	assert.Equal(t, []string{b1122}, receivableRowKeys(items))
+
+	for _, query := range []string{
+		"start_date=20261101",
+		"start_date=20261131&end_date=20261123",
+		"start_date=20261124&end_date=20261123",
+		"start_date=20261101&end_date=20261123&site_ids=x",
+		"start_date=20261101&end_date=20261123&statuses=ok",
+	} {
+		reply := receivableReplyOf(t, list(query))
+		assert.False(t, reply.Success, query)
+		assert.Equal(t, "Invalid parameters", reply.MessageKey, query)
+	}
+}
+
+func TestReceivableBillSiteOptions(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	siteA := receivableSeedSite(t, db, "rb-opt-a", "https://rb-opt-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "rb-opt-b", "https://rb-opt-b.example.com", 1)
+	siteC := receivableSeedSite(t, db, "rb-opt-c", "https://rb-opt-c.example.com", 1)
+	require.NoError(t, db.Delete(siteB).Error)
+
+	response := receivableRequest(t, http.MethodGet, "/api/receivable_bill/sites", nil, nil, GetReceivableBillSites)
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var options []model.ReceivableBillSiteOption
+	require.NoError(t, common.Unmarshal(reply.Data, &options))
+	// 在线站点在前，已删除的在后
+	assert.Equal(t, []model.ReceivableBillSiteOption{
+		{Id: siteA.Id, Name: siteA.Name}, {Id: siteC.Id, Name: siteC.Name}, {Id: siteB.Id, Name: siteB.Name, Deleted: true},
+	}, options)
+	assert.NotContains(t, response.Body.String(), "api_key")
+	assert.NotContains(t, response.Body.String(), "remote-access-token")
+}
+
+// receivableAudits 按写入顺序返回重新同步审计日志的结果、参数和内容。
+func receivableAudits(t *testing.T) (success []bool, params []map[string]any, contents []string) {
+	t.Helper()
+	var logs []model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "receivable_bill.sync").Order("id").Find(&logs).Error)
+	for _, log := range logs {
+		require.NotNil(t, log.Other.Op)
+		encoded, err := common.Marshal(log.Other.Op.Params)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, common.Unmarshal(encoded, &decoded))
+		success, params, contents = append(success, log.Success), append(params, decoded), append(contents, log.Content)
+	}
+	return success, params, contents
+}
+
+func TestReceivableBillResync(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	fake := newFakeStatSite(t)
+	site := receivableSeedSite(t, db, "站点A-旧", fake.server.URL, 1)
+	bill := &model.ReceivableBill{SiteId: site.Id, BillDate: 20261122, SiteName: "站点A-旧", SiteBaseURL: "https://old.example.com",
+		Quota: 1000000, QuotaPerUnit: 500000, ReceivableDiscount: 0.85, Status: model.ReceivableBillStatusSuccess, Attempts: 4}
+	require.NoError(t, db.Create(bill).Error)
+	hourOfDay := &model.ReceivableBillHour{SiteId: site.Id, BillHour: 1795287600, Status: model.ReceivableBillStatusFailed, Attempts: 5}
+	hourOfOtherDay := &model.ReceivableBillHour{SiteId: site.Id, BillHour: 1795201200, Status: model.ReceivableBillStatusFailed, Attempts: 5}
+	require.NoError(t, db.Create(hourOfDay).Error)
+	require.NoError(t, db.Create(hourOfOtherDay).Error)
+	require.NoError(t, db.Model(site).Updates(map[string]any{"name": "站点A-新", "receivable_discount": 0.9}).Error)
+	fake.setRespond(func(start, end int64) (int, string, http.Header) {
+		return http.StatusOK, `{"success":true,"data":{"quota":2500000}}`, nil
+	})
+	resync := func(id string) *httptest.ResponseRecorder {
+		return receivableRequest(t, http.MethodPost, "/api/receivable_bill/daily/"+id+"/sync", nil,
+			gin.Params{{Key: "id", Value: id}}, ResyncReceivableBill)
+	}
+	billID := strconv.Itoa(bill.Id)
+	viewOf := func(response *httptest.ResponseRecorder) map[string]any {
+		reply := receivableReplyOf(t, response)
+		require.True(t, reply.Success, response.Body.String())
+		var view map[string]any
+		require.NoError(t, common.Unmarshal(reply.Data, &view))
+		return view
+	}
+
+	// 1. 成功：取站点当前的快照，次数重新计，同一天失败的小时行回到重试中
+	view := viewOf(resync(billID))
+	assert.Equal(t, model.ReceivableBillStatusSuccess, view["status"])
+	assert.Equal(t, "5.000000", view["amount"])
+	assert.Equal(t, "站点A-新", view["site_name"])
+	assert.Equal(t, 0.9, view["receivable_discount"])
+	assert.EqualValues(t, 1, view["attempts"])
+	assert.Equal(t, [][2]int64{{1795276800, 1795363200}}, fake.windows())
+	hour := receivableHourOf(t, db, site.Id, hourOfDay.BillHour)
+	assert.Equal(t, model.ReceivableBillStatusRetrying, hour.Status)
+	assert.Zero(t, hour.Attempts)
+	assert.Zero(t, hour.NextRetryAt)
+	other := receivableHourOf(t, db, site.Id, hourOfOtherDay.BillHour)
+	assert.Equal(t, model.ReceivableBillStatusFailed, other.Status)
+	assert.Equal(t, 5, other.Attempts)
+	success, params, contents := receivableAudits(t)
+	require.Len(t, success, 1)
+	assert.True(t, success[0])
+	assert.Equal(t, "Resynced receivable bill #"+billID, contents[0])
+	assert.EqualValues(t, bill.Id, params[0]["bill_id"])
+	assert.EqualValues(t, 20261122, params[0]["bill_date"])
+	assert.Equal(t, "success", params[0]["previous_status"])
+	assert.EqualValues(t, 1000000, params[0]["previous_quota"])
+	assert.Equal(t, "success", params[0]["status"])
+	assert.EqualValues(t, 2500000, params[0]["quota"])
+
+	// 2. 远端返回 502：重试中，库里保留上一次成功的额度
+	fake.setRespond(func(start, end int64) (int, string, http.Header) { return http.StatusBadGateway, "", nil })
+	view = viewOf(resync(billID))
+	assert.Equal(t, model.ReceivableBillStatusRetrying, view["status"])
+	assert.Nil(t, view["amount"])
+	assert.EqualValues(t, 1, view["attempts"])
+	assert.EqualValues(t, 60, view["next_retry_at"].(float64)-view["synced_at"].(float64))
+	assert.Equal(t, int64(2500000), receivableBillOf(t, db, site.Id, 20261122).Quota)
+	success, params, _ = receivableAudits(t)
+	require.Len(t, success, 2)
+	assert.False(t, success[1])
+	assert.Equal(t, "retrying", params[1]["status"])
+	assert.NotContains(t, params[1], "quota")
+	assert.EqualValues(t, 2500000, params[1]["previous_quota"])
+
+	// 3. 租约被占用：不发请求，行不变
+	_, claimed, err := model.ClaimReceivableRow[model.ReceivableBill](bill.Id, time.Now().Unix())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	requests := len(fake.windows())
+	held := receivableBillOf(t, db, site.Id, 20261122)
+	reply := receivableReplyOf(t, resync(billID))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "This bill is being synced, please try again later", reply.MessageKey)
+	assert.Len(t, fake.windows(), requests)
+	assert.Equal(t, held, receivableBillOf(t, db, site.Id, 20261122))
+	success, params, _ = receivableAudits(t)
+	require.Len(t, success, 3)
+	assert.False(t, success[2])
+	assert.Equal(t, "syncing", params[2]["failure_reason"])
+	require.NoError(t, db.Model(&model.ReceivableBill{}).Where("id = ?", bill.Id).Update("lease_until", 0).Error)
+
+	// 4. 站点已删除：不发请求
+	require.NoError(t, db.Delete(site).Error)
+	reply = receivableReplyOf(t, resync(billID))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "The site has been deleted", reply.MessageKey)
+	assert.Len(t, fake.windows(), requests)
+	success, params, _ = receivableAudits(t)
+	require.Len(t, success, 4)
+	assert.Equal(t, "site_deleted", params[3]["failure_reason"])
+
+	// 5. 账单不存在：审计只有 bill_id 和 failure_reason
+	reply = receivableReplyOf(t, resync("999999"))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Bill does not exist", reply.MessageKey)
+	_, params, _ = receivableAudits(t)
+	require.Len(t, params, 5)
+	assert.Equal(t, map[string]any{"bill_id": float64(999999), "failure_reason": "not_found"}, params[4])
+
+	// 6. id 不是数字
+	reply = receivableReplyOf(t, resync("abc"))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Invalid ID", reply.MessageKey)
 }
