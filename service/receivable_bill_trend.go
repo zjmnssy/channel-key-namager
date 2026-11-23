@@ -92,17 +92,18 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 	starts := make([]time.Time, points)
 	keys := make([]int64, points)
 	due := make([]bool, points)
+	lastHour, lastDay := receivableLatestBillHour(now), receivableLatestBillDay(now)
 	for i := range points {
 		if isDay {
 			starts[i] = first.Add(time.Duration(i) * time.Hour)
 			trend.Labels[i] = starts[i].Format("15:04")
 			keys[i] = starts[i].Unix()
-			due[i] = !starts[i].After(receivableLatestBillHour(now))
+			due[i] = !starts[i].After(lastHour)
 		} else {
 			starts[i] = first.AddDate(0, 0, i)
 			trend.Labels[i] = starts[i].Format("2006-01-02")
 			keys[i] = int64(model.ReceivableBillDate(starts[i]))
-			due[i] = !starts[i].After(receivableLatestBillDay(now))
+			due[i] = !starts[i].After(lastDay)
 		}
 	}
 
@@ -140,7 +141,7 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 			return nil, err
 		}
 	} else {
-		if err := fillReceivableMonthValues(values, query, requested, siteOptions, starts, due); err != nil {
+		if err := fillReceivableMonthValues(values, query, requested, siteOptions, starts); err != nil {
 			return nil, err
 		}
 		coverage, err = model.ReceivableRowCoverage[model.ReceivableBill]()
@@ -183,9 +184,11 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 
 // fillReceivableMonthValues sets the month view's values: a day's successful bill, or,
 // where the bill has not succeeded, the sum of its successful hours. Hours are read
-// only for the days some site has no successful bill, and for the days not yet due.
+// site by site, only for the runs of days on which the site has no successful bill:
+// the days not yet due, the days the scan has not inserted, and the days that
+// failed or are retrying.
 func fillReceivableMonthValues(values *receivableTrendValues, query ReceivableTrendQuery, requested []int,
-	siteOptions map[int]model.ReceivableBillSiteOption, starts []time.Time, due []bool) error {
+	siteOptions map[int]model.ReceivableBillSiteOption, starts []time.Time) error {
 	bills, _, err := model.ListReceivableBills(model.ReceivableBillFilter{
 		StartDate: query.StartDate, EndDate: query.EndDate, SiteIDs: requested,
 	}, 0, 0)
@@ -196,10 +199,8 @@ func fillReceivableMonthValues(values *receivableTrendValues, query ReceivableTr
 	for i, start := range starts {
 		dayIndex[model.ReceivableBillDate(start)] = i
 	}
-	hasBill := make(map[int]bool)
 	succeeded := make(map[int][]bool)
 	for _, bill := range bills {
-		hasBill[bill.SiteId] = true
 		if bill.Status != model.ReceivableBillStatusSuccess {
 			continue
 		}
@@ -211,46 +212,46 @@ func fillReceivableMonthValues(values *receivableTrendValues, query ReceivableTr
 		succeeded[bill.SiteId][i] = true
 	}
 
-	// Sites that can show hours: those asked for, or else the live ones and the deleted
-	// ones with a bill in range. A day needs its hours when one of them lacks its bill.
-	needed := make([]bool, len(starts))
-	for i := range starts {
-		needed[i] = !due[i]
-	}
-	for siteID, option := range siteOptions {
-		if len(requested) > 0 && !slices.Contains(requested, siteID) || len(requested) == 0 && option.Deleted && !hasBill[siteID] {
-			continue
-		}
-		for i := range starts {
-			needed[i] = needed[i] || succeeded[siteID] == nil || !succeeded[siteID][i]
-		}
-	}
-
-	for start := 0; start < len(starts); start++ {
-		if !needed[start] {
-			continue
-		}
-		end := start
-		for end+1 < len(starts) && needed[end+1] {
-			end++
-		}
-		hours, err := model.ListSuccessfulReceivableBillHours(requested, starts[start].Unix(), starts[end].AddDate(0, 0, 1).Unix())
+	// Without a choice of sites, the live ones can show hours, and so can a deleted one
+	// whose hours start by the end of the range: a day it was deleted on never gets a bill.
+	candidates := requested
+	if len(requested) == 0 {
+		hourly, err := model.ReceivableRowCoverage[model.ReceivableBillHour]()
 		if err != nil {
 			return err
 		}
-		sums := make(map[[2]int]decimal.Decimal) // (site, day) -> the day's hours so far
-		for _, hour := range hours {
-			i := dayIndex[model.ReceivableBillDate(time.Unix(hour.BillHour, 0))]
-			if succeeded[hour.SiteId] != nil && succeeded[hour.SiteId][i] {
+		rangeEnd := starts[len(starts)-1].AddDate(0, 0, 1).Unix()
+		for siteID, option := range siteOptions {
+			if cover, hasHours := hourly[siteID]; !option.Deleted || hasHours && cover.FirstPeriod < rangeEnd {
+				candidates = append(candidates, siteID)
+			}
+		}
+	}
+	slices.Sort(candidates)
+
+	for _, siteID := range candidates {
+		for first := 0; first < len(starts); first++ {
+			if succeeded[siteID] != nil && succeeded[siteID][first] {
 				continue
 			}
-			key := [2]int{hour.SiteId, i}
-			sums[key] = sums[key].Add(model.ReceivableAmount(hour.Quota, hour.QuotaPerUnit))
+			last := first
+			for last+1 < len(starts) && (succeeded[siteID] == nil || !succeeded[siteID][last+1]) {
+				last++
+			}
+			hours, err := model.ListSuccessfulReceivableBillHours([]int{siteID}, starts[first].Unix(), starts[last].AddDate(0, 0, 1).Unix())
+			if err != nil {
+				return err
+			}
+			sums := make(map[int]decimal.Decimal) // day -> the day's hours so far
+			for _, hour := range hours {
+				i := dayIndex[model.ReceivableBillDate(time.Unix(hour.BillHour, 0))]
+				sums[i] = sums[i].Add(model.ReceivableAmount(hour.Quota, hour.QuotaPerUnit))
+			}
+			for i, sum := range sums {
+				values.set(siteID, i, sum, true)
+			}
+			first = last
 		}
-		for key, sum := range sums {
-			values.set(key[0], key[1], sum, true)
-		}
-		start = end
 	}
 	return nil
 }

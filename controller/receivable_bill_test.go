@@ -858,8 +858,10 @@ func TestReceivableBillTrend(t *testing.T) {
 	siteB := receivableSeedSite(t, db, "rb-trend-b", "https://rb-trend-b.example.com", 1)
 	siteC := receivableSeedSite(t, db, "rb-trend-c", "https://rb-trend-c.example.com", 1)
 	siteD := receivableSeedSite(t, db, "rb-trend-d", "https://rb-trend-d.example.com", 1)
+	siteE := receivableSeedSite(t, db, "rb-trend-e", "https://rb-trend-e.example.com", 1)
 	require.NoError(t, db.Delete(siteB).Error)
 	require.NoError(t, db.Delete(siteC).Error)
+	require.NoError(t, db.Delete(siteE).Error)
 
 	hour := func(date, clock int) int64 {
 		day, ok := model.ReceivableBillDayStart(date)
@@ -878,6 +880,10 @@ func TestReceivableBillTrend(t *testing.T) {
 		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261123, 2), Quota: 500000, QuotaPerUnit: 500000, Status: success},
 		&model.ReceivableBill{SiteId: siteB.Id, BillDate: 20261122, Quota: 500000, QuotaPerUnit: 500000, Status: success},
 		&model.ReceivableBillHour{SiteId: siteB.Id, BillHour: hour(20261122, 2), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		// A's bill of 11-21 succeeded, so its hours that day are not read. E was deleted on 11-21, which has no bill.
+		&model.ReceivableBillHour{SiteId: siteA.Id, BillHour: hour(20261121, 5), Quota: 500000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteE.Id, BillHour: hour(20261121, 6), Quota: 250000, QuotaPerUnit: 500000, Status: success},
+		&model.ReceivableBillHour{SiteId: siteE.Id, BillHour: hour(20261121, 7), Quota: 250000, QuotaPerUnit: 500000, Status: success},
 	} {
 		require.NoError(t, db.Create(row).Error)
 	}
@@ -912,14 +918,27 @@ func TestReceivableBillTrend(t *testing.T) {
 	assert.Equal(t, siteA.Id, trend.Series[0].SiteID)
 	assert.Equal(t, 7, trend.MissingCount)
 
+	var hoursRead int64
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("receivable_trend_test:count_hours", func(tx *gorm.DB) {
+		if tx.Statement.Table == "receivable_bill_hours" {
+			hoursRead += tx.Statement.RowsAffected
+		}
+	}))
 	trend, err = service.BuildReceivableBillTrend(service.ReceivableTrendQuery{View: "month", StartDate: 20261120, EndDate: 20261123}, now)
+	require.NoError(t, db.Callback().Query().Remove("receivable_trend_test:count_hours"))
 	require.NoError(t, err)
+	// Only the hours of A on 11-22 and 11-23 (5) and of E on 11-21 (2) are read: not the hours of days with a successful bill.
+	assert.EqualValues(t, 7, hoursRead)
 	assert.Equal(t, []string{"2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"}, trend.Labels)
-	require.Len(t, trend.Series, 3)
+	require.Len(t, trend.Series, 4)
 	assert.Equal(t, []*string{nil, str("2.000000"), str("1.500000"), str("3.000000")}, trend.Series[0].Amounts)
 	assert.Equal(t, []bool{false, false, true, true}, trend.Series[0].Provisional)
 	assert.Equal(t, []*string{nil, nil, str("1.000000"), nil}, trend.Series[1].Amounts)
 	assert.Equal(t, []bool{false, false, false, false}, trend.Series[1].Provisional)
+	// E, deleted before its bill of 11-21 was due, shows its hours of that day.
+	assert.Equal(t, siteE.Id, trend.Series[3].SiteID)
+	assert.Equal(t, []*string{nil, str("1.000000"), nil, nil}, trend.Series[3].Amounts)
+	assert.Equal(t, []bool{false, true, false, false}, trend.Series[3].Provisional)
 	assert.Zero(t, trend.MissingCount)
 
 	// site_ids picks the series itself and skips ids that do not exist.
