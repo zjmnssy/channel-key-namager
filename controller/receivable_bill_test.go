@@ -948,6 +948,22 @@ func TestReceivableBillTrend(t *testing.T) {
 		assert.Nil(t, amount)
 	}
 	assert.NotContains(t, a.Provisional, true)
+	// A missing point is due, from a live site that has started syncing, and has no success.
+	require.Len(t, a.Missing, 24)
+	assert.False(t, a.Missing[0], "a success")
+	assert.True(t, a.Missing[1], "a retrying hour")
+	assert.True(t, a.Missing[2], "an hour without a row")
+	assert.NotContains(t, b.Missing, true, "a deleted site")
+	assert.NotContains(t, d.Missing, true, "a site that has not started syncing")
+	missingPoints := 0
+	for _, series := range trend.Series {
+		for _, missing := range series.Missing {
+			if missing {
+				missingPoints++
+			}
+		}
+	}
+	assert.Equal(t, 22, missingPoints)
 	assert.Equal(t, 22, trend.MissingCount)
 
 	// Today: the hours after the last one read (09:00) are neither shown nor missing.
@@ -955,6 +971,8 @@ func TestReceivableBillTrend(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, trend.Series, 2)
 	assert.Equal(t, siteA.Id, trend.Series[0].SiteID)
+	assert.Equal(t, []bool{false, false, false, true, true, true, true, true, true, true}, trend.Series[0].Missing[:10])
+	assert.NotContains(t, trend.Series[0].Missing[10:], true, "hours not yet due")
 	assert.Equal(t, 7, trend.MissingCount)
 
 	var hoursRead int64
@@ -978,6 +996,10 @@ func TestReceivableBillTrend(t *testing.T) {
 	assert.Equal(t, siteE.Id, trend.Series[3].SiteID)
 	assert.Equal(t, []*string{nil, str("1.000000"), nil, nil}, trend.Series[3].Amounts)
 	assert.Equal(t, []bool{false, true, false, false}, trend.Series[3].Provisional)
+	// 11-20 is before A's first bill and 11-22 has successful hours, so no day is missing.
+	for _, series := range trend.Series {
+		assert.Equal(t, []bool{false, false, false, false}, series.Missing, series.SiteID)
+	}
 	assert.Zero(t, trend.MissingCount)
 
 	// site_ids picks the series itself and skips ids that do not exist.
@@ -1002,6 +1024,7 @@ func TestReceivableBillTrend(t *testing.T) {
 	reply := trendRequest("view=month&start_date=20261120&end_date=20261123&site_ids=" + strconv.Itoa(siteA.Id))
 	require.True(t, reply.Success)
 	assert.Contains(t, string(reply.Data), `"missing_count":0`)
+	assert.Contains(t, string(reply.Data), `"missing":[false,false,false,false]`)
 	for _, query := range []string{
 		"view=year&date=20261122",
 		"view=day&date=20261131",
