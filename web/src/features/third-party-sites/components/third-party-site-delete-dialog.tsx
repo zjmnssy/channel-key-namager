@@ -55,14 +55,20 @@ export function ThirdPartySiteDeleteDialog() {
       open={open === 'delete'}
       onOpenChange={(isOpen) => !isOpen && setOpen(null)}
       title={t('Delete Site')}
-      desc={`${t(
-        'Delete site {{name}}? It will no longer appear in the list.',
-        {
-          name: currentRow?.name ?? '',
-        }
-      )} ${t(
-        "After deletion, today's consumption and bills that have not synced successfully can no longer be synced."
-      )}`}
+      desc={
+        <>
+          <p>
+            {t('Delete site {{name}}? It will no longer appear in the list.', {
+              name: currentRow?.name ?? '',
+            })}
+          </p>
+          <p>
+            {t(
+              "After deletion, today's consumption and bills that have not synced successfully can no longer be synced."
+            )}
+          </p>
+        </>
+      }
       confirmText={mutation.isPending ? t('Deleting...') : t('Delete')}
       isLoading={mutation.isPending}
       handleConfirm={() => {

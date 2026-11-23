@@ -203,12 +203,17 @@ describe('ThirdPartySitesTable', () => {
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(
-      'Delete site Alpha? It will no longer appear in the list.'
-    )
-    expect(dialog).toHaveTextContent(
-      "After deletion, today's consumption and bills that have not synced successfully can no longer be synced."
-    )
+    // Two sentences in their own elements, so no language gets a joining space.
+    expect(
+      within(dialog).getByText(
+        'Delete site Alpha? It will no longer appear in the list.'
+      )
+    ).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        "After deletion, today's consumption and bills that have not synced successfully can no longer be synced."
+      )
+    ).toBeVisible()
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
 
     await waitFor(() =>

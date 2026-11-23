@@ -64,7 +64,7 @@ export function useDailyBillsColumns(): ColumnDef<ReceivableBill>[] {
       },
       {
         accessorKey: 'site_base_url',
-        header: t('Site URL'),
+        header: t('Bill Site URL'),
         cell: ({ row }) => (
           <TruncatedText
             text={row.original.site_base_url}

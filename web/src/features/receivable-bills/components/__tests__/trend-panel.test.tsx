@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { type QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createMemoryHistory,
   createRootRoute,
@@ -28,13 +28,17 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { createAppQueryClient } from '@/lib/query-client'
 
 import * as billApi from '../../api'
 import type { ReceivableTrend } from '../../types'
 import { TrendPanel } from '../trend-panel'
 
 vi.mock('../../api')
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 
 type ChartDatum = {
   label: string
@@ -50,6 +54,15 @@ vi.mock('@visactor/react-vchart', () => ({ VChart: chart }))
 vi.mock('@visactor/vchart', () => ({
   ThemeManager: { setCurrentTheme: vi.fn() },
 }))
+
+type TooltipPattern = {
+  title: { value: (d: ChartDatum) => string }
+  content: {
+    key: (d: ChartDatum) => string
+    value: (d: ChartDatum) => string
+    visible: (d: ChartDatum) => boolean
+  }[]
+}
 
 const clients: QueryClient[] = []
 
@@ -82,9 +95,7 @@ async function renderPanel(data: ReceivableTrend = trend()) {
   })
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {}, initAsync: false })
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
+  const client = createAppQueryClient()
   clients.push(client)
   const root = createRootRoute()
   const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
@@ -193,7 +204,7 @@ describe('TrendPanel', () => {
     ])
   })
 
-  it('formats the tooltip from the backend string and never invents zero', async () => {
+  it('formats mark and dimension tooltips from the backend string and hides missing points', async () => {
     await renderPanel(
       trend({
         series: [
@@ -210,14 +221,17 @@ describe('TrendPanel', () => {
 
     await waitFor(() => expect(chart).toHaveBeenCalled())
     const spec = chart.mock.calls.at(-1)?.[0].spec as unknown as {
-      tooltip: {
-        mark: { content: { value: (d: ChartDatum) => string }[] }
-      }
+      tooltip: Record<'mark' | 'dimension', TooltipPattern>
     }
-    const format = spec.tooltip.mark.content[0].value
     const [valued, missing] = lastValues()
-    expect(format(valued)).toBe('$1.500000 (Provisional data)')
-    expect(format(missing)).not.toContain('0.000000')
+    for (const pattern of [spec.tooltip.mark, spec.tooltip.dimension]) {
+      const row = pattern.content[0]
+      expect(pattern.title.value(valued)).toBe('00:00')
+      expect(row.key(valued)).toBe('Site A')
+      expect(row.value(valued)).toBe('$1.500000 (Provisional data)')
+      expect(row.visible(valued)).toBe(true)
+      expect(row.visible(missing)).toBe(false)
+    }
   })
 
   it('labels a deleted site in the chart data', async () => {
@@ -266,5 +280,19 @@ describe('TrendPanel', () => {
     await waitFor(() =>
       expect(billApi.getReceivableBillTrend).toHaveBeenCalledTimes(3)
     )
+  })
+
+  it('shows the failure once in the page without a toast', async () => {
+    await renderPanel()
+    vi.mocked(billApi.getReceivableBillTrend).mockResolvedValue({
+      success: false,
+      message: 'Date range cannot exceed 366 days',
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'By Month' }))
+
+    expect(
+      await screen.findByText('Date range cannot exceed 366 days')
+    ).toBeVisible()
+    expect(toast.error).not.toHaveBeenCalled()
   })
 })

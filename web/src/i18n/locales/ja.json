@@ -964,6 +964,7 @@
     "Bill Date": "請求日",
     "Bill does not exist": "請求が存在しません",
     "Bill ID": "請求書 ID",
+    "Bill Site URL": "サイトURL",
     "Bill synced": "請求を同期しました",
     "Billable image count": "課金対象の画像数",
     "Billable input tokens": "課金対象の入力トークン",

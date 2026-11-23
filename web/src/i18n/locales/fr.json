@@ -964,6 +964,7 @@
     "Bill Date": "Date de facturation",
     "Bill does not exist": "La facture n'existe pas",
     "Bill ID": "ID de la facture",
+    "Bill Site URL": "URL du site",
     "Bill synced": "Facture synchronisée",
     "Billable image count": "Nombre d’images facturées",
     "Billable input tokens": "Tokens d’entrée facturables",

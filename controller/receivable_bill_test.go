@@ -862,6 +862,35 @@ func TestReceivableBillResync(t *testing.T) {
 	assert.Equal(t, "Invalid ID", reply.MessageKey)
 }
 
+// 管理员确认后关闭页面，请求 context 被取消，重新同步仍要完成并写成功。
+func TestReceivableBillResyncIgnoresRequestCancellation(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	fake := newFakeStatSite(t)
+	site := receivableSeedSite(t, db, "rb-cancel", fake.server.URL, 1)
+	bill := &model.ReceivableBill{SiteId: site.Id, BillDate: 20261122, Quota: 1000000, QuotaPerUnit: 500000,
+		Status: model.ReceivableBillStatusSuccess}
+	require.NoError(t, db.Create(bill).Error)
+	fake.setRespond(func(start, end int64) (int, string, http.Header) {
+		return http.StatusOK, `{"success":true,"data":{"quota":2500000}}`, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/receivable_bill/daily/x/sync", nil).WithContext(ctx)
+	c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(bill.Id)}}
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+	ResyncReceivableBill(c)
+
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	stored := receivableBillOf(t, db, site.Id, 20261122)
+	assert.Equal(t, model.ReceivableBillStatusSuccess, stored.Status)
+	assert.EqualValues(t, 2500000, stored.Quota)
+}
+
 func TestReceivableBillTrend(t *testing.T) {
 	db := setupReceivableBillTest(t)
 	siteA := receivableSeedSite(t, db, "rb-trend-a", "https://rb-trend-a.example.com", 1)

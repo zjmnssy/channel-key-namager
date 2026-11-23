@@ -68,6 +68,8 @@ export function TrendPanel() {
     queryKey: RECEIVABLE_BILL_QUERY_KEYS.trend(query),
     queryFn: async () =>
       requireServerSuccess(await getReceivableBillTrend(query)),
+    // The ErrorState below already shows the reason.
+    meta: { errorToast: false },
   })
   const trend = trendQuery.data?.data
 

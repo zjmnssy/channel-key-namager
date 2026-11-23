@@ -65,6 +65,17 @@ export function TrendChart(props: TrendChartProps) {
         }
       })
     })
+    const tooltipPattern = {
+      title: { value: (d: TrendDatum) => d.label },
+      content: [
+        {
+          key: (d: TrendDatum) => d.site,
+          value: (d: TrendDatum) => formatTrendTooltip(d, t),
+          // A point the site has not reported has no row, never a 0.
+          visible: (d: TrendDatum) => d.raw != null,
+        },
+      ],
+    }
     return {
       type: 'line' as const,
       data: [{ id: 'trend', values }],
@@ -75,17 +86,9 @@ export function TrendChart(props: TrendChartProps) {
       point: { visible: true, style: { size: 5 } },
       line: { style: { lineWidth: 2 } },
       legends: { visible: true, orient: 'top' as const },
-      tooltip: {
-        mark: {
-          title: { value: (d: TrendDatum) => d.label },
-          content: [
-            {
-              key: (d: TrendDatum) => d.site,
-              value: (d: TrendDatum) => formatTrendTooltip(d, t),
-            },
-          ],
-        },
-      },
+      // Mark and dimension tooltips share one pattern: the dimension tooltip
+      // is on by default and would otherwise show Number(amount).
+      tooltip: { mark: tooltipPattern, dimension: tooltipPattern },
       axes: [
         {
           orient: 'bottom' as const,

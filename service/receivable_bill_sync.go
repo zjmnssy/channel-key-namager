@@ -402,7 +402,8 @@ func receivableBillUpdates(result receivableSyncResult, site *model.ThirdPartySi
 
 // ResyncReceivableBill 手动重新同步一张日账单：认领该行，向站点读取一次，把结果写回，
 // 再让同一天里失败的小时数据重新重试。尝试次数从 1 重新计，成功时取站点当前的名称、地址和折扣。
-// before 是认领前的行，读到该行之后的错误都带着它，供审计使用；after 只在结果已写回时有值，
+// before 是认领成功后重读的行，审计据此记录被覆盖的状态和额度；认领前的错误带着认领前读到的行。
+// 认领后重读失败时直接返回错误，租约 300 秒后自然过期。after 只在结果已写回时有值，
 // 结果可以是成功，也可以是重试中或失败。
 func ResyncReceivableBill(ctx context.Context, billID int) (before model.ReceivableBill, after *model.ReceivableBill, err error) {
 	err = model.DB.First(&before, billID).Error
@@ -431,6 +432,10 @@ func ResyncReceivableBill(ctx context.Context, billID int) (before model.Receiva
 	}
 	if !claimed {
 		return before, nil, model.ErrReceivableBillSyncing
+	}
+	// 认领前读到的行可能已被扫描写成成功，认领后重读才是将被覆盖的值。
+	if err := model.DB.First(&before, before.Id).Error; err != nil {
+		return before, nil, err
 	}
 	attempt := NewChannelPushClient(site, ReceivableBillClientOptions).ReadLogStatQuota(ctx, day.Unix(), day.Add(receivableBillDay).Unix())
 	result := newReceivableSyncResult(attempt, 1, now)

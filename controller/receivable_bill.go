@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strconv"
@@ -180,7 +181,8 @@ func ResyncReceivableBill(c *gin.Context) {
 		markAuditLogged(c)
 	}()
 
-	before, after, err := service.ResyncReceivableBill(c.Request.Context(), id)
+	// 管理员确认后关闭页面不应取消同步，否则已成功的行会被写成重试中。
+	before, after, err := service.ResyncReceivableBill(context.WithoutCancel(c.Request.Context()), id)
 	if before.Id != 0 {
 		params["site_id"] = before.SiteId
 		params["site_name"] = before.SiteName
