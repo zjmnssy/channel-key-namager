@@ -414,6 +414,7 @@ type ReceivableStatAttempt struct {
 
 // ReadLogStatQuota reads the site's consumed quota between start and end (Unix seconds)
 // with a single request and no retry; the caller decides what to do with a failure.
+// A context that ends (shutdown, a closed page) counts as retryable, so the bill row is retried later.
 func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int64) ReceivableStatAttempt {
 	query := url.Values{}
 	query.Set("p", "1")
@@ -423,7 +424,7 @@ func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int
 
 	const path = "/api/log/stat"
 	if err := c.pace(ctx); err != nil {
-		return ReceivableStatAttempt{Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)})}
+		return ReceivableStatAttempt{Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)}), Retryable: true}
 	}
 	envelope, retryAfter, remoteErr := c.attempt(ctx, http.MethodGet, path, query, nil)
 	if remoteErr != nil {
@@ -432,7 +433,7 @@ func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int
 			Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{
 				"detail": truncateText(remoteErr.Detail, channelPushMaxDetailLength),
 			}),
-			Retryable:  remoteErr.Retryable && ctx.Err() == nil,
+			Retryable:  remoteErr.Retryable,
 			RetryAfter: retryAfter,
 		}
 	}

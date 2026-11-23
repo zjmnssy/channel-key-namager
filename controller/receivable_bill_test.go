@@ -145,6 +145,8 @@ type fakeStatSite struct {
 	mu       sync.Mutex
 	requests []fakeStatRequest
 	respond  func(start, end int64) (status int, body string, header http.Header)
+	// onRequest runs after the request is recorded and before respond; it may block.
+	onRequest func(r *http.Request)
 }
 
 func newFakeStatSite(t *testing.T) *fakeStatSite {
@@ -161,8 +163,11 @@ func newFakeStatSite(t *testing.T) *fakeStatSite {
 			Method: r.Method, Path: r.URL.Path, Query: query,
 			Authorization: r.Header.Get("Authorization"), User: r.Header.Get("New-Api-User"),
 		})
-		respond := site.respond
+		respond, onRequest := site.respond, site.onRequest
 		site.mu.Unlock()
+		if onRequest != nil {
+			onRequest(r)
+		}
 		status, body, header := respond(start, end)
 		for name, values := range header {
 			for _, value := range values {
@@ -209,6 +214,7 @@ func TestReceivableStatAttempt(t *testing.T) {
 		detail    string
 		retryable bool
 		wait      time.Duration
+		cancel    string // "before" cancels the context before the call, "during" once the site has the request
 	}{
 		{name: "quota", reply: json200(quotaBody("61728394")), quota: 61728394},
 		{name: "zero", reply: json200(quotaBody("0"))},
@@ -232,6 +238,8 @@ func TestReceivableStatAttempt(t *testing.T) {
 		{name: "redirect", reply: func() (int, string, http.Header) {
 			return http.StatusFound, "", http.Header{"Location": {"https://example.com"}}
 		}, key: remoteFailure, detail: "HTTP 302"},
+		{name: "context cancelled", cancel: "before", key: remoteFailure, retryable: true},
+		{name: "cancelled mid request", cancel: "during", key: remoteFailure, retryable: true},
 		{name: "long reason", reply: json200(`{"success":false,"message":"` + strings.Repeat("错", 600) + `"}`), key: remoteFailure, detail: strings.Repeat("错", 500)},
 	}
 	for _, tt := range tests {
@@ -242,7 +250,21 @@ func TestReceivableStatAttempt(t *testing.T) {
 			site := receivableSeedSite(t, db, "rb-stat", fake.server.URL, 1)
 
 			client := service.NewChannelPushClient(site, service.ChannelPushClientOptions{Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute})
-			got := client.ReadLogStatQuota(context.Background(), 1795190400, 1795276800)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch tt.cancel {
+			case "before":
+				cancel()
+			case "during":
+				fake.onRequest = func(r *http.Request) {
+					cancel()
+					select {
+					case <-r.Context().Done():
+					case <-time.After(5 * time.Second):
+					}
+				}
+			}
+			got := client.ReadLogStatQuota(ctx, 1795190400, 1795276800)
 
 			assert.Equal(t, tt.quota, got.Quota)
 			assert.Equal(t, tt.retryable, got.Retryable)
@@ -252,7 +274,9 @@ func TestReceivableStatAttempt(t *testing.T) {
 			} else {
 				require.NotNil(t, got.Failure)
 				assert.Equal(t, tt.key, got.Failure.Key)
-				if tt.detail == "" {
+				if tt.detail == "" && tt.cancel != "" {
+					assert.NotEmpty(t, got.Failure.Params["detail"])
+				} else if tt.detail == "" {
 					assert.Empty(t, got.Failure.Params)
 				} else {
 					assert.Equal(t, tt.detail, got.Failure.Params["detail"])
@@ -260,6 +284,10 @@ func TestReceivableStatAttempt(t *testing.T) {
 			}
 
 			requests := fake.recorded()
+			if tt.cancel == "before" {
+				assert.Empty(t, requests)
+				return
+			}
 			require.Len(t, requests, 1)
 			assert.Equal(t, http.MethodGet, requests[0].Method)
 			assert.Equal(t, "/api/log/stat", requests[0].Path)
