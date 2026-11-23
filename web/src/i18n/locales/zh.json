@@ -442,7 +442,7 @@
     "After conversion": "迁移后",
     "After conversion, expression reservation and rounding rules apply. Effective unit prices are preserved; individual rounded charges may differ.": "转换后采用计费表达式的预扣与舍入规则。保留当前生效单价，单笔舍入后的费用可能不同。",
     "After deleting it, the built-in plugin of the same name takes over.": "删除后，由同名的内置插件接替。",
-    "After deletion, today's consumption and bills that have not synced successfully can no longer be synced.": "删除后，当天的消耗和尚未同步成功的账单将无法再同步。",
+    "After deletion, today's consumption and bills that have not synced successfully can no longer be synced.": "删除后，今天的消费和尚未同步成功的账单将无法再同步。",
     "After disabling, it will no longer be shown to users, but historical orders are not affected. Continue?": "禁用后用户端不再展示，但历史订单不受影响。是否继续？",
     "After enabling, client request headers are forwarded to the upstream, excluding standard authentication headers, cookies and transport headers:": "开启后，客户端请求头会转发给上游，但会过滤常见认证头、Cookie 和传输控制头：",
     "After enabling, the original request body is forwarded to the upstream without gateway rewriting:": "开启后，原始请求体将直接发送给上游，网关不再改写请求体：",
