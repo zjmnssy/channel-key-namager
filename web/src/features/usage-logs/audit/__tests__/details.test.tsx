@@ -738,6 +738,97 @@ it.each([
   }
 )
 
+it('renders receivable bill resync audits with the overwritten quota', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'receivable_bill.sync'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      method: 'POST',
+      route: '/api/receivable_bills/:id/sync',
+      success: true,
+      other: {
+        op: {
+          action,
+          params: {
+            bill_id: 12,
+            site_id: 3,
+            site_name: '站点A',
+            bill_date: 20261122,
+            previous_status: 'success',
+            previous_quota: 1000000,
+            status: 'success',
+            quota: 2500000,
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Resynced receivable bill #12')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: 'Bill ID', value: 12 },
+      { label: 'Site ID', value: 3 },
+      { label: 'Site Name', value: '站点A' },
+      { label: 'Previous Quota', value: 1000000 },
+      { label: 'Previous Status', value: 'Success' },
+      { label: 'Bill Date', value: 20261122 },
+      { label: 'Status', value: 'Success' },
+      { label: 'Quota', value: 2500000 },
+    ])
+  )
+})
+
+it.each([
+  ['not_found', 'Bill does not exist'],
+  ['site_deleted', 'The site has been deleted'],
+  ['syncing', 'This bill is being synced, please try again later'],
+  ['database_error', 'Database error, please contact the administrator'],
+])(
+  'explains the rejected receivable bill resync reason %s',
+  async (reason, text) => {
+    const i18n = createInstance()
+    await i18n.init({ lng: 'en', resources: {} })
+    const action = 'receivable_bill.sync'
+    const detail = buildAuditDetails(
+      {
+        ...entry,
+        action,
+        success: false,
+        other: {
+          audit_info: { success: false },
+          op: { action, params: { bill_id: 12, failure_reason: reason } },
+        },
+      },
+      i18n.t
+    )
+    expect(detail.summary).toBe('Failed receivable bill resync')
+    expect(detail.fields).toEqual(
+      expect.arrayContaining([{ label: 'Failure reason', value: text }])
+    )
+  }
+)
+
+it('keeps the status of other audit actions untranslated', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'third_party_site.update'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      other: { op: { action, params: { status: 'success' } } },
+    },
+    i18n.t
+  )
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([{ label: 'Status', value: 'success' }])
+  )
+})
+
 it('shows the affected count separately from requested redemption IDs', async () => {
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {} })

@@ -203,11 +203,12 @@ describe('ThirdPartySitesTable', () => {
     await user.click(screen.getByRole('button', { name: 'Open menu' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(
-      within(dialog).getByText(
-        'Delete site Alpha? It will no longer appear in the list.'
-      )
-    ).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(
+      'Delete site Alpha? It will no longer appear in the list.'
+    )
+    expect(dialog).toHaveTextContent(
+      "After deletion, today's consumption and bills that have not synced successfully can no longer be synced."
+    )
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
 
     await waitFor(() =>
