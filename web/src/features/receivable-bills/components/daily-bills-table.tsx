@@ -28,13 +28,11 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
-import {
-  createServerError,
-  requireServerSuccess,
-} from '@/lib/server-error-message'
+import { createServerError } from '@/lib/server-error-message'
 
-import { listReceivableBills, listReceivableBillSites } from '../api'
+import { listReceivableBills } from '../api'
 import { BILL_STATUS_OPTIONS, RECEIVABLE_BILL_QUERY_KEYS } from '../constants'
+import { useReceivableBillSiteOptions } from '../hooks/use-receivable-bill-site-options'
 import { beijingToday, monthStart } from '../lib/bill-date'
 import type { DailyBillQuery } from '../types'
 import { BillDateRangePicker } from './bill-date-range-picker'
@@ -89,17 +87,7 @@ export function DailyBillsTable() {
     placeholderData: (previousData) => previousData,
   })
 
-  const sitesQuery = useQuery({
-    queryKey: RECEIVABLE_BILL_QUERY_KEYS.sites,
-    queryFn: async () =>
-      requireServerSuccess(await listReceivableBillSites()).data ?? [],
-  })
-  const siteOptions = (sitesQuery.data ?? []).map((site) => ({
-    value: String(site.id),
-    label: site.deleted
-      ? t('{{name}} (deleted)', { name: site.name })
-      : site.name,
-  }))
+  const sites = useReceivableBillSiteOptions()
   const statusOptions = BILL_STATUS_OPTIONS.map((option) => ({
     value: option.value,
     label: t(option.labelKey),
@@ -157,8 +145,7 @@ export function DailyBillsTable() {
               }}
               siteNames={siteValues.map(
                 (id) =>
-                  (sitesQuery.data ?? []).find((site) => String(site.id) === id)
-                    ?.name ?? id
+                  sites.sites.find((site) => String(site.id) === id)?.name ?? id
               )}
             />
           }
@@ -180,7 +167,7 @@ export function DailyBillsTable() {
               />
               <DataTableFacetedFilter
                 title={t('Site Name')}
-                options={siteOptions}
+                options={sites.options}
                 value={siteValues}
                 onValueChange={(sites) => updateFilters({ sites })}
               />

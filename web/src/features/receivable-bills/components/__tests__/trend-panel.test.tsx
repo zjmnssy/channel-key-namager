@@ -40,6 +40,7 @@ type ChartDatum = {
   label: string
   site: string
   amount: number | null
+  raw: string | null
   provisional: boolean
 }
 const chart = vi.hoisted(() =>
@@ -190,6 +191,33 @@ describe('TrendPanel', () => {
       false,
       true,
     ])
+  })
+
+  it('formats the tooltip from the backend string and never invents zero', async () => {
+    await renderPanel(
+      trend({
+        series: [
+          {
+            site_id: 1,
+            site_name: 'Site A',
+            deleted: false,
+            amounts: ['1.500000', null],
+            provisional: [true, false],
+          },
+        ],
+      })
+    )
+
+    await waitFor(() => expect(chart).toHaveBeenCalled())
+    const spec = chart.mock.calls.at(-1)?.[0].spec as unknown as {
+      tooltip: {
+        mark: { content: { value: (d: ChartDatum) => string }[] }
+      }
+    }
+    const format = spec.tooltip.mark.content[0].value
+    const [valued, missing] = lastValues()
+    expect(format(valued)).toBe('$1.500000 (Provisional data)')
+    expect(format(missing)).not.toContain('0.000000')
   })
 
   it('labels a deleted site in the chart data', async () => {

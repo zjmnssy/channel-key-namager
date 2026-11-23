@@ -31,8 +31,9 @@ import {
   requireServerSuccess,
 } from '@/lib/server-error-message'
 
-import { getReceivableBillTrend, listReceivableBillSites } from '../api'
+import { getReceivableBillTrend } from '../api'
 import { RECEIVABLE_BILL_QUERY_KEYS } from '../constants'
+import { useReceivableBillSiteOptions } from '../hooks/use-receivable-bill-site-options'
 import {
   beijingToday,
   billDateToLocalDate,
@@ -70,17 +71,7 @@ export function TrendPanel() {
   })
   const trend = trendQuery.data?.data
 
-  const sitesQuery = useQuery({
-    queryKey: RECEIVABLE_BILL_QUERY_KEYS.sites,
-    queryFn: async () =>
-      requireServerSuccess(await listReceivableBillSites()).data ?? [],
-  })
-  const siteOptions = (sitesQuery.data ?? []).map((site) => ({
-    value: String(site.id),
-    label: site.deleted
-      ? t('{{name}} (deleted)', { name: site.name })
-      : site.name,
-  }))
+  const sites = useReceivableBillSiteOptions()
 
   const updateSearch = (patch: Record<string, unknown>) =>
     void navigate({ search: (prev) => ({ ...prev, ...patch }) })
@@ -154,7 +145,7 @@ export function TrendPanel() {
         )}
         <DataTableFacetedFilter
           title={t('Site Name')}
-          options={siteOptions}
+          options={sites.options}
           value={siteValues}
           onValueChange={(sites) => updateSearch({ trendSites: sites })}
         />

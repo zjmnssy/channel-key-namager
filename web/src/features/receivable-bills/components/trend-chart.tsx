@@ -23,12 +23,14 @@ import { useTranslation } from 'react-i18next'
 import { useChartTheme } from '@/lib/use-chart-theme'
 import { VCHART_OPTION } from '@/lib/vchart'
 
+import { formatTrendTooltip } from '../lib/trend-tooltip'
 import type { ReceivableTrend } from '../types'
 
 type TrendDatum = {
   label: string
   site: string
   amount: number | null
+  raw: string | null // the backend string, shown in the tooltip
   provisional: boolean
 }
 
@@ -58,6 +60,7 @@ export function TrendChart(props: TrendChartProps) {
           site,
           // A point the site has not reported stays null; it must not read as 0.
           amount: raw == null ? null : Number(raw),
+          raw: raw ?? null,
           provisional: series.provisional[index] === true,
         }
       })
@@ -78,12 +81,7 @@ export function TrendChart(props: TrendChartProps) {
           content: [
             {
               key: (d: TrendDatum) => d.site,
-              value: (d: TrendDatum) => {
-                const amount = `$${(d.amount ?? 0).toFixed(6)}`
-                return d.provisional
-                  ? `${amount} (${t('Provisional data')})`
-                  : amount
-              },
+              value: (d: TrendDatum) => formatTrendTooltip(d, t),
             },
           ],
         },
