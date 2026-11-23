@@ -246,7 +246,9 @@ func TestReceivableStatAttempt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db := setupReceivableBillTest(t)
 			fake := newFakeStatSite(t)
-			fake.respond = func(start, end int64) (int, string, http.Header) { return tt.reply() }
+			if tt.reply != nil {
+				fake.respond = func(start, end int64) (int, string, http.Header) { return tt.reply() }
+			}
 			site := receivableSeedSite(t, db, "rb-stat", fake.server.URL, 1)
 
 			client := service.NewChannelPushClient(site, service.ChannelPushClientOptions{Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute})
