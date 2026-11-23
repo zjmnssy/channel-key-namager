@@ -5291,6 +5291,7 @@
     "Provider user": "Пользователь-поставщик",
     "Provider users": "Пользователи-поставщики",
     "Provider-specific endpoint, account, and compatibility settings.": "Настройки endpoint, аккаунта и совместимости для конкретного провайдера.",
+    "Fetch failed, data missing": "Не удалось получить данные, данные отсутствуют",
     "Provisional data": "Предварительные данные",
     "Proxy Address": "Адрес прокси",
     "Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host": "Адрес прокси должен использовать HTTP, HTTPS, SOCKS5 или SOCKS5H и содержать допустимый узел",

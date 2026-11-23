@@ -5291,6 +5291,7 @@
     "Provider user": "プロバイダーユーザー",
     "Provider users": "プロバイダーユーザー",
     "Provider-specific endpoint, account, and compatibility settings.": "プロバイダー固有のエンドポイント、アカウント、互換性設定です。",
+    "Fetch failed, data missing": "取得に失敗しました。データがありません",
     "Provisional data": "暫定データ",
     "Proxy Address": "プロキシアドレス",
     "Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host": "プロキシアドレスは HTTP、HTTPS、SOCKS5、SOCKS5H のいずれかを使用し、有効なホストを含める必要があります",

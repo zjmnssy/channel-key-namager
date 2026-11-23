@@ -5291,6 +5291,7 @@
     "Provider user": "Người dùng nhà cung cấp",
     "Provider users": "Người dùng nhà cung cấp",
     "Provider-specific endpoint, account, and compatibility settings.": "Thiết lập endpoint, tài khoản và tương thích riêng cho nhà cung cấp.",
+    "Fetch failed, data missing": "Lấy dữ liệu thất bại, thiếu dữ liệu",
     "Provisional data": "Dữ liệu tạm thời",
     "Proxy Address": "Địa chỉ Proxy",
     "Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host": "Địa chỉ proxy phải dùng HTTP, HTTPS, SOCKS5 hoặc SOCKS5H và chứa máy chủ hợp lệ",

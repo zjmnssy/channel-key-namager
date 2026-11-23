@@ -5291,6 +5291,7 @@
     "Provider user": "提供商使用者",
     "Provider users": "提供商使用者",
     "Provider-specific endpoint, account, and compatibility settings.": "設定供應商專屬的端點、用戶和兼容性選項。",
+    "Fetch failed, data missing": "取得失敗，資料缺失",
     "Provisional data": "臨時資料",
     "Proxy Address": "代理地址",
     "Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host": "代理位址必須使用 HTTP、HTTPS、SOCKS5 或 SOCKS5H，並包含有效的主機",
