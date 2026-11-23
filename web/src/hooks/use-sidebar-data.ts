@@ -27,6 +27,7 @@ import {
   ListTodo,
   PlugZap,
   Radio,
+  ReceiptText,
   Send,
   ServerCog,
   Settings,
@@ -134,6 +135,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             url: '/channel-push',
             icon: Send,
             requiredRole: ROLE.ADMIN,
+          },
+          {
+            title: t('Receivable Bills'),
+            url: '/receivable-bills',
+            icon: ReceiptText,
+            requiredRole: ROLE.SUPER_ADMIN,
           },
           {
             title: t('Models'),
