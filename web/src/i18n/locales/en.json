@@ -2703,6 +2703,7 @@
     "Failed to enable model": "Failed to enable model",
     "Failed to enable tag channels": "Failed to enable tag channels",
     "Failed to encode Vertex AI key JSON: {{error}}": "Failed to encode Vertex AI key JSON: {{error}}",
+    "Failed to export bills": "Failed to export bills",
     "Failed to export logs": "Failed to export logs",
     "Failed to fetch channel key": "Failed to fetch channel key",
     "Failed to fetch channel. Please try again later": "Failed to fetch channel. Please try again later",

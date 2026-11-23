@@ -2703,6 +2703,7 @@
     "Failed to enable model": "モデルの有効化に失敗しました",
     "Failed to enable tag channels": "タグチャネルの有効化に失敗しました",
     "Failed to encode Vertex AI key JSON: {{error}}": "Vertex AI キーの JSON エンコードに失敗しました：{{error}}",
+    "Failed to export bills": "請求のエクスポートに失敗しました",
     "Failed to export logs": "ログのエクスポートに失敗しました",
     "Failed to fetch channel key": "チャネルキーの取得に失敗しました",
     "Failed to fetch channel. Please try again later": "チャネル情報の取得に失敗しました。後でもう一度お試しください",

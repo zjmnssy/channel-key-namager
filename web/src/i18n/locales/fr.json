@@ -2703,6 +2703,7 @@
     "Failed to enable model": "Échec de l'activation du modèle",
     "Failed to enable tag channels": "Échec de l'activation des canaux de tags",
     "Failed to encode Vertex AI key JSON: {{error}}": "Échec de l'encodage du JSON de la clé Vertex AI : {{error}}",
+    "Failed to export bills": "Échec de l'exportation des factures",
     "Failed to export logs": "Échec de l'exportation des journaux",
     "Failed to fetch channel key": "Échec de la récupération de la clé du canal",
     "Failed to fetch channel. Please try again later": "Échec de la récupération du canal. Veuillez réessayer plus tard",

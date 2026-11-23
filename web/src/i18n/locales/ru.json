@@ -2703,6 +2703,7 @@
     "Failed to enable model": "Не удалось включить модель",
     "Failed to enable tag channels": "Не удалось включить каналы тегов",
     "Failed to encode Vertex AI key JSON: {{error}}": "Не удалось закодировать JSON ключа Vertex AI: {{error}}",
+    "Failed to export bills": "Не удалось экспортировать счета",
     "Failed to export logs": "Не удалось экспортировать журналы",
     "Failed to fetch channel key": "Не удалось получить ключ канала",
     "Failed to fetch channel. Please try again later": "Не удалось получить канал. Попробуйте позже",

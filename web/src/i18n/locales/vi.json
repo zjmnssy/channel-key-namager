@@ -2703,6 +2703,7 @@
     "Failed to enable model": "Không thể kích hoạt mô hình",
     "Failed to enable tag channels": "Không thể kích hoạt kênh thẻ",
     "Failed to encode Vertex AI key JSON: {{error}}": "Không thể mã hóa JSON khóa Vertex AI: {{error}}",
+    "Failed to export bills": "Xuất hóa đơn thất bại",
     "Failed to export logs": "Không xuất được nhật ký",
     "Failed to fetch channel key": "Không thể lấy khóa kênh",
     "Failed to fetch channel. Please try again later": "Không thể lấy thông tin kênh. Vui lòng thử lại sau",

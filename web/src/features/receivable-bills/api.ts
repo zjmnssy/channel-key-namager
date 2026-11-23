@@ -71,11 +71,17 @@ export async function exportReceivableBills(
     },
     responseType: 'blob',
     disableDuplicate: true,
+    // Only silences the session-expired toast; the caller reports failures.
     skipErrorHandler: true,
-    skipBusinessError: true,
   })
   if (res.data.type.includes('json')) {
-    throw createServerError(JSON.parse(await res.data.text()))
+    let body: unknown
+    try {
+      body = JSON.parse(await res.data.text())
+    } catch {
+      throw new Error(i18n.t('Failed to export bills'))
+    }
+    throw createServerError(body)
   }
   return res.data
 }

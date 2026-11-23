@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
 
+const REVOKE_DELAY_MS = 1000
 const INVALID_FILE_NAME_CHARS = /[/\\:*?"<>|]/g
 
 function siteLabel(siteNames: string[], t: TFunction): string {
@@ -40,6 +41,10 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   const anchor = document.createElement('a')
   anchor.href = url
   anchor.download = fileName
+  // Some browsers only start the download for an anchor that is in the page,
+  // and may read the object URL after click() returns.
+  document.body.appendChild(anchor)
   anchor.click()
-  URL.revokeObjectURL(url)
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS)
 }

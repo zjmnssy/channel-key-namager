@@ -17,9 +17,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { receivableBillFileName } from '../export'
+import { downloadBlob, receivableBillFileName } from '../export'
 
 const t = ((key: string) => key) as unknown as TFunction
 
@@ -46,5 +46,33 @@ describe('receivableBillFileName', () => {
     expect(receivableBillFileName(['A', 'B'], 20261101, 20261123, t)).toBe(
       'Multiple Sites-Receivable Bills-20261101-20261123.xlsx'
     )
+  })
+})
+
+describe('downloadBlob', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('clicks an attached anchor and revokes the URL only after a delay', () => {
+    vi.useFakeTimers()
+    const createObjectURL = vi.fn(() => 'blob:bills')
+    const revokeObjectURL = vi.fn()
+    Object.assign(URL, { createObjectURL, revokeObjectURL })
+    const attachedOnClick: boolean[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      attachedOnClick.push(document.body.contains(this))
+    })
+
+    downloadBlob(new Blob(['x']), 'a.xlsx')
+
+    expect(attachedOnClick).toEqual([true])
+    expect(document.body.querySelector('a[download]')).toBeNull()
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+    vi.runAllTimers()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:bills')
   })
 })

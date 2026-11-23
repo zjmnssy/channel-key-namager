@@ -2703,6 +2703,7 @@
     "Failed to enable model": "啟用模型失敗",
     "Failed to enable tag channels": "啟用標籤渠道失敗",
     "Failed to encode Vertex AI key JSON: {{error}}": "Vertex AI 金鑰 JSON 編碼失敗：{{error}}",
+    "Failed to export bills": "匯出帳單失敗",
     "Failed to export logs": "匯出日誌失敗",
     "Failed to fetch channel key": "獲取渠道金鑰失敗",
     "Failed to fetch channel. Please try again later": "取得渠道資訊失敗，請稍後重試",
