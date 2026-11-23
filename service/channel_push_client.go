@@ -33,7 +33,7 @@ const (
 
 type ChannelPushClientOptions struct {
 	MaxRetries    int
-	Pace          time.Duration                                    // minimum gap between two requests to the same site
+	Pace          time.Duration                                    // minimum gap between two requests to the same host
 	Timeout       time.Duration                                    // timeout of a single request
 	MaxRetryAfter time.Duration                                    // longest wait after a 429, whatever Retry-After says
 	Sleep         func(ctx context.Context, d time.Duration) error // used for backoff and pacing
@@ -91,14 +91,15 @@ func (e *ChannelPushRemoteError) Message() *common.Message {
 	})
 }
 
-// channelPushPacer spaces the requests to one site; all clients of a site share it.
+// channelPushPacer spaces the requests to one host. Several sites can be accounts on
+// one NewAPI instance behind one gateway, so the clients of all sites on a host share it.
 type channelPushPacer struct {
 	mu   sync.Mutex
 	last time.Time
 }
 
 var (
-	channelPushPacers   = map[int]*channelPushPacer{}
+	channelPushPacers   = map[string]*channelPushPacer{}
 	channelPushPacersMu sync.Mutex
 )
 
@@ -141,11 +142,18 @@ func NewChannelPushClient(site *model.ThirdPartySite, options ChannelPushClientO
 	}
 	options.MaxRetries = max(options.MaxRetries, 0)
 
+	// A saved base URL always has a host; the whole URL keys a site that somehow lacks one.
+	// Host names are case-insensitive, so the key is lowercased.
+	host := site.BaseURL
+	if parsed, err := url.Parse(site.BaseURL); err == nil && parsed.Host != "" {
+		host = parsed.Host
+	}
+	host = strings.ToLower(host)
 	channelPushPacersMu.Lock()
-	pacer := channelPushPacers[site.Id]
+	pacer := channelPushPacers[host]
 	if pacer == nil {
 		pacer = &channelPushPacer{}
-		channelPushPacers[site.Id] = pacer
+		channelPushPacers[host] = pacer
 	}
 	channelPushPacersMu.Unlock()
 
@@ -162,7 +170,7 @@ func NewChannelPushClient(site *model.ThirdPartySite, options ChannelPushClientO
 	}
 }
 
-// pace waits until the minimum gap since the previous request to this site has passed.
+// pace waits until the minimum gap since the previous request to this host has passed.
 // The lock is held while waiting so concurrent callers queue up one by one.
 func (c *ChannelPushClient) pace(ctx context.Context) error {
 	if c.options.Pace <= 0 {
@@ -249,6 +257,11 @@ func (c *ChannelPushClient) attempt(ctx context.Context, method string, path str
 			retryAfter = min(retryAfter, c.options.MaxRetryAfter)
 		}
 		return nil, retryAfter, &ChannelPushRemoteError{StatusCode: status, Detail: httpDetail, Retryable: true}
+	case status == http.StatusForbidden && (parseErr != nil || envelope.Message == ""):
+		// The site's own 403 carries its message and means missing permission. A 403
+		// without one comes from a gateway or firewall in front of the site, which
+		// blocks a client for a while after too many requests, so it is retried.
+		return nil, 0, &ChannelPushRemoteError{StatusCode: status, Detail: httpDetail, Retryable: true}
 	default:
 		detail := httpDetail
 		if status >= 400 && parseErr == nil && envelope.Message != "" {

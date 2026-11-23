@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -498,7 +499,9 @@ func TestChannelPushClientRetryClassification(t *testing.T) {
 		retryable bool
 	}{
 		{"401", fakeResponse{status: 401, body: `{"success":false,"message":"no auth"}`}, 1, true, "no auth", false},
-		{"403", fakeResponse{status: 403, body: `{"success":false,"message":"forbidden"}`}, 1, true, "forbidden", false},
+		{"403 from the site", fakeResponse{status: 403, body: `{"success":false,"message":"forbidden"}`}, 1, true, "forbidden", false},
+		// A gateway in front of the site answers 403 without the site's message while it blocks a client for a while.
+		{"403 from a gateway", fakeResponse{status: 403, body: "<html><center><h1>403 Forbidden</h1></center><hr><center>openresty</center></html>"}, 2, false, "", true},
 		{"404", fakeResponse{status: 404, body: `{"success":false,"message":"gone"}`}, 1, true, "gone", false},
 		{"400", fakeResponse{status: 400, body: `{"success":false,"message":"bad request"}`}, 1, true, "bad request", false},
 		{"302", fakeResponse{status: 302, header: map[string]string{"Location": "/elsewhere"}}, 1, true, "HTTP 302", false},
@@ -712,30 +715,59 @@ func TestChannelPushClientCreateReturnsID(t *testing.T) {
 	assert.Equal(t, 0, id)
 }
 
-func TestChannelPushClientPacesPerSite(t *testing.T) {
+// Several sites can be accounts on one NewAPI instance behind one gateway, so the
+// gap between requests is kept per host rather than per site.
+func TestChannelPushClientPacesPerHost(t *testing.T) {
 	fake := newFakeNewAPISite(t)
 	fake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
 	recorder := &fakeSleepRecorder{}
 	options := channelPushTestOptions(recorder)
 	options.Pace = time.Second
 	ctx := context.Background()
+	assertPaced := func(t *testing.T, waits []time.Duration, count int) {
+		t.Helper()
+		require.Len(t, waits, count)
+		for _, wait := range waits {
+			assert.Greater(t, wait, time.Duration(0))
+			assert.LessOrEqual(t, wait, time.Second)
+		}
+	}
 
 	client := service.NewChannelPushClient(channelPushTestSite(fake, 1801), options)
 	for range 3 {
 		require.NoError(t, client.SetStatus(ctx, 5, 1))
 	}
-	waits := recorder.recorded()
-	require.Len(t, waits, 2)
-	for _, wait := range waits {
-		assert.Greater(t, wait, time.Duration(0))
-		assert.LessOrEqual(t, wait, time.Second)
-	}
+	assertPaced(t, recorder.recorded(), 2)
 
-	otherRecorder := &fakeSleepRecorder{}
-	options.Sleep = otherRecorder.sleep
-	other := service.NewChannelPushClient(channelPushTestSite(fake, 1802), options)
-	require.NoError(t, other.SetStatus(ctx, 5, 1))
-	assert.Empty(t, otherRecorder.recorded())
+	sameHostRecorder := &fakeSleepRecorder{}
+	options.Sleep = sameHostRecorder.sleep
+	sameHost := service.NewChannelPushClient(channelPushTestSite(fake, 1802), options)
+	require.NoError(t, sameHost.SetStatus(ctx, 5, 1))
+	assertPaced(t, sameHostRecorder.recorded(), 1)
+
+	otherFake := newFakeNewAPISite(t)
+	otherFake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+	otherHostRecorder := &fakeSleepRecorder{}
+	options.Sleep = otherHostRecorder.sleep
+	otherHost := service.NewChannelPushClient(channelPushTestSite(otherFake, 1803), options)
+	require.NoError(t, otherHost.SetStatus(ctx, 5, 1))
+	assert.Empty(t, otherHostRecorder.recorded())
+
+	// Host names are case-insensitive: two sites that spell the host differently still share the gap.
+	caseFake := newFakeNewAPISite(t)
+	caseFake.addChannel(fakeRemoteChannel{ID: 5, Status: 1})
+	parsed, err := url.Parse(caseFake.server.URL)
+	require.NoError(t, err)
+	lowerCase := &model.ThirdPartySite{Id: 1804, BaseURL: "http://localhost:" + parsed.Port(), RemoteUserID: 7, ApiKey: "remote-access-token"}
+	upperCase := &model.ThirdPartySite{Id: 1805, BaseURL: "http://LOCALHOST:" + parsed.Port(), RemoteUserID: 7, ApiKey: "remote-access-token"}
+	caseRecorder := &fakeSleepRecorder{}
+	options.Sleep = caseRecorder.sleep
+	options.MaxRetries = 0 // a failed request must not add backoff waits to the recorder
+	// Only the pacing is under test; whether localhost resolves to the fake server does not matter here.
+	_ = service.NewChannelPushClient(lowerCase, options).SetStatus(ctx, 5, 1)
+	assert.Empty(t, caseRecorder.recorded())
+	_ = service.NewChannelPushClient(upperCase, options).SetStatus(ctx, 5, 1)
+	assertPaced(t, caseRecorder.recorded(), 1)
 }
 
 func setupChannelPushTest(t *testing.T) *gorm.DB {
