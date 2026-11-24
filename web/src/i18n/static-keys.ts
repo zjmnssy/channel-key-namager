@@ -1002,4 +1002,11 @@ export const STATIC_I18N_KEYS = [
   "The site's channel list could not be read completely: {{detail}}",
   'The local channel could not be read: {{detail}}',
   'The local channel has no key',
+  // Payable bill pull site statuses and the site progress errors and notes.
+  'Waiting',
+  'Failed (replaced by a new task)',
+  "Replaced by the next day's pull task",
+  'Site channel list exceeds the page limit',
+  'Site reported {{total}} channels but {{count}} were pulled',
+  'Site returned an invalid channel list',
 ] as const

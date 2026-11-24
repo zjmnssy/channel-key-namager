@@ -432,6 +432,7 @@ describe('Admin group visibility by role', () => {
       'Third-Party Sites',
       'Channel Push',
       'Receivable Bills',
+      'Payable Bills',
       'Models',
       'Users',
       'System Info',

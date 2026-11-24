@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   beijingToday,
+  beijingYesterday,
   billDateToLocalDate,
   formatBillDate,
   localDateToBillDate,
@@ -30,6 +31,11 @@ describe('bill-date', () => {
   it('beijingToday rolls to the next day at 16:00 UTC', () => {
     expect(beijingToday(new Date('2026-11-22T16:30:00Z'))).toBe(20261123)
     expect(beijingToday(new Date('2026-11-22T15:59:59Z'))).toBe(20261122)
+  })
+
+  it('beijingYesterday rolls back across a month boundary', () => {
+    // 2026-12-01 00:30 in Beijing.
+    expect(beijingYesterday(new Date('2026-11-30T16:30:00Z'))).toBe(20261130)
   })
 
   it('monthStart returns the first day of the month', () => {
