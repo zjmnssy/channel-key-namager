@@ -496,6 +496,7 @@ func TestPayableBillScanCreatesTaskAt0010(t *testing.T) {
 	assert.Equal(t, int64(1795363800), task.FinishedTime)
 	pull := payablePullOf(t, db, 20261122, site.Id)
 	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Equal(t, 2, pull.NextPage) // 只拉了 1 页
 	assert.Zero(t, pull.ChannelCount)
 	assert.Equal(t, int64(1795363800), pull.FinishedTime)
 	assert.Zero(t, pull.LeaseUntil)
@@ -546,6 +547,7 @@ func TestPayableBillPullResumesFromFailedPage(t *testing.T) {
 	assert.Equal(t, []int{2, 3}, payableScan(fake, now+60))
 	pull = payablePullOf(t, db, 20261122, site.Id)
 	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Equal(t, 4, pull.NextPage) // 共拉了 3 页
 	assert.Equal(t, 250, pull.ChannelCount)
 	assert.Zero(t, pull.Attempts)
 	assert.Zero(t, pull.NextRetryAt)
