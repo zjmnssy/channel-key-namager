@@ -129,7 +129,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		common.RedisEnabled, common.SessionSecret, common.IsMasterNode = previousRedis, previousSecret, wasMaster
 		assert.NoError(t, sqlDB.Close())
 	})
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.PayablePullTask{}, &model.PayablePullSite{}, &model.PayableChannelUsage{}, &model.PayableProviderOverride{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	require.NoError(t, authz.Init(db))
 	require.NoError(t, i18n.Init())
 	sessions := map[int]string{}
