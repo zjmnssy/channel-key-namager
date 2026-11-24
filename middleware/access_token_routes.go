@@ -265,6 +265,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/payable_bill/tasks/:id/sites":     accessTokenSessionRule,
 	"GET /api/payable_bill/usages":              accessTokenSessionRule,
 	"GET /api/payable_bill/providers":           accessTokenSessionRule,
+	"GET /api/payable_bill/usages/export":       accessTokenSessionRule,
+	"GET /api/payable_bill/providers/export":    accessTokenSessionRule,
 	"GET /api/payable_bill/options":             accessTokenSessionRule,
 	"PUT /api/payable_bill/usages/:id/provider": accessTokenSessionRule,
 

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"net/http"
@@ -13,11 +14,13 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
 )
 
@@ -1396,4 +1399,105 @@ func TestPayableBillSetProvider(t *testing.T) {
 	assert.False(t, receivableReplyOf(t, setProvider("0", `{"provider_id":1}`)).Success)
 	assert.False(t, receivableReplyOf(t, setProvider(rowID, `{"provider_id":-1}`)).Success)
 	assert.False(t, receivableReplyOf(t, setProvider(rowID, `not json`)).Success)
+}
+
+func TestPayableBillExport(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupPayableBillTest(t)
+	site := receivableSeedSite(t, db, "px-a", "https://px-a.example.com", 1)
+	oldTask := payableSeedTask(t, db, 20261121, model.PayableTaskPartialFailed)
+	oldPull := payableSeedPull(t, db, oldTask, site.Id, model.PayablePullSuperseded)
+	task := payableSeedTask(t, db, 20261122, model.PayableTaskSuccess)
+	pull := payableSeedPull(t, db, task, site.Id, model.PayablePullSuccess)
+	d08 := payablePtr(0.8)
+	syncedAt := time.Date(2026, 11, 23, 1, 0, 5, 0, model.ReceivableBillLocation).Unix()
+
+	first := payableSeedUsage(t, db, pull, 1, 1000000, nil, 7, d08)
+	require.NoError(t, db.Model(first).Updates(map[string]any{"delta_flag": model.PayableDeltaFirstSync,
+		"provider_source": model.PayableProviderManual, "synced_at": syncedAt, "remote_channel_name": "first",
+		"site_name": site.Name, "site_base_url": site.BaseURL}).Error)
+	normal := payableSeedUsage(t, db, pull, 2, 1000000, payablePtr(int64(60000)), 0, nil)
+	require.NoError(t, db.Model(normal).Updates(map[string]any{"delta_flag": model.PayableDeltaNormal,
+		"provider_source": model.PayableProviderUnknown}).Error)
+	payableSeedUsage(t, db, oldPull, 3, 1000, payablePtr(int64(1000)), 7, d08)
+	// Provider bills: 8 mixed discounts, 9 missing discount, 10 mixed and missing.
+	half := payablePtr(int64(500000))
+	payableSeedUsage(t, db, pull, 4, 0, half, 8, d08)
+	payableSeedUsage(t, db, pull, 5, 0, half, 8, payablePtr(0.9))
+	payableSeedUsage(t, db, pull, 6, 0, half, 9, nil)
+	payableSeedUsage(t, db, pull, 7, 0, half, 10, d08)
+	payableSeedUsage(t, db, pull, 8, 0, half, 10, nil)
+	payableSeedUsage(t, db, pull, 10, 0, half, 10, payablePtr(0.9))
+
+	export := func(handler gin.HandlerFunc, path, query, language, filename string) (*excelize.File, [][]string) {
+		t.Helper()
+		header := http.Header{}
+		header.Set("Accept-Language", language)
+		response := receivableRequest(t, http.MethodGet, path+"?"+query, header, nil, handler)
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", response.Header().Get("Content-Type"))
+		assert.Equal(t, `attachment; filename="`+filename+`"`, response.Header().Get("Content-Disposition"))
+		file, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = file.Close() })
+		rows, err := file.GetRows(file.GetSheetName(0), excelize.Options{RawCellValue: true})
+		require.NoError(t, err)
+		return file, rows
+	}
+
+	file, rows := export(ExportPayableUsages, "/api/payable_bill/usages/export", "start_date=20261121&end_date=20261122&site_ids="+strconv.Itoa(site.Id)+"&provider_ids=7,0", "zh-CN", "payable-channel-usages.xlsx")
+	assert.Equal(t, []string{"任务ID", "账单日期", "站点ID", "站点名称", "站点URL", "渠道名称", "当日金额(折前)($)", "累计金额($)",
+		"增量说明", "提供商", "提供商来源", "同步时间", "计入账单"}, rows[0])
+	require.Len(t, rows, 4)
+	byChannel := map[string][]string{}
+	for _, row := range rows[1:] {
+		byChannel[row[5]] = row
+	}
+	firstRow := byChannel["first"]
+	require.NotNil(t, firstRow)
+	assert.Equal(t, []string{strconv.Itoa(task.Id), "2026-11-22", strconv.Itoa(site.Id), site.Name, site.BaseURL, "first", "", "2",
+		"首次同步，无基线", "p7", "手动", "2026-11-23 01:00:05", "是"}, firstRow)
+	for _, row := range rows[1:] {
+		if row[5] == "first" {
+			continue
+		}
+		if row[0] == strconv.Itoa(oldTask.Id) {
+			assert.Equal(t, "否", row[12])
+			continue
+		}
+		assert.Equal(t, "0.12", row[6])
+		assert.Equal(t, "", row[8])
+		assert.Equal(t, "未知提供商", row[9])
+		assert.Equal(t, "未知", row[10])
+	}
+	sheet := file.GetSheetName(0)
+	for _, cell := range []string{"H2", "G3"} {
+		styleID, err := file.GetCellStyle(sheet, cell)
+		require.NoError(t, err)
+		style, err := file.GetStyle(styleID)
+		require.NoError(t, err)
+		require.NotNil(t, style.CustomNumFmt, cell)
+		assert.Equal(t, "0.000000", *style.CustomNumFmt)
+	}
+
+	payableSeedUsage(t, db, pull, 9, 0, payablePtr(int64(1000000)), 7, d08)
+	_, rows = export(ExportPayableProviderBills, "/api/payable_bill/providers/export", "start_date=20261122&end_date=20261122", "en", "payable-bills.xlsx")
+	assert.Equal(t, []string{"Bill Date", "Provider", "Amount Before Discount ($)", "Discount (Payable)", "Payable Amount ($)"}, rows[0])
+	byProvider := map[string][]string{}
+	for _, row := range rows[1:] {
+		byProvider[row[1]] = row
+	}
+	assert.Equal(t, []string{"2026-11-22", "p7", "2", "0.8", "1.6"}, byProvider["p7"])
+	assert.Equal(t, []string{"2026-11-22", "Unknown provider", "0.12", "Not set"}, byProvider["Unknown provider"])
+	assert.Equal(t, []string{"2026-11-22", "p8", "2", "Multiple", "1.7"}, byProvider["p8"])
+	assert.Equal(t, []string{"2026-11-22", "p9", "1", "Not set"}, byProvider["p9"])
+	assert.Equal(t, "Multiple", byProvider["p10"][3])
+
+	_, rows = export(ExportPayableProviderBills, "/api/payable_bill/providers/export", "start_date=20261122&end_date=20261122", "zh-CN", "payable-bills.xlsx")
+	assert.Contains(t, []string{"未知提供商"}, rows[1][1])
+
+	for _, handler := range []gin.HandlerFunc{ExportPayableUsages, ExportPayableProviderBills} {
+		reply := receivableReplyOf(t, receivableRequest(t, http.MethodGet, "/export?start_date=x&end_date=20261122", nil, nil, handler))
+		assert.False(t, reply.Success)
+	}
 }

@@ -185,6 +185,8 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/payable_bill/tasks/1/sites", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/usages?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/providers?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/payable_bill/usages/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/payable_bill/providers/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/options", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/payable_bill/usages/1/provider", supplierStatus: http.StatusForbidden},
 	}
@@ -219,17 +221,19 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	}
 	// Receivable and payable bills are for root users only: an administrator is refused too.
 	rootRoutes := map[string]bool{
-		"GET /api/receivable_bill/daily?start_date=20261101&end_date=20261123":        true,
-		"GET /api/receivable_bill/daily/export?start_date=20261101&end_date=20261123": true,
-		"POST /api/receivable_bill/daily/1/sync":                                      true,
-		"GET /api/receivable_bill/trend?view=day&date=20261122":                       true,
-		"GET /api/receivable_bill/sites":                                              true,
-		"GET /api/payable_bill/tasks":                                                 true,
-		"GET /api/payable_bill/tasks/1/sites":                                         true,
-		"GET /api/payable_bill/usages?start_date=20261101&end_date=20261123":          true,
-		"GET /api/payable_bill/providers?start_date=20261101&end_date=20261123":       true,
-		"GET /api/payable_bill/options":                                               true,
-		"PUT /api/payable_bill/usages/1/provider":                                     true,
+		"GET /api/receivable_bill/daily?start_date=20261101&end_date=20261123":         true,
+		"GET /api/receivable_bill/daily/export?start_date=20261101&end_date=20261123":  true,
+		"POST /api/receivable_bill/daily/1/sync":                                       true,
+		"GET /api/receivable_bill/trend?view=day&date=20261122":                        true,
+		"GET /api/receivable_bill/sites":                                               true,
+		"GET /api/payable_bill/tasks":                                                  true,
+		"GET /api/payable_bill/tasks/1/sites":                                          true,
+		"GET /api/payable_bill/usages?start_date=20261101&end_date=20261123":           true,
+		"GET /api/payable_bill/providers?start_date=20261101&end_date=20261123":        true,
+		"GET /api/payable_bill/usages/export?start_date=20261101&end_date=20261123":    true,
+		"GET /api/payable_bill/providers/export?start_date=20261101&end_date=20261123": true,
+		"GET /api/payable_bill/options":                                                true,
+		"PUT /api/payable_bill/usages/1/provider":                                      true,
 	}
 	for _, test := range tests {
 		key := test.method + " " + test.path

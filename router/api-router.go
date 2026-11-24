@@ -364,6 +364,8 @@ func SetApiRouter(router *gin.Engine) {
 			payableBillRoute.GET("/tasks/:id/sites", controller.GetPayablePullTaskSites)
 			payableBillRoute.GET("/usages", controller.GetPayableUsages)
 			payableBillRoute.GET("/providers", controller.GetPayableProviderBills)
+			payableBillRoute.GET("/usages/export", controller.ExportPayableUsages)
+			payableBillRoute.GET("/providers/export", controller.ExportPayableProviderBills)
 			payableBillRoute.GET("/options", controller.GetPayableOptions)
 			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
 		}
