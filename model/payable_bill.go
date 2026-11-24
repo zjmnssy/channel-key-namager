@@ -88,7 +88,7 @@ type PayableChannelUsage struct {
 	Id                int      `json:"id" gorm:"primaryKey"`
 	TaskId            int      `json:"task_id" gorm:"not null;index"`
 	PullSiteId        int      `json:"pull_site_id" gorm:"not null;uniqueIndex:idx_payable_usages_pull_channel,priority:1"`
-	BillDate          int      `json:"bill_date" gorm:"not null;index:idx_payable_usages_bill_date"`
+	BillDate          int      `json:"bill_date" gorm:"not null;index:idx_payable_usages_bill_date;index:idx_payable_usages_site_channel,priority:3"`
 	SiteId            int      `json:"site_id" gorm:"not null;index:idx_payable_usages_site_channel,priority:1"`
 	SiteName          string   `json:"site_name" gorm:"size:128"`
 	SiteBaseURL       string   `json:"site_base_url" gorm:"column:site_base_url;size:1024"`

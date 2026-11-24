@@ -1,6 +1,10 @@
 package model
 
-import "github.com/QuantumNous/new-api/common"
+import (
+	"maps"
+
+	"github.com/QuantumNous/new-api/common"
+)
 
 // PayableRemoteChannel 是站点上待确定提供商的一个渠道。
 type PayableRemoteChannel struct {
@@ -74,21 +78,6 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 		}
 	}
 
-	// 历史：每个渠道取 bill_date 最近一行 provider_id > 0 的明细，同一渠道按账单日期从新到旧，第一行即最近。
-	var history []PayableChannelUsage
-	if err := DB.Select("remote_channel_id", "provider_id", "bill_date").
-		Where("site_id = ? AND remote_channel_id IN ? AND bill_date < ? AND provider_id > 0", siteID, remoteIDs, billDate).
-		Order("bill_date DESC, id DESC").Find(&history).Error; err != nil {
-		return nil, err
-	}
-	inherited := make(map[int]int, len(history))
-	for _, row := range history {
-		if _, ok := inherited[row.RemoteChannelId]; !ok {
-			inherited[row.RemoteChannelId] = row.ProviderId
-			candidates[row.ProviderId] = true
-		}
-	}
-
 	candidateIDs := make([]int, 0, len(candidates))
 	for id := range candidates {
 		candidateIDs = append(candidateIDs, id)
@@ -96,6 +85,45 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 	suppliers, err := PayableSuppliers(candidateIDs)
 	if err != nil {
 		return nil, err
+	}
+
+	// 历史只查前两步没确定的渠道，且每个渠道只取 bill_date 更早、provider_id > 0 的最近一天的行
+	// （同一天有多行时取 id 最大的）；该用户已不是供应商时结果为未知，不再往更早找。
+	unresolved := make([]int, 0, len(channels))
+	for _, channel := range channels {
+		if id, ok := manual[channel.ID]; ok && hasSupplier(suppliers, id) {
+			continue
+		}
+		if id, ok := creators[channel.LocalChannelID]; ok && channel.LocalChannelID > 0 && hasSupplier(suppliers, id) {
+			continue
+		}
+		unresolved = append(unresolved, channel.ID)
+	}
+	inherited := map[int]int{}
+	if len(unresolved) > 0 {
+		var history []PayableChannelUsage
+		latestEarlier := DB.Model(&PayableChannelUsage{}).Table("payable_channel_usages AS earlier").Select("MAX(earlier.bill_date)").
+			Where("earlier.site_id = ? AND earlier.remote_channel_id = payable_channel_usages.remote_channel_id AND earlier.bill_date < ? AND earlier.provider_id > 0", siteID, billDate)
+		if err := DB.Select("id", "remote_channel_id", "provider_id").
+			Where("site_id = ? AND remote_channel_id IN ? AND provider_id > 0", siteID, unresolved).
+			Where("bill_date = (?)", latestEarlier).
+			Order("id DESC").Find(&history).Error; err != nil {
+			return nil, err
+		}
+		historyIDs := []int{}
+		for _, row := range history {
+			if _, ok := inherited[row.RemoteChannelId]; !ok {
+				inherited[row.RemoteChannelId] = row.ProviderId
+				if !hasSupplier(suppliers, row.ProviderId) {
+					historyIDs = append(historyIDs, row.ProviderId)
+				}
+			}
+		}
+		more, err := PayableSuppliers(historyIDs)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(suppliers, more)
 	}
 
 	resolved := make(map[int]PayableProvider, len(channels))

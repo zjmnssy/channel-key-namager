@@ -832,6 +832,9 @@ func TestPayableBillProviderResolution(t *testing.T) {
 	require.NoError(t, db.Create(&[]model.PayableChannelUsage{
 		{TaskId: 900, PullSiteId: 900, BillDate: 20261121, SiteId: site.Id, RemoteChannelId: 6, ProviderId: s1.Id},
 		{TaskId: 900, PullSiteId: 900, BillDate: 20261121, SiteId: site.Id, RemoteChannelId: 7, ProviderId: u3.Id},
+		// 更早的几天：r6 前一天是 s2，以最近一天（s1）为准；r7 更早一天是 s1，但最近一天的用户已不是供应商，不往更早找
+		{TaskId: 899, PullSiteId: 899, BillDate: 20261120, SiteId: site.Id, RemoteChannelId: 6, ProviderId: s2.Id},
+		{TaskId: 899, PullSiteId: 899, BillDate: 20261120, SiteId: site.Id, RemoteChannelId: 7, ProviderId: s1.Id},
 	}).Error)
 
 	const day1 = int64(1795363800) // 账单日期 20261122
