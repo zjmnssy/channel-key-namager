@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
+import { ChannelUsagesTable } from './components/channel-usages-table'
 import { PullTasksTable } from './components/pull-tasks-table'
 import { PAYABLE_BILL_QUERY_KEYS } from './constants'
 
@@ -40,10 +41,12 @@ export function PayableBills() {
   const fetching = useIsFetching({ queryKey: PAYABLE_BILL_QUERY_KEYS.all }) > 0
   const tab = route.useSearch().tab ?? 'pulls'
 
-  // The usages and provider bills tabs are filled in by later changes.
-  let content: ReactNode = <PullTasksTable />
-  if (tab !== 'pulls') {
-    content = <EmptyState title={t('Coming Soon!')} />
+  // The provider bills tab is filled in by a later change.
+  let content: ReactNode = <EmptyState title={t('Coming Soon!')} />
+  if (tab === 'pulls') {
+    content = <PullTasksTable />
+  } else if (tab === 'usages') {
+    content = <ChannelUsagesTable />
   }
 
   return (

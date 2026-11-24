@@ -33,6 +33,9 @@ export const PAYABLE_BILL_QUERY_KEYS = {
   options: ['payable-bills', 'options'],
 } as const
 
+/** The provider filter value of rows whose provider is unknown. */
+export const UNKNOWN_PROVIDER_VALUE = '0'
+
 export const PULL_TASK_STATUS_VARIANTS: Record<
   PayablePullTaskStatus,
   StatusVariant

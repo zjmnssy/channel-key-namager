@@ -1009,4 +1009,7 @@ export const STATIC_I18N_KEYS = [
   'Site channel list exceeds the page limit',
   'Site reported {{total}} channels but {{count}} were pulled',
   'Site returned an invalid channel list',
+  // Payable bill errors of setting the provider of a channel usage.
+  'Channel usage does not exist',
+  'The selected user is not a channel supplier',
 ] as const

@@ -45,6 +45,14 @@ async function renderPage(initialUrl = '/payable-bills/') {
     success: true,
     data: { items: [], total: 0, page: 1, page_size: 10 },
   })
+  vi.mocked(billApi.listPayableUsages).mockResolvedValue({
+    success: true,
+    data: { items: [], total: 0, page: 1, page_size: 10 },
+  })
+  vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
+    success: true,
+    data: { sites: [], providers: [] },
+  })
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {}, initAsync: false })
   const client = new QueryClient({
@@ -85,6 +93,8 @@ afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   vi.restoreAllMocks()
   vi.mocked(billApi.listPayablePullTasks).mockReset()
+  vi.mocked(billApi.listPayableUsages).mockReset()
+  vi.mocked(billApi.getPayableBillOptions).mockReset()
 })
 
 describe('PayableBills page', () => {
@@ -102,6 +112,15 @@ describe('PayableBills page', () => {
     await waitFor(() =>
       expect(billApi.listPayablePullTasks).toHaveBeenCalledTimes(2)
     )
+  })
+
+  it('loads the channel usage details on the usages tab', async () => {
+    await renderPage('/payable-bills/?tab=usages')
+
+    await waitFor(() =>
+      expect(billApi.listPayableUsages).toHaveBeenCalledTimes(1)
+    )
+    expect(billApi.listPayablePullTasks).not.toHaveBeenCalled()
   })
 
   it('starts the next tab from its first page and keeps the shared filters', async () => {
