@@ -21,7 +21,8 @@ const (
 )
 
 // RunPayableBillScan 在 now 扫描一次，所有到期的站点进度处理完后返回。
-// 先把已删除站点未完成的进度改为失败；北京时间过了当天 00:10 时创建账单日期为昨天的拉取任务（已有则跳过）；
+// 先把已删除站点未完成的进度改为失败，并补正进度都已结束却仍为 running 的任务；
+// 北京时间过了当天 00:10 时创建账单日期为昨天的拉取任务（已有则跳过）；
 // 再给每个到期的进度一个回合，最多 payableBillMaxConcurrentSites 个站点同时进行。
 func RunPayableBillScan(ctx context.Context, now time.Time) {
 	defer func() {
@@ -32,6 +33,9 @@ func RunPayableBillScan(ctx context.Context, now time.Time) {
 
 	if err := model.FailPayablePullsOfDeletedSites(model.DB, now.Unix()); err != nil {
 		common.SysError(common.LogText("payable bill scan could not fail the pulls of deleted sites: %v", err))
+	}
+	if err := model.RefreshSettledPayableTasks(now.Unix()); err != nil {
+		common.SysError(common.LogText("payable bill scan could not refresh the settled tasks: %v", err))
 	}
 	today := receivableBeijingDay(now)
 	if !now.Before(today.Add(payableBillPullTime)) {

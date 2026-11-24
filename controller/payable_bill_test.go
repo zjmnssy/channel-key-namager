@@ -142,11 +142,12 @@ func TestPayablePullSiteHooks(t *testing.T) {
 	require.NoError(t, db.Create(oldTask).Error)
 	require.NoError(t, db.Create(task).Error)
 	for _, row := range []*model.PayablePullSite{
-		{TaskId: oldTask.Id, SiteId: siteA.Id, BillDate: 20261122, Status: model.PayablePullFailed, NextPage: 3, Pass: 2, Attempts: 4, LastError: refused},
+		{TaskId: oldTask.Id, SiteId: siteA.Id, BillDate: 20261122, Status: model.PayablePullFailed, NextPage: 3, Pass: 2, Attempts: 4,
+			LastError: refused, FinishedTime: 50},
 		{TaskId: task.Id, SiteId: siteA.Id, BillDate: 20261123, SiteName: siteA.Name, SiteBaseURL: siteA.BaseURL,
-			Status: model.PayablePullFailed, NextPage: 4, Pass: 2, ReportedTotal: 250, ChannelCount: 2, Attempts: 4, LastError: refused},
+			Status: model.PayablePullFailed, NextPage: 4, Pass: 2, ReportedTotal: 250, ChannelCount: 2, Attempts: 4, LastError: refused, FinishedTime: 90},
 		{TaskId: task.Id, SiteId: siteB.Id, BillDate: 20261123, SiteName: siteB.Name, SiteBaseURL: siteB.BaseURL,
-			Status: model.PayablePullFailed, NextPage: 3, Pass: 1, Attempts: 4, NextRetryAt: 999, LastError: refused},
+			Status: model.PayablePullFailed, NextPage: 3, Pass: 1, Attempts: 4, NextRetryAt: 999, LastError: refused, FinishedTime: 90},
 		{TaskId: task.Id, SiteId: siteC.Id, BillDate: 20261123, SiteName: siteC.Name, SiteBaseURL: siteC.BaseURL,
 			Status: model.PayablePullSuperseded, NextPage: 2, Pass: 1, Attempts: 1},
 	} {
@@ -171,6 +172,7 @@ func TestPayablePullSiteHooks(t *testing.T) {
 	assert.Equal(t, model.PayablePullRetrying, pullB.Status)
 	assert.Zero(t, pullB.Attempts)
 	assert.Zero(t, pullB.NextRetryAt)
+	assert.Zero(t, pullB.FinishedTime) // 重开的进度不再算已结束
 	assert.Equal(t, 3, pullB.NextPage)
 	assert.Equal(t, siteB.Name, pullB.SiteName) // 地址未变，快照不动
 	latest := payableTaskOf(t, db, 20261123)
@@ -186,6 +188,7 @@ func TestPayablePullSiteHooks(t *testing.T) {
 	assert.Zero(t, pullA.ChannelCount)
 	assert.Zero(t, pullA.ReportedTotal)
 	assert.Zero(t, pullA.Attempts)
+	assert.Zero(t, pullA.FinishedTime)
 	assert.Empty(t, pullA.LastError)
 	assert.Equal(t, "pb-hook-a-renamed", pullA.SiteName)
 	assert.Equal(t, "https://pb-hook-a-new.example.com", pullA.SiteBaseURL)
@@ -199,6 +202,7 @@ func TestPayablePullSiteHooks(t *testing.T) {
 	oldPull := payablePullOf(t, db, 20261122, siteA.Id)
 	assert.Equal(t, model.PayablePullFailed, oldPull.Status)
 	assert.Equal(t, 3, oldPull.NextPage)
+	assert.Equal(t, int64(50), oldPull.FinishedTime)
 	editSite(siteC, "pb-hook-c-renamed", "https://pb-hook-c-new.example.com")
 	pullC := payablePullOf(t, db, 20261123, siteC.Id)
 	assert.Equal(t, model.PayablePullSuperseded, pullC.Status)
@@ -569,6 +573,45 @@ func TestPayableBillNonRetryableFailureStops(t *testing.T) {
 	// 失败的进度不再请求
 	assert.Empty(t, payableScan(fake, now+3600))
 	assert.Equal(t, model.PayablePullFailed, payablePullOf(t, db, 20261122, site.Id).Status)
+}
+
+func TestPayableBillScanRefreshesSettledTasks(t *testing.T) {
+	db := setupPayableBillTest(t)
+	sites := []*model.ThirdPartySite{
+		receivableSeedSite(t, db, "pb-settled-a", "https://pb-settled-a.example.com", 1),
+		receivableSeedSite(t, db, "pb-settled-b", "https://pb-settled-b.example.com", 1),
+	}
+	const now = int64(1795363500) // 北京 2026-11-23 00:05：还没到建任务的时刻
+	// 三个任务都停在 running。前两个的进度已全部结束：并发刷新任务时一方读到旧快照就会留下这种状态，这里直接写库构造。
+	// 第三个仍有进度在等重试，还没到重试时间，本次扫描不请求。
+	for billDate, statuses := range map[int][]string{
+		20261119: {model.PayablePullSuccess, model.PayablePullFailed},
+		20261120: {model.PayablePullSuccess, model.PayablePullSuccess},
+		20261121: {model.PayablePullSuccess, model.PayablePullRetrying},
+	} {
+		task := &model.PayablePullTask{BillDate: billDate, SiteTotal: len(sites), Status: model.PayableTaskRunning, StartedTime: now - 3600}
+		require.NoError(t, db.Create(task).Error)
+		for i, status := range statuses {
+			pull := &model.PayablePullSite{TaskId: task.Id, SiteId: sites[i].Id, BillDate: billDate, Status: status, NextPage: 2, Pass: 1}
+			if status == model.PayablePullRetrying {
+				pull.NextRetryAt = now + 60
+			}
+			require.NoError(t, db.Create(pull).Error)
+		}
+	}
+
+	service.RunPayableBillScan(context.Background(), time.Unix(now, 0).UTC())
+
+	// 进度都已结束的任务按进度状态补正，完成时间记为这次扫描的时刻
+	for billDate, status := range map[int]string{20261119: model.PayableTaskPartialFailed, 20261120: model.PayableTaskSuccess} {
+		task := payableTaskOf(t, db, billDate)
+		assert.Equal(t, status, task.Status, billDate)
+		assert.Equal(t, now, task.FinishedTime, billDate)
+	}
+	// 还有进度在等重试的任务保持 running
+	waiting := payableTaskOf(t, db, 20261121)
+	assert.Equal(t, model.PayableTaskRunning, waiting.Status)
+	assert.Zero(t, waiting.FinishedTime)
 }
 
 func TestPayableBillRecheckMissingChannels(t *testing.T) {

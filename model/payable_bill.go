@@ -262,6 +262,26 @@ func FailPayablePullsOfDeletedSites(tx *gorm.DB, now int64) error {
 	return nil
 }
 
+// RefreshSettledPayableTasks 重算仍为 running、但已没有 pending/retrying 进度的任务，每次扫描调用。
+// 正常情况下没有这样的任务。MySQL 可重复读下，删除站点的事务刷新任务时用的是事务开头建立的快照，
+// 恰好另一站点的进度同时结束时，双方都会算出 running，之后再没有刷新，任务就停在那里，这里在下一次扫描补正。
+// 每个任务单独一个事务：RefreshPayableTask 先锁任务行再读进度状态，读到的是加锁之后的数据。
+func RefreshSettledPayableTasks(now int64) error {
+	unfinishedTaskIDs := DB.Model(&PayablePullSite{}).Select("task_id").Where("status IN ?", payablePullUnfinished)
+	var taskIDs []int
+	err := DB.Model(&PayablePullTask{}).Where("status = ? AND id NOT IN (?)", PayableTaskRunning, unfinishedTaskIDs).
+		Pluck("id", &taskIDs).Error
+	if err != nil {
+		return err
+	}
+	for _, taskID := range taskIDs {
+		if err := DB.Transaction(func(tx *gorm.DB) error { return RefreshPayableTask(tx, taskID, now) }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // reopenPayablePullsOnSiteEdit 编辑站点后重开它在最新任务里的进度行；superseded 行和更早任务的行不动。
 // 地址变化时旧地址拉到的明细作废，pending/retrying/failed 的行从第 1 页重拉；
 // 地址未变时只把 failed 的行改为重试，页码不动。
@@ -297,6 +317,7 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 			"next_retry_at":  0,
 			"last_error":     "",
 			"lease_until":    0,
+			"finished_time":  0,
 			"updated_time":   now,
 		}).Error
 		if err == nil {
@@ -307,6 +328,7 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 			"status":        PayablePullRetrying,
 			"attempts":      0,
 			"next_retry_at": 0,
+			"finished_time": 0,
 			"updated_time":  now,
 		}).Error
 	default:
