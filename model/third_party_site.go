@@ -181,6 +181,7 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 		}
 		site.Name = normalized.Name
 		site.Type = normalized.Type
+		oldBaseURL := site.BaseURL
 		site.BaseURL = normalized.BaseURL
 		site.RemoteUserID = normalized.RemoteUserID
 		site.ReceivableDiscount = normalized.ReceivableDiscount
@@ -193,7 +194,10 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 		if err := tx.Model(&site).Select(columns).Updates(&site).Error; err != nil {
 			return err
 		}
-		return retryFailedReceivableRowsOfSite(tx, id, site.UpdatedTime)
+		if err := retryFailedReceivableRowsOfSite(tx, id, site.UpdatedTime); err != nil {
+			return err
+		}
+		return reopenPayablePullsOnSiteEdit(tx, &site, oldBaseURL != site.BaseURL, site.UpdatedTime)
 	})
 	if err != nil {
 		return nil, err
@@ -216,6 +220,9 @@ func DeleteThirdPartySite(id int) error {
 		if err := tx.Model(&site).Updates(map[string]any{"api_key": "", "deleted_at": time.Now()}).Error; err != nil {
 			return err
 		}
-		return FailReceivableRowsOfDeletedSites(tx)
+		if err := FailReceivableRowsOfDeletedSites(tx); err != nil {
+			return err
+		}
+		return FailPayablePullsOfDeletedSites(tx, common.GetTimestamp())
 	})
 }

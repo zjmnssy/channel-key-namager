@@ -356,6 +356,19 @@ func SetApiRouter(router *gin.Engine) {
 			receivableBillRoute.GET("/trend", controller.GetReceivableBillTrend)
 			receivableBillRoute.GET("/sites", controller.GetReceivableBillSites)
 		}
+
+		payableBillRoute := apiRouter.Group("/payable_bill")
+		payableBillRoute.Use(middleware.RootAuth())
+		{
+			payableBillRoute.GET("/tasks", controller.GetPayablePullTasks)
+			payableBillRoute.GET("/tasks/:id/sites", controller.GetPayablePullTaskSites)
+			payableBillRoute.GET("/usages", controller.GetPayableUsages)
+			payableBillRoute.GET("/providers", controller.GetPayableProviderBills)
+			payableBillRoute.GET("/usages/export", controller.ExportPayableUsages)
+			payableBillRoute.GET("/providers/export", controller.ExportPayableProviderBills)
+			payableBillRoute.GET("/options", controller.GetPayableOptions)
+			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
+		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
 		logRoute := apiRouter.Group("/log")

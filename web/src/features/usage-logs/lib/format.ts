@@ -547,6 +547,11 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'channel_push.task_toggle': 'Enabled or disabled a channel push task',
   // Receivable bills
   'receivable_bill.sync': 'Resynced receivable bill #{{bill_id}}',
+  // Payable bills
+  'payable_bill.set_provider':
+    'Set the provider of channel usage #{{usage_id}}',
+  'payable_bill.clear_provider':
+    'Cleared the manual provider of channel usage #{{usage_id}}',
   // Prefill groups
   'prefill_group.create': 'Created a prefill group',
   'prefill_group.update': 'Updated a prefill group',
@@ -639,6 +644,13 @@ export function renderAuditContent(
     other?.audit_info?.success === false
   ) {
     return t('Failed receivable bill resync')
+  }
+  if (
+    (op.action === 'payable_bill.set_provider' ||
+      op.action === 'payable_bill.clear_provider') &&
+    other?.audit_info?.success === false
+  ) {
+    return t('Failed to set the provider of channel usage')
   }
   const template = AUDIT_TEMPLATES[op.action]
   if (!template) return null

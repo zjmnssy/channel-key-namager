@@ -38,15 +38,15 @@ func newReceivableBillView(bill *model.ReceivableBill, deleted bool) receivableB
 	return view
 }
 
-// parseReceivableSiteIDs 解析逗号分隔的 site_ids，空串返回 nil，含非正整数时返回 false。
-func parseReceivableSiteIDs(raw string) ([]int, bool) {
+// parseReceivableIDList 解析逗号分隔的 id 列表（site_ids、provider_ids），空串返回 nil，含小于 minID 的整数或非整数时返回 false。
+func parseReceivableIDList(raw string, minID int) ([]int, bool) {
 	if raw == "" {
 		return nil, true
 	}
 	var ids []int
 	for part := range strings.SplitSeq(raw, ",") {
 		id, err := strconv.Atoi(part)
-		if err != nil || id <= 0 {
+		if err != nil || id < minID {
 			return nil, false
 		}
 		ids = append(ids, id)
@@ -54,20 +54,29 @@ func parseReceivableSiteIDs(raw string) ([]int, bool) {
 	return ids, true
 }
 
-// parseReceivableBillFilter 读取列表和导出共用的筛选参数，参数不合法时已回复错误并返回 false。
-func parseReceivableBillFilter(c *gin.Context) (model.ReceivableBillFilter, bool) {
-	var filter model.ReceivableBillFilter
+// parseReceivableDateRange 读取并校验 start_date、end_date（有效的 YYYYMMDD 且 start <= end），不合法时已回复错误并返回 false。
+func parseReceivableDateRange(c *gin.Context) (startDate, endDate int, ok bool) {
 	startDate, startErr := strconv.Atoi(c.Query("start_date"))
 	endDate, endErr := strconv.Atoi(c.Query("end_date"))
 	_, startOK := model.ReceivableBillDayStart(startDate)
 	_, endOK := model.ReceivableBillDayStart(endDate)
 	if startErr != nil || endErr != nil || !startOK || !endOK || startDate > endDate {
 		common.ApiErrorT(c, "Invalid parameters")
+		return 0, 0, false
+	}
+	return startDate, endDate, true
+}
+
+// parseReceivableBillFilter 读取列表和导出共用的筛选参数，参数不合法时已回复错误并返回 false。
+func parseReceivableBillFilter(c *gin.Context) (model.ReceivableBillFilter, bool) {
+	var filter model.ReceivableBillFilter
+	startDate, endDate, ok := parseReceivableDateRange(c)
+	if !ok {
 		return filter, false
 	}
 	filter.StartDate, filter.EndDate = startDate, endDate
 
-	siteIDs, ok := parseReceivableSiteIDs(c.Query("site_ids"))
+	siteIDs, ok := parseReceivableIDList(c.Query("site_ids"), 1)
 	if !ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return filter, false
@@ -127,7 +136,7 @@ func GetReceivableBills(c *gin.Context) {
 }
 
 func GetReceivableBillTrend(c *gin.Context) {
-	siteIDs, ok := parseReceivableSiteIDs(c.Query("site_ids"))
+	siteIDs, ok := parseReceivableIDList(c.Query("site_ids"), 1)
 	if !ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return

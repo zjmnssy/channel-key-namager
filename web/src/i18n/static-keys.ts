@@ -972,6 +972,9 @@ export const STATIC_I18N_KEYS = [
   'Enabled or disabled a channel push task',
   // Receivable bill audit template.
   'Resynced receivable bill #{{bill_id}}',
+  // Payable bill audit templates.
+  'Set the provider of channel usage #{{usage_id}}',
+  'Cleared the manual provider of channel usage #{{usage_id}}',
   // Channel push API errors, action reasons and run errors.
   'Task does not exist',
   'Run does not exist',
@@ -1002,4 +1005,14 @@ export const STATIC_I18N_KEYS = [
   "The site's channel list could not be read completely: {{detail}}",
   'The local channel could not be read: {{detail}}',
   'The local channel has no key',
+  // Payable bill pull site statuses and the site progress errors and notes.
+  'Waiting',
+  'Failed (replaced by a new task)',
+  "Replaced by the next day's pull task",
+  'Site channel list exceeds the page limit',
+  'Site reported {{total}} channels but {{count}} were pulled',
+  'Site returned an invalid channel list',
+  // Payable bill errors of setting the provider of a channel usage.
+  'Channel usage does not exist',
+  'The selected user is not a channel supplier',
 ] as const

@@ -362,12 +362,15 @@ func newReceivableSyncResult(attempt ReceivableStatAttempt, attempts int, now in
 		result.Status = model.ReceivableBillStatusFailed
 		return result
 	}
-	// The n-th failure in a row waits 1, 2, 4, 8, 16, then 30 minutes, and at least
-	// as long as a 429 asked for.
-	backoff := min(time.Minute<<min(max(attempts-1, 0), 5), receivableBillMaxBackoff)
 	result.Status = model.ReceivableBillStatusRetrying
-	result.NextRetryAt = now + int64(max(backoff, attempt.RetryAfter)/time.Second)
+	result.NextRetryAt = now + int64(syncRetryDelay(attempts, attempt.RetryAfter)/time.Second)
 	return result
+}
+
+// syncRetryDelay is how long the n-th failure in a row waits: 1, 2, 4, 8, 16, then
+// 30 minutes, and at least as long as a 429 asked for.
+func syncRetryDelay(attempts int, retryAfter time.Duration) time.Duration {
+	return max(min(time.Minute<<min(max(attempts-1, 0), 5), receivableBillMaxBackoff), retryAfter)
 }
 
 // updates returns the result as the columns of an existing row. A failure leaves the

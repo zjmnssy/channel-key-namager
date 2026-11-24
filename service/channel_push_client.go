@@ -459,3 +459,65 @@ func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int
 	}
 	return ReceivableStatAttempt{Quota: *data.Quota}
 }
+
+// PayableBillClientOptions is what the payable bill pull uses to read a site.
+var PayableBillClientOptions = ChannelPushClientOptions{Pace: time.Second, Timeout: 30 * time.Second, MaxRetryAfter: 30 * time.Minute, Sleep: channelPushSleep}
+
+// PayableChannelPageAttempt is the outcome of one read of a page of a site's channel list.
+type PayableChannelPageAttempt struct {
+	Items      []ChannelPushSiteChannel // every item has ID > 0 and UsedQuota >= 0
+	Total      int
+	Failure    *common.Message // nil on success
+	Retryable  bool
+	RetryAfter time.Duration // only set after a 429, already capped by MaxRetryAfter
+}
+
+// ReadChannelPage reads one page (1-based) of the site's channel list with a single
+// request and no retry; the caller decides what to do with a failure. Pacing failures
+// and a context that ends count as retryable.
+func (c *ChannelPushClient) ReadChannelPage(ctx context.Context, page int) PayableChannelPageAttempt {
+	query := url.Values{}
+	query.Set("tag_mode", "false")
+	query.Set("id_sort", "true")
+	query.Set("p", strconv.Itoa(page))
+	query.Set("page_size", strconv.Itoa(channelPushListPageSize))
+
+	const path = "/api/channel/"
+	if err := c.pace(ctx); err != nil {
+		return PayableChannelPageAttempt{Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{"detail": truncateText(err.Error(), channelPushMaxDetailLength)}), Retryable: true}
+	}
+	envelope, retryAfter, remoteErr := c.attempt(ctx, http.MethodGet, path, query, nil)
+	if remoteErr != nil {
+		common.SysError(common.LogText("payable bill site request failed: site=%d path=%s status=%d", c.site.Id, path, remoteErr.StatusCode))
+		return PayableChannelPageAttempt{
+			Failure: common.NewMessage("Site request failed: {{detail}}", map[string]any{
+				"detail": truncateText(remoteErr.Detail, channelPushMaxDetailLength),
+			}),
+			Retryable:  remoteErr.Retryable,
+			RetryAfter: retryAfter,
+		}
+	}
+
+	invalid := PayableChannelPageAttempt{Failure: common.NewMessage("Site returned an invalid channel list")}
+	var data struct {
+		Items []struct {
+			ID        int    `json:"id"`
+			Name      string `json:"name"`
+			UsedQuota *int64 `json:"used_quota"`
+			Status    int    `json:"status"`
+			Models    string `json:"models"`
+		} `json:"items"`
+		Total *int `json:"total"`
+	}
+	if common.Unmarshal(envelope.Data, &data) != nil || data.Items == nil || data.Total == nil || *data.Total < 0 {
+		return invalid
+	}
+	items := make([]ChannelPushSiteChannel, 0, len(data.Items))
+	for _, item := range data.Items {
+		if item.ID <= 0 || item.UsedQuota == nil || *item.UsedQuota < 0 {
+			return invalid
+		}
+		items = append(items, ChannelPushSiteChannel{ID: item.ID, Name: item.Name, UsedQuota: *item.UsedQuota, Status: item.Status, Models: item.Models})
+	}
+	return PayableChannelPageAttempt{Items: items, Total: *data.Total}
+}

@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
 
 function pad(n: number, width: number): string {
   return String(n).padStart(width, '0')
@@ -30,6 +31,12 @@ export function beijingToday(now: Date = new Date()): number {
     (beijing.getUTCMonth() + 1) * 100 +
     beijing.getUTCDate()
   )
+}
+
+/** Yesterday in Beijing time as YYYYMMDD: the latest date that has a bill. */
+export function beijingYesterday(now: Date = new Date()): number {
+  // Beijing has no daylight saving time, so a day back is always 24 hours.
+  return beijingToday(new Date(now.getTime() - DAY_MS))
 }
 
 export function monthStart(date: number): number {

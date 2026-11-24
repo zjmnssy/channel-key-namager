@@ -231,3 +231,14 @@ func TestReceivableBillRoutesRequireDashboardSession(t *testing.T) {
 		assert.Equal(t, "session", rule.Kind(), key)
 	}
 }
+
+func TestPayableBillRoutesRequireDashboardSession(t *testing.T) {
+	for _, key := range []string{
+		"GET /api/payable_bill/tasks", "GET /api/payable_bill/tasks/:id/sites", "GET /api/payable_bill/usages",
+		"GET /api/payable_bill/providers", "GET /api/payable_bill/usages/export", "GET /api/payable_bill/providers/export", "GET /api/payable_bill/options", "PUT /api/payable_bill/usages/:id/provider",
+	} {
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "session", rule.Kind(), key)
+	}
+}

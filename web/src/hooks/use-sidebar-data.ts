@@ -22,6 +22,7 @@ import {
   ClipboardList,
   FileText,
   Globe,
+  HandCoins,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -140,6 +141,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Receivable Bills'),
             url: '/receivable-bills',
             icon: ReceiptText,
+            requiredRole: ROLE.SUPER_ADMIN,
+          },
+          {
+            title: t('Payable Bills'),
+            url: '/payable-bills',
+            icon: HandCoins,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {
