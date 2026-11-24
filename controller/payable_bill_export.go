@@ -70,10 +70,9 @@ func ExportPayableUsages(c *gin.Context) {
 
 	headerKeys := []string{
 		i18n.MsgPayableBillExportTaskID, i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportSiteID,
-		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportSiteURL, i18n.MsgPayableBillExportChannelName,
-		i18n.MsgPayableBillExportDeltaAmount, i18n.MsgPayableBillExportUsedAmount, i18n.MsgPayableBillExportDeltaNote,
-		i18n.MsgPayableBillExportProvider, i18n.MsgPayableBillExportProviderSource, i18n.MsgPayableBillExportSyncedAt,
-		i18n.MsgPayableBillExportCounted,
+		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportChannelName, i18n.MsgPayableBillExportDeltaAmount,
+		i18n.MsgPayableBillExportUsedAmount, i18n.MsgPayableBillExportDeltaNote, i18n.MsgPayableBillExportProvider,
+		i18n.MsgPayableBillExportProviderSource, i18n.MsgPayableBillExportSyncedAt, i18n.MsgPayableBillExportCounted,
 	}
 	deltaKeys := map[string]string{
 		model.PayableDeltaFirstSync:  i18n.MsgPayableBillDeltaFirstSync,
@@ -91,34 +90,34 @@ func ExportPayableUsages(c *gin.Context) {
 		cells := make([]any, len(headerKeys))
 		date, _ := model.ReceivableBillDayStart(usage.BillDate)
 		cells[0], cells[1] = usage.TaskId, date.Format("2006-01-02")
-		cells[2], cells[3], cells[4], cells[5] = usage.SiteId, usage.SiteName, usage.SiteBaseURL, usage.RemoteChannelName
+		cells[2], cells[3], cells[4] = usage.SiteId, usage.SiteName, usage.RemoteChannelName
 		if usage.DeltaQuota != nil {
-			cells[6] = model.ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
+			cells[5] = model.ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
 		}
-		cells[7] = model.ReceivableAmount(usage.UsedQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
+		cells[6] = model.ReceivableAmount(usage.UsedQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
 		if key, ok := deltaKeys[usage.DeltaFlag]; ok {
-			cells[8] = i18n.T(c, key)
+			cells[7] = i18n.T(c, key)
 		}
 		if usage.ProviderId == 0 {
-			cells[9] = i18n.T(c, i18n.MsgPayableBillProviderUnknown)
+			cells[8] = i18n.T(c, i18n.MsgPayableBillProviderUnknown)
 		} else {
-			cells[9] = usage.ProviderName
+			cells[8] = usage.ProviderName
 		}
 		sourceKey, ok := sourceKeys[usage.ProviderSource]
 		if !ok {
 			sourceKey = i18n.MsgPayableBillSourceUnknown
 		}
-		cells[10] = i18n.T(c, sourceKey)
+		cells[9] = i18n.T(c, sourceKey)
 		if usage.SyncedAt != 0 {
-			cells[11] = time.Unix(usage.SyncedAt, 0).In(model.ReceivableBillLocation).Format("2006-01-02 15:04:05")
+			cells[10] = time.Unix(usage.SyncedAt, 0).In(model.ReceivableBillLocation).Format("2006-01-02 15:04:05")
 		}
-		cells[12] = i18n.T(c, i18n.MsgPayableBillCountedNo)
+		cells[11] = i18n.T(c, i18n.MsgPayableBillCountedNo)
 		if usage.Counted {
-			cells[12] = i18n.T(c, i18n.MsgPayableBillCountedYes)
+			cells[11] = i18n.T(c, i18n.MsgPayableBillCountedYes)
 		}
 		rows[i] = cells
 	}
-	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{7, 8})
+	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{6, 7})
 }
 
 // ExportPayableProviderBills writes the provider bills that match the list filter into an xlsx file.

@@ -50,6 +50,7 @@ export type ReceivableBill = {
   created_time: number
   updated_time: number
   amount: string | null // only for a successful bill
+  receivable_amount: string | null // amount × receivable discount, only for a successful bill
   error: { key: string; params?: Record<string, unknown> } | null
   site_deleted: boolean
 }
