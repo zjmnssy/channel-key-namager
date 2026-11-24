@@ -85,6 +85,8 @@ export type TrendSeries = {
   deleted: boolean
   amounts: (string | null)[]
   provisional: boolean[]
+  /** A point whose data could not be fetched; it has a null amount and is drawn at 0. */
+  missing: boolean[]
 }
 
 export type ReceivableTrend = {

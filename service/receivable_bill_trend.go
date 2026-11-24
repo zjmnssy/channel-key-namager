@@ -28,12 +28,16 @@ type ReceivableTrendQuery struct {
 }
 
 // ReceivableTrendSeries is one site's points; a nil amount has no successful data.
+// Missing marks the nil amounts that count towards MissingCount: the page draws them
+// at 0 and says the data could not be fetched. The other nil points (not due yet,
+// before the site's first data, after the site was deleted) stay blank.
 type ReceivableTrendSeries struct {
 	SiteID      int       `json:"site_id"`
 	SiteName    string    `json:"site_name"`
 	Deleted     bool      `json:"deleted"`
 	Amounts     []*string `json:"amounts"`
 	Provisional []bool    `json:"provisional"` // the point sums hours because the day's bill has not succeeded
+	Missing     []bool    `json:"missing"`
 }
 
 type ReceivableTrend struct {
@@ -60,7 +64,8 @@ func (values *receivableTrendValues) set(siteID, point int, amount decimal.Decim
 }
 
 // BuildReceivableBillTrend builds the trend at now. A point counts as missing when
-// it is due, its site is live and has data from that point on, and it shows nothing.
+// it is due, its site is live and has data from that point on, and it shows nothing;
+// such a point is marked in its series' Missing as well as counted in MissingCount.
 func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*ReceivableTrend, error) {
 	isDay := query.View == "day"
 	var first time.Time
@@ -165,7 +170,7 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 		option := siteOptions[siteID]
 		series := ReceivableTrendSeries{
 			SiteID: siteID, SiteName: option.Name, Deleted: option.Deleted,
-			Amounts: make([]*string, points), Provisional: make([]bool, points),
+			Amounts: make([]*string, points), Provisional: make([]bool, points), Missing: make([]bool, points),
 		}
 		cover, covered := coverage[siteID]
 		for i := range points {
@@ -174,6 +179,7 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 				series.Amounts[i] = &text
 				series.Provisional[i] = values.provisional[siteID][i]
 			} else if covered && !option.Deleted && due[i] && keys[i] >= cover.FirstPeriod {
+				series.Missing[i] = true
 				trend.MissingCount++
 			}
 		}

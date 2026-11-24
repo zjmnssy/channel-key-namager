@@ -32,6 +32,14 @@ type TrendDatum = {
   amount: number | null
   raw: string | null // the backend string, shown in the tooltip
   provisional: boolean
+  missing: boolean // the data could not be fetched; drawn at 0
+}
+
+const MISSING_POINT_COLOR = '#ef4444'
+
+// The part of VChart's mark style context used here; the package does not export the type.
+type SeriesMarkContext = {
+  seriesColor: (seriesValue?: string | number) => string
 }
 
 type TrendChartProps = { trend: ReceivableTrend }
@@ -55,13 +63,19 @@ export function TrendChart(props: TrendChartProps) {
         : series.site_name
       return props.trend.labels.map((label, index) => {
         const raw = series.amounts[index]
+        const missing = series.missing[index] === true
+        // A missing point is drawn at 0; any other point without data (not due yet,
+        // before the site's first data) stays null and breaks the line.
+        let amount: number | null = null
+        if (missing) amount = 0
+        else if (raw != null) amount = Number(raw)
         return {
           label,
           site,
-          // A point the site has not reported stays null; it must not read as 0.
-          amount: raw == null ? null : Number(raw),
+          amount,
           raw: raw ?? null,
           provisional: series.provisional[index] === true,
+          missing,
         }
       })
     })
@@ -71,8 +85,8 @@ export function TrendChart(props: TrendChartProps) {
         {
           key: (d: TrendDatum) => d.site,
           value: (d: TrendDatum) => formatTrendTooltip(d, t),
-          // A point the site has not reported has no row, never a 0.
-          visible: (d: TrendDatum) => d.raw != null,
+          // A blank point has no row; a missing one says it failed.
+          visible: (d: TrendDatum) => d.raw != null || d.missing,
         },
       ],
     }
@@ -83,7 +97,14 @@ export function TrendChart(props: TrendChartProps) {
       yField: 'amount',
       seriesField: 'site',
       invalidType: 'break' as const,
-      point: { visible: true, style: { size: 5 } },
+      point: {
+        visible: true,
+        style: {
+          size: 5,
+          fill: (d: TrendDatum, ctx: SeriesMarkContext) =>
+            d.missing ? MISSING_POINT_COLOR : ctx.seriesColor(d.site),
+        },
+      },
       line: { style: { lineWidth: 2 } },
       legends: { visible: true, orient: 'top' as const },
       // Mark and dimension tooltips share one pattern: the dimension tooltip

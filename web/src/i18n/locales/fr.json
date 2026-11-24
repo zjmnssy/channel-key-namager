@@ -5291,6 +5291,7 @@
     "Provider user": "Utilisateur fournisseur",
     "Provider users": "Utilisateurs fournisseurs",
     "Provider-specific endpoint, account, and compatibility settings.": "Paramètres de point d’accès, de compte et de compatibilité propres au fournisseur.",
+    "Fetch failed, data missing": "Échec de la récupération, données manquantes",
     "Provisional data": "Données provisoires",
     "Proxy Address": "Adresse du proxy",
     "Proxy address must use HTTP, HTTPS, SOCKS5, or SOCKS5H and include a valid host": "L’adresse du proxy doit utiliser HTTP, HTTPS, SOCKS5 ou SOCKS5H et contenir un hôte valide",

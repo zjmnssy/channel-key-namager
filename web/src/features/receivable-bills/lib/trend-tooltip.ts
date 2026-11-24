@@ -16,11 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-/** Tooltip text from the backend's decimal string; a missing point shows nothing, never 0. */
+/**
+ * Tooltip text from the backend's decimal string. A missing point, drawn at 0, says its
+ * data could not be fetched; any other point without data shows nothing.
+ */
 export function formatTrendTooltip(
-  point: { raw: string | null; provisional: boolean },
+  point: { raw: string | null; provisional: boolean; missing: boolean },
   t: (key: string) => string
 ): string {
+  if (point.missing) return t('Fetch failed, data missing')
   if (point.raw == null) return ''
   const amount = `$${point.raw}`
   return point.provisional ? `${amount} (${t('Provisional data')})` : amount

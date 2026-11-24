@@ -46,6 +46,7 @@ type ChartDatum = {
   amount: number | null
   raw: string | null
   provisional: boolean
+  missing: boolean
 }
 const chart = vi.hoisted(() =>
   vi.fn((_props: { spec: { data: { values: ChartDatum[] }[] } }) => null)
@@ -64,6 +65,12 @@ type TooltipPattern = {
   }[]
 }
 
+// The point color callback gets the series color from the chart.
+type SeriesContext = { seriesColor: (site?: string | number) => string }
+const seriesContext: SeriesContext = {
+  seriesColor: (site) => `series:${site}`,
+}
+
 const clients: QueryClient[] = []
 
 function trend(patch: Partial<ReceivableTrend> = {}): ReceivableTrend {
@@ -77,6 +84,7 @@ function trend(patch: Partial<ReceivableTrend> = {}): ReceivableTrend {
         deleted: false,
         amounts: ['1.000000', '2.500000'],
         provisional: [false, false],
+        missing: [false, false],
       },
     ],
     missing_count: 0,
@@ -163,7 +171,62 @@ describe('TrendPanel', () => {
     )
   })
 
-  it('keeps missing points as null instead of zero', async () => {
+  it('draws missing points at zero and leaves other empty points blank', async () => {
+    await renderPanel(
+      trend({
+        labels: ['00:00', '01:00', '02:00'],
+        series: [
+          {
+            site_id: 1,
+            site_name: 'Site A',
+            deleted: false,
+            amounts: ['1.000000', null, null],
+            provisional: [false, false, false],
+            missing: [false, true, false],
+          },
+        ],
+      })
+    )
+
+    await waitFor(() => expect(chart).toHaveBeenCalled())
+    expect(lastValues().map((value) => value.amount)).toEqual([1, 0, null])
+    expect(lastValues().map((value) => value.missing)).toEqual([
+      false,
+      true,
+      false,
+    ])
+  })
+
+  it('keeps a successful zero as an ordinary point', async () => {
+    await renderPanel(
+      trend({
+        labels: ['00:00'],
+        series: [
+          {
+            site_id: 1,
+            site_name: 'Site A',
+            deleted: false,
+            amounts: ['0.000000'],
+            provisional: [false],
+            missing: [false],
+          },
+        ],
+      })
+    )
+
+    await waitFor(() => expect(chart).toHaveBeenCalled())
+    const spec = chart.mock.calls.at(-1)?.[0].spec as unknown as {
+      tooltip: Record<'mark', TooltipPattern>
+      point: { style: { fill: (d: ChartDatum, ctx: SeriesContext) => string } }
+    }
+    const [zero] = lastValues()
+    expect(zero.amount).toBe(0)
+    expect(zero.missing).toBe(false)
+    expect(spec.tooltip.mark.content[0].value(zero)).toBe('$0.000000')
+    expect(spec.point.style.fill(zero, seriesContext)).toBe('series:Site A')
+  })
+
+  it('colors missing points red', async () => {
     await renderPanel(
       trend({
         series: [
@@ -173,13 +236,19 @@ describe('TrendPanel', () => {
             deleted: false,
             amounts: ['1.000000', null],
             provisional: [false, false],
+            missing: [false, true],
           },
         ],
       })
     )
 
     await waitFor(() => expect(chart).toHaveBeenCalled())
-    expect(lastValues().map((value) => value.amount)).toEqual([1, null])
+    const spec = chart.mock.calls.at(-1)?.[0].spec as unknown as {
+      point: { style: { fill: (d: ChartDatum, ctx: SeriesContext) => string } }
+    }
+    const [valued, missing] = lastValues()
+    expect(spec.point.style.fill(missing, seriesContext)).toBe('#ef4444')
+    expect(spec.point.style.fill(valued, seriesContext)).toBe('series:Site A')
   })
 
   it('marks provisional points', async () => {
@@ -192,6 +261,7 @@ describe('TrendPanel', () => {
             deleted: false,
             amounts: ['1.000000', '2.000000'],
             provisional: [false, true],
+            missing: [false, false],
           },
         ],
       })
@@ -204,16 +274,18 @@ describe('TrendPanel', () => {
     ])
   })
 
-  it('formats mark and dimension tooltips from the backend string and hides missing points', async () => {
+  it('formats tooltips from the backend string, says a missing point failed, and hides blank points', async () => {
     await renderPanel(
       trend({
+        labels: ['00:00', '01:00', '02:00'],
         series: [
           {
             site_id: 1,
             site_name: 'Site A',
             deleted: false,
-            amounts: ['1.500000', null],
-            provisional: [true, false],
+            amounts: ['1.500000', null, null],
+            provisional: [true, false, false],
+            missing: [false, true, false],
           },
         ],
       })
@@ -223,14 +295,16 @@ describe('TrendPanel', () => {
     const spec = chart.mock.calls.at(-1)?.[0].spec as unknown as {
       tooltip: Record<'mark' | 'dimension', TooltipPattern>
     }
-    const [valued, missing] = lastValues()
+    const [valued, missing, blank] = lastValues()
     for (const pattern of [spec.tooltip.mark, spec.tooltip.dimension]) {
       const row = pattern.content[0]
       expect(pattern.title.value(valued)).toBe('00:00')
       expect(row.key(valued)).toBe('Site A')
       expect(row.value(valued)).toBe('$1.500000 (Provisional data)')
       expect(row.visible(valued)).toBe(true)
-      expect(row.visible(missing)).toBe(false)
+      expect(row.value(missing)).toBe('Fetch failed, data missing')
+      expect(row.visible(missing)).toBe(true)
+      expect(row.visible(blank)).toBe(false)
     }
   })
 
@@ -244,6 +318,7 @@ describe('TrendPanel', () => {
             deleted: true,
             amounts: ['1.000000', '2.000000'],
             provisional: [false, false],
+            missing: [false, false],
           },
         ],
       })
