@@ -57,6 +57,7 @@ async function renderPage(initialUrl = '/payable-bills/') {
       page: 1,
       page_size: 10,
       incomplete_site_count: 0,
+      mismatch_site_count: 0,
     },
   })
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({

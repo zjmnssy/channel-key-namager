@@ -52,6 +52,7 @@ const runningTask: PayablePullTask = {
   finished_sites: 2,
   retrying_sites: 1,
   failed_sites: 1,
+  mismatch_sites: 0,
   channel_total: 312,
   delta_amount: null,
   used_amount: null,
@@ -185,6 +186,23 @@ describe('PullTasksTable', () => {
     ])
 
     expect(await screen.findByText('Done')).toBeInTheDocument()
+  })
+
+  it('notes the sites whose totals did not match on a done task', async () => {
+    await renderTasks([
+      {
+        ...finishedTask,
+        status: 'success',
+        finished_sites: 5,
+        failed_sites: 0,
+        mismatch_sites: 2,
+      },
+    ])
+
+    expect(
+      await screen.findByText('Done (2 site(s) with mismatched totals)')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Done')).not.toBeInTheDocument()
   })
 
   it('opens the site drawer from the row action with the keyboard', async () => {

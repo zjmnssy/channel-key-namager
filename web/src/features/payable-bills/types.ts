@@ -40,6 +40,7 @@ export type PayablePullTask = {
   finished_sites: number // succeeded
   retrying_sites: number
   failed_sites: number // failed and superseded
+  mismatch_sites: number // succeeded with fewer channels than the site reported
   channel_total: number
   delta_amount: string | null // six decimals; null while running
   used_amount: string | null
@@ -137,6 +138,7 @@ export type PayableProviderBill = {
 
 export type PayableProviderBillPage = Page<PayableProviderBill> & {
   incomplete_site_count: number
+  mismatch_site_count: number // succeeded with fewer channels than the site reported
 }
 
 export type PayableProviderOption = {

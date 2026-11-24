@@ -96,9 +96,11 @@ export function useProviderBillsColumns(): ColumnDef<PayableProviderBill>[] {
               </Tooltip>
             )
           }
-          if (bill.discount_missing || bill.discount === null) {
+          if (bill.discount_missing) {
             return <span className='text-muted-foreground'>{t('Not set')}</span>
           }
+          // No row of the day has consumption, so there is no discount to show.
+          if (bill.discount === null) return EMPTY
           return (
             <span className='tabular-nums'>
               <DiscountValue value={bill.discount} />

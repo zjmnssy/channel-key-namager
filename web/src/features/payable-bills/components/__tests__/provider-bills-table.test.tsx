@@ -59,12 +59,18 @@ const baseBill: PayableProviderBill = {
 
 const INCOMPLETE_NOTICE =
   'In the selected dates, {{count}} site syncs did not succeed, so the bill may be incomplete'
+const MISMATCH_NOTICE =
+  '{{count}} site(s) reported more channels than were pulled in the selected dates; the bills may be incomplete'
 
 const clients: QueryClient[] = []
 
 async function renderBills(
   bills: PayableProviderBill[] = [baseBill],
-  options: { initialUrl?: string; incompleteSiteCount?: number } = {}
+  options: {
+    initialUrl?: string
+    incompleteSiteCount?: number
+    mismatchSiteCount?: number
+  } = {}
 ) {
   vi.mocked(billApi.listPayableProviderBills).mockResolvedValue({
     success: true,
@@ -74,6 +80,7 @@ async function renderBills(
       page: 1,
       page_size: 10,
       incomplete_site_count: options.incompleteSiteCount ?? 0,
+      mismatch_site_count: options.mismatchSiteCount ?? 0,
     },
   })
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
@@ -280,6 +287,47 @@ describe('ProviderBillsTable', () => {
     await screen.findByText('alice')
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows the mismatched-totals notice when sites reported more channels than were pulled', async () => {
+    await renderBills([baseBill], { mismatchSiteCount: 3 })
+
+    const notice = await screen.findByRole('alert')
+    expect(notice).toHaveTextContent(MISMATCH_NOTICE.replace('{{count}}', '3'))
+  })
+
+  it('shows both notices when some pulls failed and others had mismatched totals', async () => {
+    await renderBills([baseBill], {
+      incompleteSiteCount: 2,
+      mismatchSiteCount: 1,
+    })
+    await screen.findByText('alice')
+
+    const notices = await screen.findAllByRole('alert')
+    expect(notices).toHaveLength(2)
+    expect(notices[0]).toHaveTextContent(
+      INCOMPLETE_NOTICE.replace('{{count}}', '2')
+    )
+    expect(notices[1]).toHaveTextContent(
+      MISMATCH_NOTICE.replace('{{count}}', '1')
+    )
+  })
+
+  it('shows an em dash for the discount of a bill without consumption', async () => {
+    await renderBills([
+      {
+        ...baseBill,
+        amount: '0.000000',
+        discount: null,
+        payable_amount: '0.000000',
+      },
+    ])
+    await screen.findByText('alice')
+
+    const row = billRow('alice')
+    expect(within(row).getByText('—')).toBeInTheDocument()
+    expect(within(row).queryByText('Not set')).not.toBeInTheDocument()
+    expect(within(row).getAllByText('0.000000')).toHaveLength(2)
   })
 
   it('has no sync result filter', async () => {

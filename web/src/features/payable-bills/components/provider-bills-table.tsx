@@ -72,6 +72,7 @@ export function ProviderBillsTable() {
         items: result.data?.items ?? [],
         total: result.data?.total ?? 0,
         incompleteSiteCount: result.data?.incomplete_site_count ?? 0,
+        mismatchSiteCount: result.data?.mismatch_site_count ?? 0,
       }
     },
     placeholderData: (previousData) => previousData,
@@ -94,6 +95,9 @@ export function ProviderBillsTable() {
   // Only complete site pulls are billed, so a failed one makes the bill
   // look smaller than it is.
   const incompleteSiteCount = data?.incompleteSiteCount ?? 0
+  // A pull that succeeded with fewer channels than the site reported may
+  // have missed some, so the bill may look smaller too.
+  const mismatchSiteCount = data?.mismatchSiteCount ?? 0
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-3'>
@@ -104,6 +108,17 @@ export function ProviderBillsTable() {
             {t(
               'In the selected dates, {{count}} site syncs did not succeed, so the bill may be incomplete',
               { count: incompleteSiteCount }
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {mismatchSiteCount > 0 && (
+        <Alert className='shrink-0'>
+          <TriangleAlert aria-hidden='true' />
+          <AlertDescription>
+            {t(
+              '{{count}} site(s) reported more channels than were pulled in the selected dates; the bills may be incomplete',
+              { count: mismatchSiteCount }
             )}
           </AlertDescription>
         </Alert>

@@ -77,7 +77,13 @@ export function usePullTasksColumns(
           // An unknown status is shown as it is.
           let label: string = task.status
           if (task.status === 'success') {
-            label = t('Done')
+            // Sites that succeeded with fewer channels than they reported.
+            label =
+              task.mismatch_sites > 0
+                ? t('Done ({{count}} site(s) with mismatched totals)', {
+                    count: task.mismatch_sites,
+                  })
+                : t('Done')
           } else if (task.status === 'running') {
             // Sites that ended, whether they succeeded or failed.
             const progress = {
