@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"maps"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -40,6 +41,12 @@ var ErrPayableSiteDeleted = errors.New("The site has been deleted")
 
 // MsgPayablePullSuperseded 是被次日任务取代时写入 last_error 的英文消息键。
 const MsgPayablePullSuperseded = "Replaced by the next day's pull task"
+
+// payablePullUnfinished 是还要继续拉取的进度状态。
+var payablePullUnfinished = []string{PayablePullPending, PayablePullRetrying}
+
+// errPayablePullLeaseLost 让 SavePayablePullAttempt 的事务回滚：这一行进度已不归本次拉取。
+var errPayablePullLeaseLost = errors.New("payable pull lease lost")
 
 // PayablePullTask 是某个北京日期的每日拉取任务。
 type PayablePullTask struct {
@@ -114,9 +121,17 @@ type PayableProviderOverride struct {
 // 并把更早日期仍未完成的进度改为 superseded。billDate 已有任务（另一节点已建）时返回 created=false。
 func CreatePayablePullTask(billDate int, sites []*ThirdPartySite, now int64) (created bool, err error) {
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		unfinished := []string{PayablePullPending, PayablePullRetrying}
+		// 扫描每分钟都会调用：任务已存在就直接返回，不靠插入时的唯一约束冲突，
+		// 否则 PostgreSQL、MySQL 每次冲突都会消耗一个自增值，页面上的任务 ID 会跳号。
+		var existing int64
+		if err := tx.Model(&PayablePullTask{}).Where("bill_date = ?", billDate).Count(&existing).Error; err != nil {
+			return err
+		}
+		if existing > 0 {
+			return nil
+		}
 		var staleTaskIDs []int
-		err := tx.Model(&PayablePullSite{}).Where("bill_date < ? AND status IN ?", billDate, unfinished).
+		err := tx.Model(&PayablePullSite{}).Where("bill_date < ? AND status IN ?", billDate, payablePullUnfinished).
 			Distinct().Pluck("task_id", &staleTaskIDs).Error
 		if err != nil {
 			return err
@@ -126,7 +141,7 @@ func CreatePayablePullTask(billDate int, sites []*ThirdPartySite, now int64) (cr
 			if err != nil {
 				return err
 			}
-			err = tx.Model(&PayablePullSite{}).Where("bill_date < ? AND status IN ?", billDate, unfinished).
+			err = tx.Model(&PayablePullSite{}).Where("bill_date < ? AND status IN ?", billDate, payablePullUnfinished).
 				Updates(map[string]any{
 					"status":        PayablePullSuperseded,
 					"last_error":    string(lastError),
@@ -145,10 +160,11 @@ func CreatePayablePullTask(billDate int, sites []*ThirdPartySite, now int64) (cr
 
 		task := &PayablePullTask{
 			BillDate: billDate, SiteTotal: len(sites), Status: PayableTaskRunning,
-			CreatedTime: now, StartedTime: now, UpdatedTime: now,
+			CreatedTime: now, UpdatedTime: now,
 		}
+		// 开始时间是第一次请求的时刻，由 StartPayableTask 记下；没有站点时任务建好即结束。
 		if len(sites) == 0 {
-			task.Status, task.FinishedTime = PayableTaskSuccess, now
+			task.Status, task.StartedTime, task.FinishedTime = PayableTaskSuccess, now, now
 		}
 		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(task)
 		if result.Error != nil {
@@ -177,6 +193,12 @@ func CreatePayablePullTask(billDate int, sites []*ThirdPartySite, now int64) (cr
 
 // RefreshPayableTask 按进度行状态重算任务状态与完成时间。
 func RefreshPayableTask(tx *gorm.DB, taskID int, now int64) error {
+	// 先锁任务行，让同一任务的刷新依次进行：后来的等前一个提交后才读进度状态，
+	// 两个站点同时拉完时，任务不会因为双方都没看到对方的结果而一直停在 running。
+	var task PayablePullTask
+	if err := lockForUpdate(tx).Select("id").Where("id = ?", taskID).Find(&task).Error; err != nil {
+		return err
+	}
 	var statuses []string
 	if err := tx.Model(&PayablePullSite{}).Where("task_id = ?", taskID).Distinct().Pluck("status", &statuses).Error; err != nil {
 		return err
@@ -213,9 +235,8 @@ func FailPayablePullsOfDeletedSites(tx *gorm.DB, now int64) error {
 	deletedSites := func() *gorm.DB {
 		return tx.Unscoped().Model(&ThirdPartySite{}).Select("id").Where("deleted_at IS NOT NULL")
 	}
-	unfinished := []string{PayablePullPending, PayablePullRetrying}
 	var taskIDs []int
-	err = tx.Model(&PayablePullSite{}).Where("status IN ? AND site_id IN (?)", unfinished, deletedSites()).
+	err = tx.Model(&PayablePullSite{}).Where("status IN ? AND site_id IN (?)", payablePullUnfinished, deletedSites()).
 		Distinct().Pluck("task_id", &taskIDs).Error
 	if err != nil {
 		return err
@@ -223,7 +244,7 @@ func FailPayablePullsOfDeletedSites(tx *gorm.DB, now int64) error {
 	if len(taskIDs) == 0 {
 		return nil
 	}
-	err = tx.Model(&PayablePullSite{}).Where("status IN ? AND site_id IN (?)", unfinished, deletedSites()).
+	err = tx.Model(&PayablePullSite{}).Where("status IN ? AND site_id IN (?)", payablePullUnfinished, deletedSites()).
 		Updates(map[string]any{
 			"status":        PayablePullFailed,
 			"last_error":    string(lastError),
@@ -262,9 +283,8 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 	var err error
 	switch {
 	case baseURLChanged && pull.Status != PayablePullSuccess && pull.Status != PayablePullSuperseded:
-		if err := tx.Where("pull_site_id = ?", pull.Id).Delete(&PayableChannelUsage{}).Error; err != nil {
-			return err
-		}
+		// 先改进度行（并清掉租约）再删明细：正在保存的拉取要么先提交，它写的明细随后一起删掉；
+		// 要么等这里提交后因租约不符被拒。旧地址拉到的页不会在重置后写回。
 		err = tx.Model(&PayablePullSite{}).Where("id = ?", pull.Id).Updates(map[string]any{
 			"status":         PayablePullPending,
 			"next_page":      1,
@@ -276,8 +296,12 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 			"attempts":       0,
 			"next_retry_at":  0,
 			"last_error":     "",
+			"lease_until":    0,
 			"updated_time":   now,
 		}).Error
+		if err == nil {
+			err = tx.Where("pull_site_id = ?", pull.Id).Delete(&PayableChannelUsage{}).Error
+		}
 	case !baseURLChanged && pull.Status == PayablePullFailed:
 		err = tx.Model(&PayablePullSite{}).Where("id = ?", pull.Id).Updates(map[string]any{
 			"status":        PayablePullRetrying,
@@ -292,4 +316,113 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 		return err
 	}
 	return RefreshPayableTask(tx, latest.Id, now)
+}
+
+// DuePayablePulls 返回已到拉取时间、且没有人在拉的未完成进度，按下次重试时间、id 升序。
+func DuePayablePulls(now int64) ([]PayablePullSite, error) {
+	var pulls []PayablePullSite
+	err := DB.Where("status IN ? AND next_retry_at <= ? AND lease_until < ?", payablePullUnfinished, now, now).
+		Order("next_retry_at, id").Find(&pulls).Error
+	return pulls, err
+}
+
+// ClaimPayablePull 认领一行进度的拉取租约：只有它仍未完成、已到拉取时间、租约已过期且本次抢到时 ok 才为 true。
+func ClaimPayablePull(id int, now int64) (lease int64, ok bool, err error) {
+	lease = now + PayablePullLeaseSeconds
+	result := DB.Model(&PayablePullSite{}).
+		Where("id = ? AND status IN ? AND next_retry_at <= ? AND lease_until < ?", id, payablePullUnfinished, now, now).
+		Update("lease_until", lease)
+	if result.Error != nil {
+		return 0, false, result.Error
+	}
+	return lease, result.RowsAffected == 1, nil
+}
+
+// StartPayableTask 把任务的开始时间记为第一次请求的时刻，已记过的不再改。
+func StartPayableTask(taskID int, now int64) error {
+	return DB.Model(&PayablePullTask{}).Where("id = ? AND started_time = 0", taskID).
+		Updates(map[string]any{"started_time": now, "updated_time": now}).Error
+}
+
+// PayableBaseline 找站点在账单日期 billDate 之前、地址为 baseURL 的最近一次完整拉取（进度 success），
+// 返回其中 remoteIDs 各渠道的累计值。没有这样的拉取时 found 为 false：站点还没有完整拉取过，或地址变了、基线已重置。
+// 失败、被取代的进度留下的是不完整拉取，永不作基线。
+func PayableBaseline(siteID, billDate int, baseURL string, remoteIDs []int) (found bool, quotas map[int]int64, err error) {
+	var pull PayablePullSite
+	err = DB.Select("id").
+		Where("site_id = ? AND bill_date < ? AND status = ? AND site_base_url = ?", siteID, billDate, PayablePullSuccess, baseURL).
+		Order("bill_date DESC").Limit(1).Find(&pull).Error
+	if err != nil || pull.Id == 0 {
+		return false, nil, err
+	}
+	var usages []PayableChannelUsage
+	err = DB.Select("remote_channel_id", "used_quota").
+		Where("pull_site_id = ? AND remote_channel_id IN ?", pull.Id, remoteIDs).Find(&usages).Error
+	if err != nil {
+		return false, nil, err
+	}
+	quotas = make(map[int]int64, len(usages))
+	for _, usage := range usages {
+		quotas[usage.RemoteChannelId] = usage.UsedQuota
+	}
+	return true, quotas, nil
+}
+
+// ExistingPayableChannels 返回 remoteIDs 中在该进度下已有明细行的远端渠道。
+func ExistingPayableChannels(pullSiteID int, remoteIDs []int) (map[int]bool, error) {
+	var ids []int
+	err := DB.Model(&PayableChannelUsage{}).Where("pull_site_id = ? AND remote_channel_id IN ?", pullSiteID, remoteIDs).
+		Pluck("remote_channel_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	existing := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		existing[id] = true
+	}
+	return existing, nil
+}
+
+// SavePayablePullAttempt 在一个事务里保存一次拉取尝试：仍持有租约时写入 updates 并释放租约，插入新明细行（已有的跳过），
+// 重新数出本进度的明细行数写入 channel_count；进度结束（success/failed）时同一事务刷新任务。
+// 租约已丢失，或进度在此期间被改成了别的状态（被次日任务取代、站点已删除）时什么都不写，返回 false。
+func SavePayablePullAttempt(pullSiteID int, lease int64, rows []*PayableChannelUsage, updates map[string]any, now int64) (saved bool, err error) {
+	values := make(map[string]any, len(updates)+2)
+	maps.Copy(values, updates)
+	values["lease_until"] = int64(0)
+	values["updated_time"] = now
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		// 先带租约条件改进度行，再插明细：这一行的行锁让站点编辑的重置要么等本次提交后再删明细，
+		// 要么先生效并清掉租约，使这里更新 0 行。事务由写开始，SQLite 上也不会在读锁升级为写锁时直接报忙。
+		result := tx.Model(&PayablePullSite{}).
+			Where("id = ? AND lease_until = ? AND status IN ?", pullSiteID, lease, payablePullUnfinished).Updates(values)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errPayablePullLeaseLost
+		}
+		if len(rows) > 0 {
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(rows).Error; err != nil {
+				return err
+			}
+		}
+		channelCount := tx.Model(&PayableChannelUsage{}).Select("COUNT(*)").Where("pull_site_id = ?", pullSiteID)
+		if err := tx.Model(&PayablePullSite{}).Where("id = ?", pullSiteID).Update("channel_count", channelCount).Error; err != nil {
+			return err
+		}
+		if status := updates["status"]; status != PayablePullSuccess && status != PayablePullFailed {
+			return nil
+		}
+		// 加锁读：MySQL 可重复读下，普通读会在等任务行锁之前建立快照，刷新任务时就看不到别的进度刚提交的结果。
+		var pull PayablePullSite
+		if err := lockForUpdate(tx).Select("task_id").First(&pull, pullSiteID).Error; err != nil {
+			return err
+		}
+		return RefreshPayableTask(tx, pull.TaskId, now)
+	})
+	if errors.Is(err, errPayablePullLeaseLost) {
+		return false, nil
+	}
+	return err == nil, err
 }

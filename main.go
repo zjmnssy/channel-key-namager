@@ -173,6 +173,9 @@ func main() {
 	// Receivable bill scheduler, on the master node every minute
 	service.StartReceivableBillScheduler()
 
+	// 应付账单调度器，仅主节点，每分钟扫描一次
+	service.StartPayableBillScheduler()
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()

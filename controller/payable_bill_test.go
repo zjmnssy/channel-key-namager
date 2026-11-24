@@ -1,8 +1,14 @@
 package controller
 
 import (
+	"cmp"
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +74,7 @@ func TestPayablePullTaskCreation(t *testing.T) {
 	task := payableTaskOf(t, db, 20261123)
 	assert.Equal(t, 2, task.SiteTotal)
 	assert.Equal(t, model.PayableTaskRunning, task.Status)
+	assert.Zero(t, task.StartedTime) // 开始时间是第一次请求的时刻，建任务时还没有请求
 	assert.Zero(t, task.FinishedTime)
 	for _, site := range []*model.ThirdPartySite{siteA, siteB} {
 		pull := payablePullOf(t, db, 20261123, site.Id)
@@ -81,6 +88,10 @@ func TestPayablePullTaskCreation(t *testing.T) {
 	}
 
 	// 次日任务把前一天仍 pending 的进度改为 superseded，前一天任务变 partial_failed
+	pullA := payablePullOf(t, db, 20261123, siteA.Id)
+	lease, claimed, err := model.ClaimPayablePull(pullA.Id, 150) // A 的进度正在拉取
+	require.NoError(t, err)
+	require.True(t, claimed)
 	created, err = model.CreatePayablePullTask(20261124, []*model.ThirdPartySite{siteA}, 200)
 	require.NoError(t, err)
 	assert.True(t, created)
@@ -95,6 +106,11 @@ func TestPayablePullTaskCreation(t *testing.T) {
 		require.NoError(t, common.UnmarshalJsonStr(pull.LastError, &message))
 		assert.Equal(t, model.MsgPayablePullSuperseded, message.Key)
 	}
+	// 被取代后，取代前开始的拉取即使还持有租约，也不能把进度写回
+	saved, err := model.SavePayablePullAttempt(pullA.Id, lease, nil, map[string]any{"status": model.PayablePullRetrying, "next_retry_at": 260}, 210)
+	require.NoError(t, err)
+	assert.False(t, saved)
+	assert.Equal(t, model.PayablePullSuperseded, payablePullOf(t, db, 20261123, siteA.Id).Status)
 	next := payableTaskOf(t, db, 20261124)
 	assert.Equal(t, 1, next.SiteTotal)
 	assert.Equal(t, model.PayableTaskRunning, next.Status)
@@ -106,6 +122,7 @@ func TestPayablePullTaskCreation(t *testing.T) {
 	assert.True(t, created)
 	empty := payableTaskOf(t, db, 20261125)
 	assert.Equal(t, model.PayableTaskSuccess, empty.Status)
+	assert.Equal(t, int64(300), empty.StartedTime)
 	assert.Equal(t, int64(300), empty.FinishedTime)
 	assert.Zero(t, empty.SiteTotal)
 	// 前一天任务的进度仍在跑（pending），所以被取代
@@ -281,4 +298,389 @@ func TestPayableChannelPageAttempt(t *testing.T) {
 			assert.Equal(t, "7", seen.Header.Get("New-Api-User"))
 		})
 	}
+}
+
+func TestPayablePullBaseURLChangeResetsUnfinishedPulls(t *testing.T) {
+	db := setupPayableBillTest(t)
+	const now = int64(1795363800)
+	statuses := []string{model.PayablePullPending, model.PayablePullRetrying, model.PayablePullSuccess}
+	sites := make(map[string]*model.ThirdPartySite, len(statuses))
+	for _, status := range statuses {
+		sites[status] = receivableSeedSite(t, db, "pb-url-"+status, "https://pb-url-"+status+".example.com", 1)
+	}
+	created, err := model.CreatePayablePullTask(20261122, []*model.ThirdPartySite{
+		sites[model.PayablePullPending], sites[model.PayablePullRetrying], sites[model.PayablePullSuccess]}, now)
+	require.NoError(t, err)
+	require.True(t, created)
+	// 三个进度都已拉完第 1 页（1 行明细），分别处于 pending、retrying、success
+	pulls := make(map[string]model.PayablePullSite, len(statuses))
+	for _, status := range statuses {
+		pull := payablePullOf(t, db, 20261122, sites[status].Id)
+		require.NoError(t, db.Model(&pull).Updates(map[string]any{"status": status, "next_page": 2, "channel_count": 1}).Error)
+		require.NoError(t, db.Create(&model.PayableChannelUsage{TaskId: pull.TaskId, PullSiteId: pull.Id, BillDate: 20261122,
+			SiteId: pull.SiteId, RemoteChannelId: 1, UsedQuota: 10}).Error)
+		pulls[status] = pull
+	}
+	// pending 的进度正在拉取，持有租约
+	pendingPull := pulls[model.PayablePullPending]
+	lease, claimed, err := model.ClaimPayablePull(pendingPull.Id, now)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	for _, status := range statuses {
+		site := sites[status]
+		_, err := model.UpdateThirdPartySite(site.Id, model.ThirdPartySiteInput{Name: site.Name, Type: model.ThirdPartySiteTypeNewAPI,
+			BaseURL: "https://pb-url-" + status + "-new.example.com", RemoteUserID: site.RemoteUserID, ReceivableDiscount: site.ReceivableDiscount})
+		require.NoError(t, err)
+	}
+
+	// pending 与 retrying 的进度从第 1 页重拉：明细作废，租约清掉，快照换成新地址
+	for _, status := range []string{model.PayablePullPending, model.PayablePullRetrying} {
+		pull := payablePullOf(t, db, 20261122, sites[status].Id)
+		assert.Equal(t, model.PayablePullPending, pull.Status, status)
+		assert.Equal(t, 1, pull.NextPage, status)
+		assert.Zero(t, pull.ChannelCount, status)
+		assert.Zero(t, pull.LeaseUntil, status)
+		assert.Equal(t, "https://pb-url-"+status+"-new.example.com", pull.SiteBaseURL, status)
+		assert.Zero(t, payableUsageCount(t, db, pull.Id), status)
+	}
+	// 已成功的进度不动
+	succeeded := payablePullOf(t, db, 20261122, sites[model.PayablePullSuccess].Id)
+	assert.Equal(t, model.PayablePullSuccess, succeeded.Status)
+	assert.Equal(t, 2, succeeded.NextPage)
+	assert.Equal(t, 1, succeeded.ChannelCount)
+	assert.Equal(t, sites[model.PayablePullSuccess].BaseURL, succeeded.SiteBaseURL)
+	assert.Equal(t, int64(1), payableUsageCount(t, db, succeeded.Id))
+
+	// 重置前开始的拉取带着旧租约保存它从旧地址拉到的页：被拒，不写明细
+	saved, err := model.SavePayablePullAttempt(pendingPull.Id, lease, []*model.PayableChannelUsage{{TaskId: pendingPull.TaskId,
+		PullSiteId: pendingPull.Id, BillDate: 20261122, SiteId: pendingPull.SiteId, RemoteChannelId: 2, UsedQuota: 20}},
+		map[string]any{"status": model.PayablePullSuccess, "finished_time": now}, now)
+	require.NoError(t, err)
+	assert.False(t, saved)
+	assert.Zero(t, payableUsageCount(t, db, pendingPull.Id))
+	assert.Equal(t, model.PayablePullPending, payablePullOf(t, db, 20261122, pendingPull.SiteId).Status)
+}
+
+// fakeChannel 是假站点上的一个渠道，名称为 "ch-{ID}"。
+type fakeChannel struct {
+	ID        int
+	UsedQuota int64
+}
+
+// fakeChannelSite 是假站点的渠道列表接口：把 channels 按 id 降序、每页 100 个分页返回，并记下每次请求的页码。
+type fakeChannelSite struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	channels []fakeChannel
+	total    int   // 不小于 0 时代替渠道数作为 total 返回，模拟拉取期间渠道的增减
+	pages    []int // 收到的页码，按请求顺序
+	// intercept 在锁内、按渠道列表回答之前调用，可以改 channels 和 total；返回非 0 的 status 时用它代替渠道列表回答。
+	intercept func(page int) (status int, body string)
+}
+
+func newFakeChannelSite(t *testing.T, channels ...fakeChannel) *fakeChannelSite {
+	t.Helper()
+	site := &fakeChannelSite{channels: channels, total: -1}
+	site.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("p"))
+		status, body := site.reply(page)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(site.server.Close)
+	return site
+}
+
+func (s *fakeChannelSite) reply(page int) (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pages = append(s.pages, page)
+	if s.intercept != nil {
+		if status, body := s.intercept(page); status != 0 {
+			return status, body
+		}
+	}
+	sorted := slices.SortedFunc(slices.Values(s.channels), func(a, b fakeChannel) int { return cmp.Compare(b.ID, a.ID) })
+	items := []map[string]any{}
+	for _, channel := range sorted[min(max(page-1, 0)*100, len(sorted)):min(max(page, 0)*100, len(sorted))] {
+		items = append(items, map[string]any{"id": channel.ID, "name": "ch-" + strconv.Itoa(channel.ID), "used_quota": channel.UsedQuota})
+	}
+	total := s.total
+	if total < 0 {
+		total = len(s.channels)
+	}
+	body, _ := common.Marshal(map[string]any{"success": true, "data": map[string]any{"items": items, "total": total}})
+	return http.StatusOK, string(body)
+}
+
+// update 在锁内修改假站点，扫描之间用它改渠道、total 或注入失败。
+func (s *fakeChannelSite) update(change func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	change()
+}
+
+func (s *fakeChannelSite) requested() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int{}, s.pages...)
+}
+
+// payableScan 在 Unix 秒 now 扫描一次，返回 fake 在这次扫描中收到的页码。
+// now 取 UTC 时间，证明结果与服务器时区无关。
+func payableScan(fake *fakeChannelSite, now int64) []int {
+	before := len(fake.requested())
+	service.RunPayableBillScan(context.Background(), time.Unix(now, 0).UTC())
+	return fake.requested()[before:]
+}
+
+func payableUsageCount(t *testing.T, db *gorm.DB, pullID int) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ?", pullID).Count(&count).Error)
+	return count
+}
+
+// payableDeltas 返回账单日期 billDate 的明细，键为站点渠道 ID，值为 "增量标记 增量"，增量为空时写 nil。
+func payableDeltas(t *testing.T, db *gorm.DB, billDate int) map[int]string {
+	t.Helper()
+	var rows []model.PayableChannelUsage
+	require.NoError(t, db.Where("bill_date = ?", billDate).Find(&rows).Error)
+	deltas := make(map[int]string, len(rows))
+	for _, row := range rows {
+		delta := "nil"
+		if row.DeltaQuota != nil {
+			delta = strconv.FormatInt(*row.DeltaQuota, 10)
+		}
+		deltas[row.RemoteChannelId] = row.DeltaFlag + " " + delta
+	}
+	return deltas
+}
+
+func TestPayableBillScanCreatesTaskAt0010(t *testing.T) {
+	db := setupPayableBillTest(t)
+	fake := newFakeChannelSite(t) // 站点没有渠道：{"items":[],"total":0}
+	site := receivableSeedSite(t, db, "pb-0010", fake.server.URL, 1)
+	taskCount := func() int64 {
+		var count int64
+		require.NoError(t, db.Model(&model.PayablePullTask{}).Count(&count).Error)
+		return count
+	}
+
+	// 1795363799 = 北京 2026-11-23 00:09:59：还没到 00:10，不建任务
+	assert.Empty(t, payableScan(fake, 1795363799))
+	assert.Zero(t, taskCount())
+
+	// 1795363800 = 北京 2026-11-23 00:10:00：建账单日期为昨天的任务，并立即拉取
+	assert.Equal(t, []int{1}, payableScan(fake, 1795363800))
+	assert.Equal(t, int64(1), taskCount())
+	task := payableTaskOf(t, db, 20261122)
+	assert.Equal(t, 1, task.SiteTotal)
+	assert.Equal(t, int64(1795363800), task.StartedTime)
+	assert.Equal(t, model.PayableTaskSuccess, task.Status)
+	assert.Equal(t, int64(1795363800), task.FinishedTime)
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Zero(t, pull.ChannelCount)
+	assert.Equal(t, int64(1795363800), pull.FinishedTime)
+	assert.Zero(t, pull.LeaseUntil)
+
+	// 一分钟后再扫：任务不重复建，已成功的进度不再请求
+	assert.Empty(t, payableScan(fake, 1795363860))
+	assert.Equal(t, int64(1), taskCount())
+}
+
+func TestPayableBillPullResumesFromFailedPage(t *testing.T) {
+	db := setupPayableBillTest(t)
+	channels := make([]fakeChannel, 250)
+	for i := range channels {
+		channels[i] = fakeChannel{ID: i + 1, UsedQuota: int64(i+1) * 1000}
+	}
+	fake := newFakeChannelSite(t, channels...)
+	badGatewaySent := false
+	fake.update(func() {
+		fake.intercept = func(page int) (int, string) {
+			if page == 2 && !badGatewaySent {
+				badGatewaySent = true
+				return http.StatusBadGateway, ""
+			}
+			return 0, ""
+		}
+	})
+	site := receivableSeedSite(t, db, "pb-resume", fake.server.URL, 1)
+	const now = int64(1795363800) // 北京 2026-11-23 00:10
+
+	// 第 2 页 502：第 1 页的 100 个渠道已落库，进度记下第 2 页，1 分钟后重试
+	assert.Equal(t, []int{1, 2}, payableScan(fake, now))
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullRetrying, pull.Status)
+	assert.Equal(t, 2, pull.NextPage)
+	assert.Equal(t, 1, pull.Attempts)
+	assert.Equal(t, now+60, pull.NextRetryAt)
+	assert.Equal(t, 100, pull.ChannelCount)
+	assert.Equal(t, 250, pull.ReportedTotal)
+	assert.Zero(t, pull.LeaseUntil)
+	assert.Equal(t, common.Message{Key: "Site request failed: {{detail}}", Params: map[string]any{"detail": "HTTP 502"}},
+		receivableLastError(t, pull.LastError))
+	assert.Equal(t, model.PayableTaskRunning, payableTaskOf(t, db, 20261122).Status)
+
+	// 还没到重试时间：不请求
+	assert.Empty(t, payableScan(fake, now+59))
+
+	// 到了重试时间：从第 2 页接续，不从第 1 页重来
+	assert.Equal(t, []int{2, 3}, payableScan(fake, now+60))
+	pull = payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Equal(t, 250, pull.ChannelCount)
+	assert.Zero(t, pull.Attempts)
+	assert.Zero(t, pull.NextRetryAt)
+	assert.Empty(t, pull.LastError)
+	assert.Equal(t, now+60, pull.FinishedTime)
+	assert.Equal(t, int64(250), payableUsageCount(t, db, pull.Id))
+	task := payableTaskOf(t, db, 20261122)
+	assert.Equal(t, model.PayableTaskSuccess, task.Status)
+	assert.Equal(t, now+60, task.FinishedTime)
+}
+
+func TestPayableBillNonRetryableFailureStops(t *testing.T) {
+	db := setupPayableBillTest(t)
+	fake := newFakeChannelSite(t, fakeChannel{ID: 1, UsedQuota: 10})
+	fake.update(func() {
+		fake.intercept = func(int) (int, string) {
+			return http.StatusOK, `{"success":false,"message":"无权进行此操作"}`
+		}
+	})
+	site := receivableSeedSite(t, db, "pb-refused", fake.server.URL, 1)
+	const now = int64(1795363800) // 北京 2026-11-23 00:10
+
+	assert.Equal(t, []int{1}, payableScan(fake, now))
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullFailed, pull.Status)
+	assert.Equal(t, 1, pull.Attempts)
+	assert.Zero(t, pull.NextRetryAt)
+	assert.Equal(t, now, pull.FinishedTime)
+	assert.Equal(t, "无权进行此操作", receivableLastError(t, pull.LastError).Params["detail"])
+	task := payableTaskOf(t, db, 20261122)
+	assert.Equal(t, model.PayableTaskPartialFailed, task.Status)
+	assert.Equal(t, now, task.FinishedTime)
+
+	// 失败的进度不再请求
+	assert.Empty(t, payableScan(fake, now+3600))
+	assert.Equal(t, model.PayablePullFailed, payablePullOf(t, db, 20261122, site.Id).Status)
+}
+
+func TestPayableBillRecheckMissingChannels(t *testing.T) {
+	db := setupPayableBillTest(t)
+	// A：第一遍只给 2 个渠道却报 total 3（拉取期间渠道移位），第二遍给全 3 个
+	fakeA := newFakeChannelSite(t, fakeChannel{ID: 3, UsedQuota: 30}, fakeChannel{ID: 2, UsedQuota: 20})
+	fakeA.update(func() {
+		fakeA.total = 3
+		fakeA.intercept = func(int) (int, string) {
+			if len(fakeA.pages) == 2 {
+				fakeA.channels = append(fakeA.channels, fakeChannel{ID: 1, UsedQuota: 10})
+			}
+			return 0, ""
+		}
+	})
+	// B：两遍都只给 2 个
+	fakeB := newFakeChannelSite(t, fakeChannel{ID: 3, UsedQuota: 30}, fakeChannel{ID: 2, UsedQuota: 20})
+	fakeB.update(func() { fakeB.total = 3 })
+	siteA := receivableSeedSite(t, db, "pb-recheck-a", fakeA.server.URL, 1)
+	siteB := receivableSeedSite(t, db, "pb-recheck-b", fakeB.server.URL, 1)
+
+	// 第一遍拉完不到 total：从第 1 页补扫一遍，只写缺的渠道
+	assert.Equal(t, []int{1, 1}, payableScan(fakeA, 1795363800))
+	assert.Equal(t, []int{1, 1}, fakeB.requested())
+
+	pullA := payablePullOf(t, db, 20261122, siteA.Id)
+	assert.Equal(t, model.PayablePullSuccess, pullA.Status)
+	assert.Equal(t, 2, pullA.Pass)
+	assert.Equal(t, 3, pullA.ChannelCount)
+	assert.Empty(t, pullA.Note)
+	var remoteIDs []int
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ?", pullA.Id).
+		Order("remote_channel_id").Pluck("remote_channel_id", &remoteIDs).Error)
+	assert.Equal(t, []int{1, 2, 3}, remoteIDs)
+
+	// 补扫后仍对不上：以已拉到的为准结束，记下总数不一致
+	pullB := payablePullOf(t, db, 20261122, siteB.Id)
+	assert.Equal(t, model.PayablePullSuccess, pullB.Status)
+	assert.Equal(t, 2, pullB.ChannelCount)
+	var note common.Message
+	require.NoError(t, common.UnmarshalJsonStr(pullB.Note, &note))
+	assert.Equal(t, common.Message{Key: "Site reported {{total}} channels but {{count}} were pulled",
+		Params: map[string]any{"total": float64(3), "count": float64(2)}}, note)
+	assert.Equal(t, model.PayableTaskSuccess, payableTaskOf(t, db, 20261122).Status)
+}
+
+func TestPayableBillDeltaRules(t *testing.T) {
+	db := setupPayableBillTest(t)
+	const a, b, c = 11, 12, 13
+	fake := newFakeChannelSite(t, fakeChannel{ID: a, UsedQuota: 100}, fakeChannel{ID: b, UsedQuota: 500})
+	site := receivableSeedSite(t, db, "pb-delta", fake.server.URL, 1)
+	const day1, day = int64(1795363800), int64(86400) // 北京 2026-11-23 00:10 拉账单日期 20261122，之后每天 00:10
+	const refusal = `{"success":false,"message":"无权进行此操作"}`
+
+	// 日 1：站点此前没有完整拉取，没有基线，增量为空
+	assert.Equal(t, []int{1}, payableScan(fake, day1))
+	assert.Equal(t, map[int]string{a: "first_sync nil", b: "first_sync nil"}, payableDeltas(t, db, 20261122))
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	var rowA model.PayableChannelUsage
+	require.NoError(t, db.Where("pull_site_id = ? AND remote_channel_id = ?", pull.Id, a).First(&rowA).Error)
+	assert.Equal(t, pull.TaskId, rowA.TaskId)
+	assert.Equal(t, 20261122, rowA.BillDate)
+	assert.Equal(t, site.Id, rowA.SiteId)
+	assert.Equal(t, site.Name, rowA.SiteName)
+	assert.Equal(t, site.BaseURL, rowA.SiteBaseURL)
+	assert.Equal(t, "ch-11", rowA.RemoteChannelName)
+	assert.Equal(t, int64(100), rowA.UsedQuota)
+	assert.Equal(t, model.ReceivableBillQuotaPerUnit, rowA.QuotaPerUnit)
+	assert.Positive(t, rowA.SyncedAt)
+	// 渠道名不带标记、没有手动指定也没有历史：提供商未知，没有折扣
+	assert.Zero(t, rowA.ProviderId)
+	assert.Empty(t, rowA.ProviderName)
+	assert.Equal(t, model.PayableProviderUnknown, rowA.ProviderSource)
+	assert.Nil(t, rowA.PayableDiscount)
+
+	// 日 2：基线是日 1 的完整拉取；累计值回退记 0，上次没有的渠道基线为 0
+	fake.update(func() {
+		fake.channels = []fakeChannel{{ID: a, UsedQuota: 160}, {ID: b, UsedQuota: 400}, {ID: c, UsedQuota: 70}}
+	})
+	assert.Equal(t, []int{1}, payableScan(fake, day1+day))
+	assert.Equal(t, map[int]string{a: "normal 60", b: "rollback 0", c: "new_channel 70"}, payableDeltas(t, db, 20261123))
+
+	// 日 3：站点报 101 个渠道，第 1 页成功后第 2 页不可重试失败，这一天的拉取不完整；已拉到的行照常按日 2 算增量
+	fake.update(func() {
+		fake.channels = []fakeChannel{{ID: a, UsedQuota: 200}, {ID: b, UsedQuota: 450}, {ID: c, UsedQuota: 70}}
+		fake.total = 101
+		fake.intercept = func(page int) (int, string) {
+			if page == 2 {
+				return http.StatusOK, refusal
+			}
+			return 0, ""
+		}
+	})
+	assert.Equal(t, []int{1, 2}, payableScan(fake, day1+2*day))
+	assert.Equal(t, model.PayablePullFailed, payablePullOf(t, db, 20261124, site.Id).Status)
+	assert.Equal(t, map[int]string{a: "normal 40", b: "normal 50", c: "normal 0"}, payableDeltas(t, db, 20261124))
+
+	// 日 4：不完整拉取不作基线，基线仍是日 2
+	fake.update(func() {
+		fake.channels = []fakeChannel{{ID: a, UsedQuota: 260}, {ID: b, UsedQuota: 450}, {ID: c, UsedQuota: 70}}
+		fake.total, fake.intercept = -1, nil
+	})
+	assert.Equal(t, []int{1}, payableScan(fake, day1+3*day))
+	assert.Equal(t, map[int]string{a: "normal 100", b: "normal 50", c: "normal 0"}, payableDeltas(t, db, 20261125))
+
+	// 日 5：站点地址改了（同一个假站点换一种写法），可能换了实例，基线重置，所有行首次同步
+	newURL := strings.Replace(fake.server.URL, "127.0.0.1", "localhost", 1)
+	require.NotEqual(t, fake.server.URL, newURL)
+	_, err := model.UpdateThirdPartySite(site.Id, model.ThirdPartySiteInput{Name: site.Name, Type: model.ThirdPartySiteTypeNewAPI,
+		BaseURL: newURL, RemoteUserID: site.RemoteUserID, ReceivableDiscount: site.ReceivableDiscount})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1}, payableScan(fake, day1+4*day))
+	assert.Equal(t, map[int]string{a: "first_sync nil", b: "first_sync nil", c: "first_sync nil"}, payableDeltas(t, db, 20261126))
+	assert.Equal(t, newURL, payablePullOf(t, db, 20261126, site.Id).SiteBaseURL)
 }
