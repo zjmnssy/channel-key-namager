@@ -69,16 +69,6 @@ export function useChannelUsagesColumns(
         ),
       },
       {
-        accessorKey: 'site_base_url',
-        header: t('Bill Site URL'),
-        cell: ({ row }) => (
-          <TruncatedText
-            text={row.original.site_base_url}
-            maxWidth='max-w-[200px]'
-          />
-        ),
-      },
-      {
         accessorKey: 'remote_channel_name',
         header: t('Channel Name'),
         meta: { mobileTitle: true },

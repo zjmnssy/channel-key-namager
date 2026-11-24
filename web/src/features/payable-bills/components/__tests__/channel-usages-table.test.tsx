@@ -161,6 +161,27 @@ describe('ChannelUsagesTable', () => {
     )
   })
 
+  it('lists the channel usages without a site URL column', async () => {
+    await renderUsages()
+    await screen.findByText('gpt-dcmark-3-17')
+
+    expect(
+      screen.getAllByRole('columnheader').map((header) => header.textContent)
+    ).toEqual([
+      'Task ID',
+      'Bill Date',
+      'Site ID',
+      'Site Name',
+      'Channel Name',
+      'Daily Amount Before Discount ($)',
+      'Cumulative Amount ($)',
+      'Provider Name',
+      'Sync Time',
+      'Actions',
+    ])
+    expect(screen.queryByText('https://a.example.com')).not.toBeInTheDocument()
+  })
+
   it('renders an em dash with the first-sync label when the delta is null', async () => {
     await renderUsages([
       {

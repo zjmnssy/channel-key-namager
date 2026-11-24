@@ -1684,32 +1684,33 @@ func TestPayableBillExport(t *testing.T) {
 	}
 
 	file, rows := export(ExportPayableUsages, "/api/payable_bill/usages/export", "start_date=20261121&end_date=20261122&site_ids="+strconv.Itoa(site.Id)+"&provider_ids=7,0", "zh-CN", "payable-channel-usages.xlsx")
-	assert.Equal(t, []string{"任务ID", "账单日期", "站点ID", "站点名称", "站点URL", "渠道名称", "当日金额(折前)($)", "累计金额($)",
+	assert.Equal(t, []string{"任务ID", "账单日期", "站点ID", "站点名称", "渠道名称", "当日金额(折前)($)", "累计金额($)",
 		"增量说明", "提供商", "提供商来源", "同步时间", "计入账单"}, rows[0])
 	require.Len(t, rows, 4)
 	byChannel := map[string][]string{}
 	for _, row := range rows[1:] {
-		byChannel[row[5]] = row
+		byChannel[row[4]] = row
 	}
 	firstRow := byChannel["first"]
 	require.NotNil(t, firstRow)
-	assert.Equal(t, []string{strconv.Itoa(task.Id), "2026-11-22", strconv.Itoa(site.Id), site.Name, site.BaseURL, "first", "", "2",
+	// 不导出站点URL：这一行的 site_base_url 有值，导出里也不出现
+	assert.Equal(t, []string{strconv.Itoa(task.Id), "2026-11-22", strconv.Itoa(site.Id), site.Name, "first", "", "2",
 		"首次同步，无基线", "p7", "手动", "2026-11-23 01:00:05", "是"}, firstRow)
 	for _, row := range rows[1:] {
-		if row[5] == "first" {
+		if row[4] == "first" {
 			continue
 		}
 		if row[0] == strconv.Itoa(oldTask.Id) {
-			assert.Equal(t, "否", row[12])
+			assert.Equal(t, "否", row[11])
 			continue
 		}
-		assert.Equal(t, "0.12", row[6])
-		assert.Equal(t, "", row[8])
-		assert.Equal(t, "未知提供商", row[9])
-		assert.Equal(t, "未知", row[10])
+		assert.Equal(t, "0.12", row[5])
+		assert.Equal(t, "", row[7])
+		assert.Equal(t, "未知提供商", row[8])
+		assert.Equal(t, "未知", row[9])
 	}
 	sheet := file.GetSheetName(0)
-	for _, cell := range []string{"H2", "G3"} {
+	for _, cell := range []string{"G2", "F3"} {
 		styleID, err := file.GetCellStyle(sheet, cell)
 		require.NoError(t, err)
 		style, err := file.GetStyle(styleID)
@@ -1718,7 +1719,7 @@ func TestPayableBillExport(t *testing.T) {
 		assert.Equal(t, "0.000000", *style.CustomNumFmt)
 	}
 	// 任务ID、站点ID 与金额一样是数字单元格，不是文本
-	numberType, err := file.GetCellType(sheet, "H2")
+	numberType, err := file.GetCellType(sheet, "G2")
 	require.NoError(t, err)
 	require.NotEqual(t, excelize.CellTypeSharedString, numberType)
 	for _, cell := range []string{"A2", "C2"} {

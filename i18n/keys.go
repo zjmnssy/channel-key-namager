@@ -146,7 +146,6 @@ const (
 	MsgPayableBillExportBillDate       = "payable_bill.export.bill_date"
 	MsgPayableBillExportSiteID         = "payable_bill.export.site_id"
 	MsgPayableBillExportSiteName       = "payable_bill.export.site_name"
-	MsgPayableBillExportSiteURL        = "payable_bill.export.site_url"
 	MsgPayableBillExportChannelName    = "payable_bill.export.channel_name"
 	MsgPayableBillExportDeltaAmount    = "payable_bill.export.delta_amount"
 	MsgPayableBillExportUsedAmount     = "payable_bill.export.used_amount"
