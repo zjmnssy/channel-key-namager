@@ -1205,3 +1205,47 @@ func TestPayableOptions(t *testing.T) {
 		{"id": float64(disabled.Id), "username": "po-disabled", "disabled": true, "payable_discount": nil},
 	}, data.Providers)
 }
+
+// 导出走 limit <= 0 返回全部行：行数超过各库的绑定参数上限时查询也不能失败，Counted 与 Manual 仍要正确。
+func TestPayableUsagesWithoutLimitReturnsAllRows(t *testing.T) {
+	db := setupPayableBillTest(t)
+	siteA := receivableSeedSite(t, db, "pl-a", "https://pl-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pl-b", "https://pl-b.example.com", 1)
+	const days, channels = 110, 300
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var usages []model.PayableChannelUsage
+	for day := range days {
+		billDate, err := strconv.Atoi(first.AddDate(0, 0, day).Format("20060102"))
+		require.NoError(t, err)
+		task := payableSeedTask(t, db, billDate, model.PayableTaskPartialFailed)
+		pullA := payableSeedPull(t, db, task, siteA.Id, model.PayablePullSuccess)
+		pullB := payableSeedPull(t, db, task, siteB.Id, model.PayablePullFailed)
+		for channel := 1; channel <= channels/2; channel++ {
+			for _, pull := range []*model.PayablePullSite{pullA, pullB} {
+				usages = append(usages, model.PayableChannelUsage{TaskId: task.Id, PullSiteId: pull.Id, BillDate: billDate, SiteId: pull.SiteId,
+					RemoteChannelId: channel, QuotaPerUnit: 500000})
+			}
+		}
+	}
+	require.NoError(t, db.CreateInBatches(usages, 500).Error)
+	require.NoError(t, db.Create(&model.PayableProviderOverride{SiteId: siteA.Id, RemoteChannelId: 7, ProviderId: 1}).Error)
+
+	filter := model.PayableUsageFilter{StartDate: 20260101, EndDate: 20261231}
+	rows, total, err := model.ListPayableUsages(filter, 0, 0)
+	require.NoError(t, err)
+	require.EqualValues(t, days*channels, total)
+	require.Len(t, rows, days*channels)
+	var counted, manual int
+	for _, row := range rows {
+		assert.Equal(t, row.SiteId == siteA.Id, row.Counted)
+		assert.Equal(t, row.SiteId == siteA.Id && row.RemoteChannelId == 7, row.Manual)
+		if row.Counted {
+			counted++
+		}
+		if row.Manual {
+			manual++
+		}
+	}
+	assert.Equal(t, days*channels/2, counted)
+	assert.Equal(t, days, manual)
+}

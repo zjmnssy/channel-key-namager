@@ -2,7 +2,6 @@ package controller
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -25,32 +24,23 @@ func parsePayableMessage(raw string) *common.Message {
 // provider_ids 允许 0（未知提供商）。
 func parsePayableUsageFilter(c *gin.Context) (model.PayableUsageFilter, bool) {
 	var filter model.PayableUsageFilter
-	startDate, startErr := strconv.Atoi(c.Query("start_date"))
-	endDate, endErr := strconv.Atoi(c.Query("end_date"))
-	_, startOK := model.ReceivableBillDayStart(startDate)
-	_, endOK := model.ReceivableBillDayStart(endDate)
-	if startErr != nil || endErr != nil || !startOK || !endOK || startDate > endDate {
-		common.ApiErrorT(c, "Invalid parameters")
+	startDate, endDate, ok := parseReceivableDateRange(c)
+	if !ok {
 		return filter, false
 	}
 	filter.StartDate, filter.EndDate = startDate, endDate
 
-	siteIDs, ok := parseReceivableSiteIDs(c.Query("site_ids"))
+	siteIDs, ok := parseReceivableIDList(c.Query("site_ids"), 1)
 	if !ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return filter, false
 	}
-	filter.SiteIDs = siteIDs
-	if raw := c.Query("provider_ids"); raw != "" {
-		for part := range strings.SplitSeq(raw, ",") {
-			id, err := strconv.Atoi(part)
-			if err != nil || id < 0 {
-				common.ApiErrorT(c, "Invalid parameters")
-				return filter, false
-			}
-			filter.ProviderIDs = append(filter.ProviderIDs, id)
-		}
+	providerIDs, ok := parseReceivableIDList(c.Query("provider_ids"), 0)
+	if !ok {
+		common.ApiErrorT(c, "Invalid parameters")
+		return filter, false
 	}
+	filter.SiteIDs, filter.ProviderIDs = siteIDs, providerIDs
 	return filter, true
 }
 

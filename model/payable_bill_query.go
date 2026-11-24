@@ -1,6 +1,8 @@
 package model
 
 import (
+	"slices"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -185,6 +187,11 @@ func ListPayableUsages(filter PayableUsageFilter, offset, limit int) ([]PayableU
 		siteIDs = append(siteIDs, usage.SiteId)
 		channelIDs = append(channelIDs, usage.RemoteChannelId)
 	}
+	// 去重后再绑定：导出（limit <= 0）的行数可达数万，每行一个参数会超出各库的绑定参数上限。
+	for _, ids := range [][]int{pullIDs, siteIDs, channelIDs} {
+		slices.Sort(ids)
+	}
+	pullIDs, siteIDs, channelIDs = slices.Compact(pullIDs), slices.Compact(siteIDs), slices.Compact(channelIDs)
 	var successPulls []int
 	err := DB.Model(&PayablePullSite{}).Where("id IN ? AND status = ?", pullIDs, PayablePullSuccess).Pluck("id", &successPulls).Error
 	if err != nil {
@@ -241,6 +248,10 @@ func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]P
 		dates = append(dates, bill.BillDate)
 		providerIDs = append(providerIDs, bill.ProviderId)
 	}
+	// 日期和提供商各自去重，绑定参数个数不随组数增长。
+	slices.Sort(dates)
+	slices.Sort(providerIDs)
+	dates, providerIDs = slices.Compact(dates), slices.Compact(providerIDs)
 	var usages []PayableChannelUsage
 	err := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
 		Where("bill_date IN ? AND provider_id IN ?", dates, providerIDs).Order("id asc").Find(&usages).Error
