@@ -162,7 +162,8 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 }
 
 // newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行。增量以该站点上一次地址相同的完整拉取为基线：
-// 没有基线时为空（首次同步）；基线里没有的渠道是新渠道，基线为 0；累计值比基线小时记 0（累计值回退）。
+// 没有基线时为空（首次同步）；基线里没有的渠道是新渠道，基线为 0，但基线那次拉取少于站点报的总数时，
+// 这样的渠道可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
 // 提供商在 Task 4 接入之前一律为未知。
 func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
 	if len(items) == 0 {
@@ -189,7 +190,7 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 	if len(fresh) == 0 {
 		return nil, nil
 	}
-	found, baseline, err := model.PayableBaseline(pull.SiteId, pull.BillDate, pull.SiteBaseURL, freshIDs)
+	found, complete, baseline, err := model.PayableBaseline(pull.SiteId, pull.BillDate, pull.SiteBaseURL, freshIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +217,8 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 		base, inBaseline := baseline[item.ID]
 		delta := item.UsedQuota - base // 不在基线里时 base 为 0
 		switch {
-		case !found:
+		case !found, !inBaseline && !complete:
+			// 没有基线；或基线那次拉取少于站点报的总数，基线里没有这个渠道不能说明它是新建的
 			row.DeltaFlag = model.PayableDeltaFirstSync
 		case !inBaseline:
 			row.DeltaQuota, row.DeltaFlag = &delta, model.PayableDeltaNewChannel
