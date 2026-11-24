@@ -209,6 +209,18 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Previous Status')
     case 'previous_quota':
       return t('Previous Quota')
+    case 'usage_id':
+      return t('Channel Usage ID')
+    case 'remote_channel_id':
+      return t('Site Channel ID')
+    case 'remote_channel_name':
+      return t('Channel Name')
+    case 'previous_provider_id':
+      return t('Previous Provider ID')
+    case 'previous_provider_name':
+      return t('Previous Provider')
+    case 'previous_discount':
+      return t('Previous Payable Discount')
     default:
       return key
   }
@@ -606,6 +618,57 @@ export function buildAuditDetails(
     }
     params.failure_reason =
       reasons[params.failure_reason] ?? params.failure_reason
+  }
+  if (action.startsWith('payable_bill.')) {
+    if (typeof params.failure_reason === 'string') {
+      const reasons: Record<string, string> = {
+        not_found: t('Channel usage does not exist'),
+        invalid_provider: t('The selected user is not a channel supplier'),
+        database_error: t('Database error, please contact the administrator'),
+      }
+      params.failure_reason =
+        reasons[params.failure_reason] ?? params.failure_reason
+    }
+    const clearing = action === 'payable_bill.clear_provider'
+    // Clearing sends provider 0 to remove the site channel's manual setting.
+    if (clearing) delete params.provider_id
+    // The row's provider and discount are recorded once the change is saved.
+    // An empty provider name is the unknown provider; a null discount was
+    // never set.
+    if (typeof params.provider_name === 'string') {
+      let change: string
+      if (clearing) {
+        // The row keeps its provider, so there is no previous and new one.
+        change = t(
+          "Cleared the manual setting of the site channel (this row's provider is still {{provider}})",
+          { provider: params.provider_name || t('Unknown provider') }
+        )
+        delete params.previous_provider_id
+      } else {
+        change = t(
+          'Previous provider {{previous_provider}} (discount {{previous_discount}}) → new provider {{provider}} (discount {{discount}})',
+          {
+            previous_provider:
+              params.previous_provider_name || t('Unknown provider'),
+            previous_discount: params.previous_discount ?? t('Not set'),
+            provider: params.provider_name,
+            discount: params.discount ?? t('Not set'),
+          }
+        )
+      }
+      fields.push({ label: t('Provider change'), value: change })
+      for (const key of [
+        'previous_provider_name',
+        'previous_discount',
+        'provider_name',
+        'discount',
+      ]) {
+        delete params[key]
+      }
+    }
+    if (params.previous_discount === null) {
+      params.previous_discount = t('Not set')
+    }
   }
   if (
     action === 'channel.status_update_batch' &&

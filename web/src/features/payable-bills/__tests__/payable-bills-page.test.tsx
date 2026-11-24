@@ -49,6 +49,16 @@ async function renderPage(initialUrl = '/payable-bills/') {
     success: true,
     data: { items: [], total: 0, page: 1, page_size: 10 },
   })
+  vi.mocked(billApi.listPayableProviderBills).mockResolvedValue({
+    success: true,
+    data: {
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 10,
+      incomplete_site_count: 0,
+    },
+  })
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
     success: true,
     data: { sites: [], providers: [] },
@@ -94,6 +104,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(billApi.listPayablePullTasks).mockReset()
   vi.mocked(billApi.listPayableUsages).mockReset()
+  vi.mocked(billApi.listPayableProviderBills).mockReset()
   vi.mocked(billApi.getPayableBillOptions).mockReset()
 })
 
@@ -121,6 +132,15 @@ describe('PayableBills page', () => {
       expect(billApi.listPayableUsages).toHaveBeenCalledTimes(1)
     )
     expect(billApi.listPayablePullTasks).not.toHaveBeenCalled()
+  })
+
+  it('loads the provider bills on the providers tab', async () => {
+    await renderPage('/payable-bills/?tab=providers')
+
+    await waitFor(() =>
+      expect(billApi.listPayableProviderBills).toHaveBeenCalledTimes(1)
+    )
+    expect(billApi.listPayableUsages).not.toHaveBeenCalled()
   })
 
   it('starts the next tab from its first page and keeps the shared filters', async () => {

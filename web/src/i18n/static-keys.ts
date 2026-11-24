@@ -972,6 +972,9 @@ export const STATIC_I18N_KEYS = [
   'Enabled or disabled a channel push task',
   // Receivable bill audit template.
   'Resynced receivable bill #{{bill_id}}',
+  // Payable bill audit templates.
+  'Set the provider of channel usage #{{usage_id}}',
+  'Cleared the manual provider of channel usage #{{usage_id}}',
   // Channel push API errors, action reasons and run errors.
   'Task does not exist',
   'Run does not exist',

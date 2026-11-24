@@ -19,16 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { RefreshCw } from 'lucide-react'
-import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { EmptyState } from '@/components/empty-state'
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
 import { ChannelUsagesTable } from './components/channel-usages-table'
+import { ProviderBillsTable } from './components/provider-bills-table'
 import { PullTasksTable } from './components/pull-tasks-table'
 import { PAYABLE_BILL_QUERY_KEYS } from './constants'
 
@@ -41,12 +40,11 @@ export function PayableBills() {
   const fetching = useIsFetching({ queryKey: PAYABLE_BILL_QUERY_KEYS.all }) > 0
   const tab = route.useSearch().tab ?? 'pulls'
 
-  // The provider bills tab is filled in by a later change.
-  let content: ReactNode = <EmptyState title={t('Coming Soon!')} />
-  if (tab === 'pulls') {
-    content = <PullTasksTable />
-  } else if (tab === 'usages') {
+  let content = <PullTasksTable />
+  if (tab === 'usages') {
     content = <ChannelUsagesTable />
+  } else if (tab === 'providers') {
+    content = <ProviderBillsTable />
   }
 
   return (

@@ -812,6 +812,208 @@ it.each([
   }
 )
 
+const payableUsageParams = {
+  usage_id: 101,
+  site_id: 3,
+  site_name: 'Site A',
+  remote_channel_id: 17,
+  remote_channel_name: 'gpt-dcmark-3-17',
+  bill_date: 20261123,
+  previous_provider_id: 5,
+  previous_provider_name: 'alice',
+  previous_discount: 0.8,
+}
+
+it('renders a provider change of a channel usage from the previous provider to the new one', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.set_provider'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      method: 'PUT',
+      route: '/api/payable_bill/usages/:id/provider',
+      success: true,
+      other: {
+        op: {
+          action,
+          params: {
+            ...payableUsageParams,
+            provider_id: 7,
+            provider_name: 'bob',
+            discount: null,
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Set the provider of channel usage #101')
+  expect(detail.fields).toEqual([
+    {
+      label: 'Provider change',
+      value:
+        'Previous provider alice (discount 0.8) → new provider bob (discount Not set)',
+    },
+    { label: 'Channel Usage ID', value: 101 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Site Channel ID', value: 17 },
+    { label: 'Channel Name', value: 'gpt-dcmark-3-17' },
+    { label: 'Bill Date', value: 20261123 },
+    { label: 'Previous Provider ID', value: 5 },
+    { label: 'Provider ID', value: 7 },
+  ])
+})
+
+it('renders a provider change in Chinese with an unknown previous provider', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'zh', resources: { zh } })
+  const action = 'payable_bill.set_provider'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: true,
+      other: {
+        op: {
+          action,
+          params: {
+            ...payableUsageParams,
+            previous_provider_id: 0,
+            previous_provider_name: '',
+            previous_discount: null,
+            provider_id: 7,
+            provider_name: 'bob',
+            discount: 0.9,
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('设置了渠道消费明细 #101 的提供商')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      {
+        label: '提供商变更',
+        value: '原提供商 未知提供商（折扣 未设置）→ 新提供商 bob（折扣 0.9）',
+      },
+    ])
+  )
+})
+
+it('renders clearing a manual provider as the provider the row keeps', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.clear_provider'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: true,
+      other: {
+        op: {
+          action,
+          params: {
+            ...payableUsageParams,
+            provider_id: 0,
+            provider_name: 'alice',
+            discount: 0.8,
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe(
+    'Cleared the manual provider of channel usage #101'
+  )
+  expect(detail.fields).toEqual([
+    {
+      label: 'Provider change',
+      value:
+        "Cleared the manual setting of the site channel (this row's provider is still alice)",
+    },
+    { label: 'Channel Usage ID', value: 101 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Site Channel ID', value: 17 },
+    { label: 'Channel Name', value: 'gpt-dcmark-3-17' },
+    { label: 'Bill Date', value: 20261123 },
+  ])
+})
+
+it.each([
+  ['not_found', 'Channel usage does not exist'],
+  ['invalid_provider', 'The selected user is not a channel supplier'],
+  ['database_error', 'Database error, please contact the administrator'],
+])('explains the rejected provider change reason %s', async (reason, text) => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.set_provider'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: false,
+      other: {
+        audit_info: { success: false },
+        op: {
+          action,
+          params: { usage_id: 101, provider_id: 7, failure_reason: reason },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Failed to set the provider of channel usage')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([{ label: 'Failure reason', value: text }])
+  )
+})
+
+it('keeps the previous provider of a rejected provider change without claiming a new one', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.set_provider'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: false,
+      other: {
+        audit_info: { success: false },
+        op: {
+          action,
+          params: {
+            ...payableUsageParams,
+            previous_discount: null,
+            provider_id: 9,
+            failure_reason: 'invalid_provider',
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Failed to set the provider of channel usage')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: 'Previous Provider', value: 'alice' },
+      { label: 'Previous Payable Discount', value: 'Not set' },
+      {
+        label: 'Failure reason',
+        value: 'The selected user is not a channel supplier',
+      },
+    ])
+  )
+  expect(detail.fields.map((field) => field.label)).not.toContain(
+    'Provider change'
+  )
+})
+
 it('keeps the status of other audit actions untranslated', async () => {
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {} })

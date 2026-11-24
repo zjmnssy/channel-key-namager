@@ -22,26 +22,17 @@ import type { ColumnFiltersState } from '@tanstack/react-table'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import {
-  DataTableFacetedFilter,
-  DataTablePage,
-  DataTableToolbar,
-  useDataTable,
-} from '@/components/data-table'
-import { BillDateRangePicker } from '@/features/receivable-bills/components/bill-date-range-picker'
-import {
-  beijingYesterday,
-  monthStart,
-} from '@/features/receivable-bills/lib/bill-date'
+import { DataTablePage, useDataTable } from '@/components/data-table'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { createServerError } from '@/lib/server-error-message'
 
 import { listPayableUsages } from '../api'
 import { PAYABLE_BILL_QUERY_KEYS } from '../constants'
-import { usePayableBillOptions } from '../hooks/use-payable-bill-options'
+import { usePayableBillFilter } from '../hooks/use-payable-bill-filter'
 import type { PayableBillQuery, PayableUsage } from '../types'
 import { useChannelUsagesColumns } from './channel-usages-columns'
 import { ExportPayableButton } from './export-payable-button'
+import { PayableBillFilterBar } from './payable-bill-filter-bar'
 import { SetProviderDialog } from './set-provider-dialog'
 
 const route = getRouteApi('/_authenticated/payable-bills/')
@@ -54,7 +45,8 @@ export function ChannelUsagesTable() {
   const navigate = route.useNavigate()
   const [editingUsage, setEditingUsage] = useState<PayableUsage | null>(null)
   const columns = useChannelUsagesColumns(setEditingUsage)
-  const options = usePayableBillOptions()
+  // The provider bills tab reads the same date, site and provider filters.
+  const filter = usePayableBillFilter()
 
   const { pagination, onPaginationChange, ensurePageInRange } =
     useTableUrlState({
@@ -64,20 +56,10 @@ export function ChannelUsagesTable() {
       globalFilter: { enabled: false },
     })
 
-  // The latest bill date is yesterday: a day is pulled after it ends.
-  const yesterday = beijingYesterday()
-  const startDate = search.start ?? monthStart(yesterday)
-  const endDate = search.end ?? yesterday
-  const siteValues = search.sites ?? []
-  const providerValues = search.providers ?? []
-
   const query: PayableBillQuery = {
     p: pagination.pageIndex + 1,
     page_size: pagination.pageSize,
-    start_date: startDate,
-    end_date: endDate,
-    site_ids: siteValues.map(Number),
-    provider_ids: providerValues.map(Number),
+    ...filter,
   }
 
   const { data, isLoading, isFetching } = useQuery({
@@ -111,19 +93,6 @@ export function ChannelUsagesTable() {
     ensurePageInRange,
   })
 
-  // A filter change starts again from the first page. The provider bills tab
-  // reads the same date, site and provider filters.
-  const updateFilters = (patch: Record<string, unknown>) =>
-    void navigate({
-      search: (prev) => ({ ...prev, ...patch, page: undefined }),
-    })
-
-  const hasFilters =
-    search.start !== undefined ||
-    search.end !== undefined ||
-    siteValues.length > 0 ||
-    providerValues.length > 0
-
   return (
     <>
       <DataTablePage
@@ -134,52 +103,9 @@ export function ChannelUsagesTable() {
         emptyTitle={t('No channel usage details')}
         skeletonKeyPrefix='payable-usages-skeleton'
         toolbar={
-          <DataTableToolbar
+          <PayableBillFilterBar
             table={table}
-            hideViewOptions
-            hasAdditionalFilters={hasFilters}
-            preActions={
-              <ExportPayableButton
-                kind='usages'
-                filter={{
-                  start_date: startDate,
-                  end_date: endDate,
-                  site_ids: siteValues.length > 0 ? query.site_ids : undefined,
-                  provider_ids:
-                    providerValues.length > 0 ? query.provider_ids : undefined,
-                }}
-              />
-            }
-            onReset={() =>
-              updateFilters({
-                start: undefined,
-                end: undefined,
-                sites: undefined,
-                providers: undefined,
-              })
-            }
-            customSearch={
-              <>
-                <BillDateRangePicker
-                  start={startDate}
-                  end={endDate}
-                  max={yesterday}
-                  onChange={(start, end) => updateFilters({ start, end })}
-                />
-                <DataTableFacetedFilter
-                  title={t('Site Name')}
-                  options={options.siteOptions}
-                  value={siteValues}
-                  onValueChange={(sites) => updateFilters({ sites })}
-                />
-                <DataTableFacetedFilter
-                  title={t('Provider')}
-                  options={options.providerOptions}
-                  value={providerValues}
-                  onValueChange={(providers) => updateFilters({ providers })}
-                />
-              </>
-            }
+            actions={<ExportPayableButton kind='usages' filter={filter} />}
           />
         }
       />
