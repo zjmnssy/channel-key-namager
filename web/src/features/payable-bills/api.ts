@@ -18,9 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import i18n from 'i18next'
 
-import { toIntlLocale } from '@/i18n/languages'
 import { api } from '@/lib/api'
-import { createServerError } from '@/lib/server-error-message'
+import { fetchExportFile, joinQueryList } from '@/lib/export-file'
 
 import type {
   ApiResponse,
@@ -36,44 +35,14 @@ import type {
 
 const BASE = '/api/payable_bill'
 
-// Id lists travel as comma-separated strings and are left out when empty.
+// The list and export endpoints share one filter.
 function filterParams(filter: PayableBillFilter) {
   return {
     start_date: filter.start_date,
     end_date: filter.end_date,
-    site_ids: filter.site_ids?.length ? filter.site_ids.join(',') : undefined,
-    provider_ids: filter.provider_ids?.length
-      ? filter.provider_ids.join(',')
-      : undefined,
+    site_ids: joinQueryList(filter.site_ids),
+    provider_ids: joinQueryList(filter.provider_ids),
   }
-}
-
-// Returns the xlsx file; parameter errors come back as a JSON body instead.
-async function downloadExport(
-  path: string,
-  filter: PayableBillFilter
-): Promise<Blob> {
-  const res = await api.get<Blob>(`${BASE}${path}`, {
-    params: filterParams(filter),
-    headers: {
-      // Without a saved language preference the file follows the interface.
-      'Accept-Language': toIntlLocale(i18n.resolvedLanguage || i18n.language),
-    },
-    responseType: 'blob',
-    disableDuplicate: true,
-    // Only silences the session-expired toast; the caller reports failures.
-    skipErrorHandler: true,
-  })
-  if (res.data.type.includes('json')) {
-    let body: unknown
-    try {
-      body = JSON.parse(await res.data.text())
-    } catch {
-      throw new Error(i18n.t('Failed to export bills'))
-    }
-    throw createServerError(body)
-  }
-  return res.data
 }
 
 export async function listPayablePullTasks(
@@ -101,7 +70,11 @@ export async function listPayableUsages(
 }
 
 export function exportPayableUsages(filter: PayableBillFilter): Promise<Blob> {
-  return downloadExport('/usages/export', filter)
+  return fetchExportFile(
+    `${BASE}/usages/export`,
+    filterParams(filter),
+    i18n.t('Failed to export bills')
+  )
 }
 
 /** A provider id of 0 clears the manual setting of the channel. */
@@ -127,7 +100,11 @@ export async function listPayableProviderBills(
 export function exportPayableProviderBills(
   filter: PayableBillFilter
 ): Promise<Blob> {
-  return downloadExport('/providers/export', filter)
+  return fetchExportFile(
+    `${BASE}/providers/export`,
+    filterParams(filter),
+    i18n.t('Failed to export bills')
+  )
 }
 
 export async function getPayableBillOptions(): Promise<

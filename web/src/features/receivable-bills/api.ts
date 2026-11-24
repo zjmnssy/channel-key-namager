@@ -18,9 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import i18n from 'i18next'
 
-import { toIntlLocale } from '@/i18n/languages'
 import { api } from '@/lib/api'
-import { createServerError } from '@/lib/server-error-message'
+import { fetchExportFile, joinQueryList } from '@/lib/export-file'
 
 import type {
   ApiResponse,
@@ -33,11 +32,6 @@ import type {
   TrendQuery,
 } from './types'
 
-// Array parameters travel as comma-separated strings and are left out when empty.
-function joinList(values?: (string | number)[]): string | undefined {
-  return values && values.length > 0 ? values.join(',') : undefined
-}
-
 export async function listReceivableBills(
   query: DailyBillQuery
 ): Promise<ApiResponse<Page<ReceivableBill>>> {
@@ -47,43 +41,24 @@ export async function listReceivableBills(
       page_size: query.page_size,
       start_date: query.start_date,
       end_date: query.end_date,
-      site_ids: joinList(query.site_ids),
-      statuses: joinList(query.statuses),
+      site_ids: joinQueryList(query.site_ids),
+      statuses: joinQueryList(query.statuses),
     },
   })
   return res.data
 }
 
-// Returns the xlsx file; parameter errors come back as a JSON body instead.
-export async function exportReceivableBills(
-  filter: DailyBillFilter
-): Promise<Blob> {
-  const res = await api.get<Blob>('/api/receivable_bill/daily/export', {
-    params: {
+export function exportReceivableBills(filter: DailyBillFilter): Promise<Blob> {
+  return fetchExportFile(
+    '/api/receivable_bill/daily/export',
+    {
       start_date: filter.start_date,
       end_date: filter.end_date,
-      site_ids: joinList(filter.site_ids),
-      statuses: joinList(filter.statuses),
+      site_ids: joinQueryList(filter.site_ids),
+      statuses: joinQueryList(filter.statuses),
     },
-    headers: {
-      // Without a saved language preference the file follows the interface.
-      'Accept-Language': toIntlLocale(i18n.resolvedLanguage || i18n.language),
-    },
-    responseType: 'blob',
-    disableDuplicate: true,
-    // Only silences the session-expired toast; the caller reports failures.
-    skipErrorHandler: true,
-  })
-  if (res.data.type.includes('json')) {
-    let body: unknown
-    try {
-      body = JSON.parse(await res.data.text())
-    } catch {
-      throw new Error(i18n.t('Failed to export bills'))
-    }
-    throw createServerError(body)
-  }
-  return res.data
+    i18n.t('Failed to export bills')
+  )
 }
 
 export async function resyncReceivableBill(
@@ -102,7 +77,7 @@ export async function getReceivableBillTrend(
       date: query.date,
       start_date: query.start_date,
       end_date: query.end_date,
-      site_ids: joinList(query.site_ids),
+      site_ids: joinQueryList(query.site_ids),
     },
   })
   return res.data
