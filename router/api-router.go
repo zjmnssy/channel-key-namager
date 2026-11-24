@@ -365,6 +365,7 @@ func SetApiRouter(router *gin.Engine) {
 			payableBillRoute.GET("/usages", controller.GetPayableUsages)
 			payableBillRoute.GET("/providers", controller.GetPayableProviderBills)
 			payableBillRoute.GET("/options", controller.GetPayableOptions)
+			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
 		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)

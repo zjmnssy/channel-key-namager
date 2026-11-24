@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
@@ -73,6 +74,16 @@ type payableProviderBillView struct {
 	PayableAmount   *string  `json:"payable_amount"`
 }
 
+func newPayableUsageView(row model.PayableUsageRow) payableUsageView {
+	view := payableUsageView{PayableUsageRow: row,
+		UsedAmount: model.ReceivableAmount(row.UsedQuota, row.QuotaPerUnit).StringFixed(6)}
+	if row.DeltaQuota != nil {
+		delta := model.ReceivableAmount(*row.DeltaQuota, row.QuotaPerUnit).StringFixed(6)
+		view.DeltaAmount = &delta
+	}
+	return view
+}
+
 func GetPayablePullTasks(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	tasks, total, err := model.ListPayablePullTasks(pageInfo.GetStartIdx(), pageInfo.GetPageSize())
@@ -127,12 +138,7 @@ func GetPayableUsages(c *gin.Context) {
 	}
 	views := make([]payableUsageView, len(rows))
 	for i, row := range rows {
-		views[i] = payableUsageView{PayableUsageRow: row,
-			UsedAmount: model.ReceivableAmount(row.UsedQuota, row.QuotaPerUnit).StringFixed(6)}
-		if row.DeltaQuota != nil {
-			delta := model.ReceivableAmount(*row.DeltaQuota, row.QuotaPerUnit).StringFixed(6)
-			views[i].DeltaAmount = &delta
-		}
+		views[i] = newPayableUsageView(row)
 	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(views)
@@ -185,4 +191,75 @@ func GetPayableOptions(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, gin.H{"sites": sites, "providers": providers})
+}
+
+// SetPayableUsageProvider 手动设置一行明细的提供商；provider_id 为 0 表示清除该站点渠道的手动设置。
+func SetPayableUsageProvider(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiErrorT(c, "Invalid ID")
+		return
+	}
+	var input struct {
+		ProviderId int `json:"provider_id"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &input); err != nil || input.ProviderId < 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+
+	action := "payable_bill.set_provider"
+	if input.ProviderId == 0 {
+		action = "payable_bill.clear_provider"
+	}
+	params := model.AuditFields{"usage_id": id, "provider_id": input.ProviderId}
+	success := false
+	defer func() {
+		content := auditContentEN(action, params)
+		if !success {
+			content = "Failed to set the provider of channel usage"
+		}
+		model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), content, c.ClientIP(), action, params,
+			auditOperatorInfo(c), &model.AuditRequestInfo{
+				Method: c.Request.Method, Route: c.FullPath(), Status: c.Writer.Status(), Success: success,
+			}, c)
+		markAuditLogged(c)
+	}()
+
+	before, after, err := model.SetPayableUsageProvider(id, input.ProviderId, common.GetTimestamp())
+	if before.Id != 0 {
+		params["site_id"] = before.SiteId
+		params["site_name"] = before.SiteName
+		params["remote_channel_id"] = before.RemoteChannelId
+		params["remote_channel_name"] = before.RemoteChannelName
+		params["bill_date"] = before.BillDate
+		params["previous_provider_id"] = before.ProviderId
+		params["previous_provider_name"] = before.ProviderName
+		params["previous_discount"] = before.PayableDiscount
+	}
+	switch {
+	case errors.Is(err, model.ErrPayableUsageNotFound):
+		params["failure_reason"] = "not_found"
+		common.ApiErrorT(c, err.Error())
+		return
+	case errors.Is(err, model.ErrPayableProviderInvalid):
+		params["failure_reason"] = "invalid_provider"
+		common.ApiErrorT(c, err.Error())
+		return
+	case err != nil:
+		params["failure_reason"] = "database_error"
+		common.ApiError(c, err)
+		return
+	}
+	params["provider_name"] = after.ProviderName
+	params["discount"] = after.PayableDiscount
+
+	row, err := model.GetPayableUsageRow(id)
+	if err != nil {
+		params["failure_reason"] = "database_error"
+		common.ApiError(c, err)
+		return
+	}
+	success = true
+	common.ApiSuccess(c, newPayableUsageView(row))
 }

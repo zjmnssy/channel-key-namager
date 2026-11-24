@@ -1,9 +1,17 @@
 package model
 
 import (
+	"errors"
 	"maps"
 
 	"github.com/QuantumNous/new-api/common"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var (
+	ErrPayableUsageNotFound   = errors.New("Channel usage does not exist")
+	ErrPayableProviderInvalid = errors.New("The selected user is not a channel supplier")
 )
 
 // PayableRemoteChannel 是站点上待确定提供商的一个渠道。
@@ -22,12 +30,16 @@ type PayableProvider struct {
 
 // PayableSuppliers 返回 userIDs 里仍是渠道供应商的用户（角色 5、未软删除，已禁用的也算），只取 id、username、payable_discount。
 func PayableSuppliers(userIDs []int) (map[int]User, error) {
+	return payableSuppliersIn(DB, userIDs)
+}
+
+func payableSuppliersIn(db *gorm.DB, userIDs []int) (map[int]User, error) {
 	suppliers := map[int]User{}
 	if len(userIDs) == 0 {
 		return suppliers, nil
 	}
 	var users []User
-	if err := DB.Select("id", "username", "payable_discount").
+	if err := db.Select("id", "username", "payable_discount").
 		Where("id IN ? AND role = ?", userIDs, common.RoleChannelSupplierUser).Find(&users).Error; err != nil {
 		return nil, err
 	}
@@ -148,4 +160,50 @@ func hasSupplier(suppliers map[int]User, id int) bool {
 
 func payableProviderOf(user User, source string) PayableProvider {
 	return PayableProvider{ID: user.Id, Name: user.Username, Source: source, Discount: user.PayableDiscount}
+}
+
+// SetPayableUsageProvider 在一个事务里手动设置一行明细的提供商。providerID > 0 时用户必须仍是供应商：
+// upsert 该站点渠道的指定记录，并只更新这一行的提供商、来源为 manual、折扣快照取该用户此刻的折扣（可为空）。
+// providerID == 0 时删除该站点渠道的指定记录，行不变。其他日期的行都不改。
+// 明细存在时 before 总是有值，便于调用方写审计。
+func SetPayableUsageProvider(usageID, providerID int, now int64) (before PayableChannelUsage, after PayableChannelUsage, err error) {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).Where("id = ?", usageID).First(&before).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrPayableUsageNotFound
+			}
+			return err
+		}
+		after = before
+		if providerID == 0 {
+			return tx.Where("site_id = ? AND remote_channel_id = ?", before.SiteId, before.RemoteChannelId).
+				Delete(&PayableProviderOverride{}).Error
+		}
+		suppliers, err := payableSuppliersIn(tx, []int{providerID})
+		if err != nil {
+			return err
+		}
+		supplier, ok := suppliers[providerID]
+		if !ok {
+			return ErrPayableProviderInvalid
+		}
+		override := PayableProviderOverride{SiteId: before.SiteId, RemoteChannelId: before.RemoteChannelId,
+			ProviderId: providerID, CreatedTime: now, UpdatedTime: now}
+		err = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "site_id"}, {Name: "remote_channel_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"provider_id", "updated_time"}),
+		}).Create(&override).Error
+		if err != nil {
+			return err
+		}
+		err = tx.Model(&PayableChannelUsage{}).Where("id = ?", usageID).Updates(map[string]any{
+			"provider_id": supplier.Id, "provider_name": supplier.Username, "provider_source": PayableProviderManual,
+			"payable_discount": supplier.PayableDiscount, "updated_time": now,
+		}).Error
+		if err != nil {
+			return err
+		}
+		return tx.First(&after, usageID).Error
+	})
+	return before, after, err
 }

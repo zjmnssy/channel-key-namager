@@ -186,6 +186,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/payable_bill/usages?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/providers?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/options", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPut, path: "/api/payable_bill/usages/1/provider", supplierStatus: http.StatusForbidden},
 	}
 	for _, route := range channelPermissionRoutes {
 		if route.adminOnly {
@@ -228,6 +229,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/payable_bill/usages?start_date=20261101&end_date=20261123":          true,
 		"GET /api/payable_bill/providers?start_date=20261101&end_date=20261123":       true,
 		"GET /api/payable_bill/options":                                               true,
+		"PUT /api/payable_bill/usages/1/provider":                                     true,
 	}
 	for _, test := range tests {
 		key := test.method + " " + test.path

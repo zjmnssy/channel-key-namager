@@ -1249,3 +1249,151 @@ func TestPayableUsagesWithoutLimitReturnsAllRows(t *testing.T) {
 	assert.Equal(t, days*channels/2, counted)
 	assert.Equal(t, days, manual)
 }
+
+func TestPayableBillSetProvider(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "ps-s1")
+	require.NoError(t, db.Model(s1).Update("payable_discount", 0.8).Error)
+	s2 := channelPushSeedSupplier(t, db, "ps-s2") // 折扣为空
+	u3 := &model.User{Username: "ps-u3", Role: common.RoleCommonUser, Status: 1, AffCode: "ps-u3"}
+	require.NoError(t, db.Create(u3).Error)
+
+	site := receivableSeedSite(t, db, "ps-site", "https://ps.example.com", 1)
+	taskOld := payableSeedTask(t, db, 20261121, model.PayableTaskSuccess)
+	taskNew := payableSeedTask(t, db, 20261122, model.PayableTaskSuccess)
+	pullOld := payableSeedPull(t, db, taskOld, site.Id, model.PayablePullSuccess)
+	pullNew := payableSeedPull(t, db, taskNew, site.Id, model.PayablePullSuccess)
+	other := payableSeedUsage(t, db, pullOld, 1, 500000, payablePtr(int64(500000)), 0, nil)
+	row := payableSeedUsage(t, db, pullNew, 1, 1000000, payablePtr(int64(500000)), 0, nil)
+	sibling := payableSeedUsage(t, db, pullNew, 2, 100, payablePtr(int64(10)), 0, nil)
+	require.NoError(t, db.Model(row).Updates(map[string]any{"provider_source": model.PayableProviderUnknown, "provider_name": ""}).Error)
+
+	setProvider := func(id string, body string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/payable_bill/usages/"+id+"/provider", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "id", Value: id}}
+		c.Set("id", 1)
+		c.Set("role", common.RoleRootUser)
+		c.Set("username", "root")
+		SetPayableUsageProvider(c)
+		return response
+	}
+	audits := func() (actions []string, success []bool, params []map[string]any) {
+		var logs []model.AuditLog
+		require.NoError(t, model.LOG_DB.Where("action LIKE ?", "payable_bill.%").Order("id").Find(&logs).Error)
+		for _, log := range logs {
+			require.NotNil(t, log.Other.Op)
+			encoded, err := common.Marshal(log.Other.Op.Params)
+			require.NoError(t, err)
+			var decoded map[string]any
+			require.NoError(t, common.Unmarshal(encoded, &decoded))
+			actions, success, params = append(actions, log.Action), append(success, log.Success), append(params, decoded)
+		}
+		return actions, success, params
+	}
+	rowID := strconv.Itoa(row.Id)
+
+	// 1. 设为 s1：只改这一行，快照取 s1 此刻的折扣，指定表新增记录
+	response := setProvider(rowID, `{"provider_id":`+strconv.Itoa(s1.Id)+`}`)
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var view map[string]any
+	require.NoError(t, common.Unmarshal(reply.Data, &view))
+	assert.EqualValues(t, s1.Id, view["provider_id"])
+	assert.Equal(t, "ps-s1", view["provider_name"])
+	assert.Equal(t, model.PayableProviderManual, view["provider_source"])
+	assert.Equal(t, 0.8, view["payable_discount"])
+	assert.Equal(t, true, view["counted"])
+	assert.Equal(t, true, view["manual"])
+	assert.Equal(t, "1.000000", view["delta_amount"])
+	assert.Equal(t, "2.000000", view["used_amount"])
+	var overrides []model.PayableProviderOverride
+	require.NoError(t, db.Find(&overrides).Error)
+	require.Len(t, overrides, 1)
+	assert.Equal(t, model.PayableProviderOverride{Id: overrides[0].Id, SiteId: site.Id, RemoteChannelId: 1, ProviderId: s1.Id,
+		CreatedTime: overrides[0].CreatedTime, UpdatedTime: overrides[0].UpdatedTime}, overrides[0])
+	var otherAfter, siblingAfter model.PayableChannelUsage
+	require.NoError(t, db.First(&otherAfter, other.Id).Error)
+	assert.Equal(t, *other, otherAfter) // 其他日期的行不变
+	require.NoError(t, db.First(&siblingAfter, sibling.Id).Error)
+	assert.Equal(t, *sibling, siblingAfter)
+	actions, success, params := audits()
+	require.Len(t, actions, 1)
+	assert.Equal(t, "payable_bill.set_provider", actions[0])
+	assert.True(t, success[0])
+	assert.EqualValues(t, row.Id, params[0]["usage_id"])
+	assert.EqualValues(t, 0, params[0]["previous_provider_id"])
+	assert.EqualValues(t, s1.Id, params[0]["provider_id"])
+	assert.Equal(t, "ps-s1", params[0]["provider_name"])
+	assert.Equal(t, 0.8, params[0]["discount"])
+	assert.EqualValues(t, 20261122, params[0]["bill_date"])
+
+	// 之后的同步按指定表得到 s1、manual
+	resolved, err := model.ResolvePayableProviders(site.Id, 20261123, []model.PayableRemoteChannel{{ID: 1}})
+	require.NoError(t, err)
+	assert.Equal(t, model.PayableProvider{ID: s1.Id, Name: "ps-s1", Source: model.PayableProviderManual, Discount: payablePtr(0.8)}, resolved[1])
+
+	// 2. 改设为折扣为空的 s2：覆盖指定记录，折扣快照为空，审计带上一次的值
+	response = setProvider(rowID, `{"provider_id":`+strconv.Itoa(s2.Id)+`}`)
+	reply = receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	require.NoError(t, common.Unmarshal(reply.Data, &view))
+	assert.EqualValues(t, s2.Id, view["provider_id"])
+	assert.Nil(t, view["payable_discount"])
+	require.NoError(t, db.Find(&overrides).Error)
+	require.Len(t, overrides, 1)
+	assert.Equal(t, s2.Id, overrides[0].ProviderId)
+	_, _, params = audits()
+	require.Len(t, params, 2)
+	assert.EqualValues(t, s1.Id, params[1]["previous_provider_id"])
+	assert.Equal(t, 0.8, params[1]["previous_discount"])
+
+	// 3. 设为普通用户被拒绝，数据不变，审计记失败
+	response = setProvider(rowID, `{"provider_id":`+strconv.Itoa(u3.Id)+`}`)
+	reply = receivableReplyOf(t, response)
+	assert.False(t, reply.Success)
+	assert.Equal(t, "The selected user is not a channel supplier", reply.MessageKey)
+	require.NoError(t, db.Find(&overrides).Error)
+	require.Len(t, overrides, 1)
+	assert.Equal(t, s2.Id, overrides[0].ProviderId)
+	actions, success, params = audits()
+	require.Len(t, actions, 3)
+	assert.False(t, success[2])
+	assert.Equal(t, "invalid_provider", params[2]["failure_reason"])
+
+	// 4. provider_id 0 清除指定记录，行不变
+	var reloaded model.PayableChannelUsage
+	require.NoError(t, db.First(&reloaded, row.Id).Error)
+	response = setProvider(rowID, `{"provider_id":0}`)
+	reply = receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	require.NoError(t, common.Unmarshal(reply.Data, &view))
+	assert.Equal(t, false, view["manual"])
+	assert.EqualValues(t, s2.Id, view["provider_id"])
+	var count int64
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&count).Error)
+	assert.Zero(t, count)
+	var afterClear model.PayableChannelUsage
+	require.NoError(t, db.First(&afterClear, row.Id).Error)
+	assert.Equal(t, reloaded, afterClear)
+	actions, success, params = audits()
+	require.Len(t, actions, 4)
+	assert.Equal(t, "payable_bill.clear_provider", actions[3])
+	assert.True(t, success[3])
+	assert.EqualValues(t, s2.Id, params[3]["previous_provider_id"])
+	assert.EqualValues(t, 0, params[3]["provider_id"])
+
+	// 5. 不存在的明细、非法参数
+	reply = receivableReplyOf(t, setProvider("999999", `{"provider_id":`+strconv.Itoa(s1.Id)+`}`))
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Channel usage does not exist", reply.MessageKey)
+	actions, success, params = audits()
+	require.Len(t, actions, 5)
+	assert.False(t, success[4])
+	assert.Equal(t, "not_found", params[4]["failure_reason"])
+	assert.False(t, receivableReplyOf(t, setProvider("0", `{"provider_id":1}`)).Success)
+	assert.False(t, receivableReplyOf(t, setProvider(rowID, `{"provider_id":-1}`)).Success)
+	assert.False(t, receivableReplyOf(t, setProvider(rowID, `not json`)).Success)
+}

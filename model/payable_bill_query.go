@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"slices"
 
 	"github.com/QuantumNous/new-api/common"
@@ -319,4 +320,27 @@ func ListPayableProviderOptions() ([]PayableProviderOption, error) {
 			Disabled: user.Status != common.UserStatusEnabled, PayableDiscount: user.PayableDiscount}
 	}
 	return options, nil
+}
+
+// GetPayableUsageRow 返回一行明细及其 counted、manual 标记；明细不存在时返回 ErrPayableUsageNotFound。
+func GetPayableUsageRow(id int) (PayableUsageRow, error) {
+	var row PayableUsageRow
+	if err := DB.First(&row.PayableChannelUsage, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return row, ErrPayableUsageNotFound
+		}
+		return row, err
+	}
+	var pulls int64
+	err := DB.Model(&PayablePullSite{}).Where("id = ? AND status = ?", row.PullSiteId, PayablePullSuccess).Count(&pulls).Error
+	if err != nil {
+		return row, err
+	}
+	var overrides int64
+	err = DB.Model(&PayableProviderOverride{}).Where("site_id = ? AND remote_channel_id = ?", row.SiteId, row.RemoteChannelId).Count(&overrides).Error
+	if err != nil {
+		return row, err
+	}
+	row.Counted, row.Manual = pulls > 0, overrides > 0
+	return row, nil
 }
