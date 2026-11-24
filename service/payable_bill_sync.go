@@ -164,7 +164,7 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 // newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行。增量以该站点上一次地址相同的完整拉取为基线：
 // 没有基线时为空（首次同步）；基线里没有的渠道是新渠道，基线为 0，但基线那次拉取少于站点报的总数时，
 // 这样的渠道可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
-// 提供商在 Task 4 接入之前一律为未知。
+// 提供商按手动指定、渠道名标记、历史明细的顺序确定（每页批量解析一次），并快照该用户此刻的应付折扣。
 func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -195,9 +195,22 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 		return nil, err
 	}
 
+	remoteChannels := make([]model.PayableRemoteChannel, len(fresh))
+	for i, item := range fresh {
+		remoteChannels[i].ID = item.ID
+		if markerSiteID, localID, ok := ParseChannelPushMarker(item.Name); ok && markerSiteID == pull.SiteId {
+			remoteChannels[i].LocalChannelID = localID
+		}
+	}
+	providers, err := model.ResolvePayableProviders(pull.SiteId, pull.BillDate, remoteChannels)
+	if err != nil {
+		return nil, err
+	}
+
 	syncedAt := time.Now().Unix()
 	rows := make([]*model.PayableChannelUsage, 0, len(fresh))
 	for _, item := range fresh {
+		provider := providers[item.ID]
 		row := &model.PayableChannelUsage{
 			TaskId:            pull.TaskId,
 			PullSiteId:        pull.Id,
@@ -209,7 +222,10 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 			RemoteChannelName: truncateText(item.Name, payableChannelNameSize),
 			UsedQuota:         item.UsedQuota,
 			QuotaPerUnit:      model.ReceivableBillQuotaPerUnit,
-			ProviderSource:    model.PayableProviderUnknown,
+			ProviderId:        provider.ID,
+			ProviderName:      provider.Name,
+			ProviderSource:    provider.Source,
+			PayableDiscount:   provider.Discount,
 			SyncedAt:          syncedAt,
 			CreatedTime:       now,
 			UpdatedTime:       now,

@@ -370,6 +370,7 @@ func TestPayablePullBaseURLChangeResetsUnfinishedPulls(t *testing.T) {
 type fakeChannel struct {
 	ID        int
 	UsedQuota int64
+	Name      string // 为空时是 "ch-{ID}"
 }
 
 // fakeChannelSite 是假站点的渠道列表接口：把 channels 按 id 降序、每页 100 个分页返回，并记下每次请求的页码。
@@ -409,7 +410,8 @@ func (s *fakeChannelSite) reply(page int) (int, string) {
 	sorted := slices.SortedFunc(slices.Values(s.channels), func(a, b fakeChannel) int { return cmp.Compare(b.ID, a.ID) })
 	items := []map[string]any{}
 	for _, channel := range sorted[min(max(page-1, 0)*100, len(sorted)):min(max(page, 0)*100, len(sorted))] {
-		items = append(items, map[string]any{"id": channel.ID, "name": "ch-" + strconv.Itoa(channel.ID), "used_quota": channel.UsedQuota})
+		name := cmp.Or(channel.Name, "ch-"+strconv.Itoa(channel.ID))
+		items = append(items, map[string]any{"id": channel.ID, "name": name, "used_quota": channel.UsedQuota})
 	}
 	total := s.total
 	if total < 0 {
@@ -793,4 +795,90 @@ func TestPayableBillDeltaAfterCountMismatch(t *testing.T) {
 	})
 	assert.Equal(t, []int{1}, payableScan(fake, day1+2*day))
 	assert.Equal(t, map[int]string{a: "normal 40", b: "normal 30", c: "first_sync nil"}, payableDeltas(t, db, 20261124))
+}
+
+func TestPayableBillProviderResolution(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pb-s1")
+	s2 := channelPushSeedSupplier(t, db, "pb-s2")
+	u3 := &model.User{Username: "pb-u3", Role: common.RoleCommonUser, Status: 1, AffCode: "pb-u3"}
+	require.NoError(t, db.Create(u3).Error)
+	discount := 0.8
+	require.NoError(t, db.Model(s1).Update("payable_discount", discount).Error)
+	ch1 := channelPushSeedChannel(t, db, s1, "pb-ch1", 1, "m", 1)
+	ch2 := channelPushSeedChannel(t, db, s2, "pb-ch2", 1, "m", 1)
+
+	fake := newFakeChannelSite(t)
+	site := receivableSeedSite(t, db, "pb-provider", fake.server.URL, 1)
+	mark := func(siteID, channelID int) string {
+		return "x-dcmark-" + strconv.Itoa(siteID) + "-" + strconv.Itoa(channelID)
+	}
+	fake.update(func() {
+		fake.channels = []fakeChannel{
+			{ID: 1, Name: mark(site.Id, ch1.Id)},
+			{ID: 2, Name: mark(site.Id, ch2.Id)},
+			{ID: 3, Name: mark(site.Id+100, ch1.Id)},
+			{ID: 4, Name: "manual"},
+			{ID: 5, Name: mark(site.Id, ch1.Id)},
+			{ID: 6, Name: "renamed"},
+			{ID: 7, Name: "plain"},
+		}
+	})
+	require.NoError(t, db.Create(&[]model.PayableProviderOverride{
+		{SiteId: site.Id, RemoteChannelId: 4, ProviderId: s2.Id},
+		{SiteId: site.Id, RemoteChannelId: 5, ProviderId: u3.Id},
+	}).Error)
+	// 上一账单日的明细：r6 提供商是 s1（继承）；r7 的提供商 id 已不是供应商，不继承
+	require.NoError(t, db.Create(&[]model.PayableChannelUsage{
+		{TaskId: 900, PullSiteId: 900, BillDate: 20261121, SiteId: site.Id, RemoteChannelId: 6, ProviderId: s1.Id},
+		{TaskId: 900, PullSiteId: 900, BillDate: 20261121, SiteId: site.Id, RemoteChannelId: 7, ProviderId: u3.Id},
+	}).Error)
+
+	const day1 = int64(1795363800) // 账单日期 20261122
+	assert.Equal(t, []int{1}, payableScan(fake, day1))
+
+	type resolved struct {
+		ProviderId int
+		Source     string
+		Discount   *float64
+	}
+	snapshot := func() map[int]resolved {
+		var rows []model.PayableChannelUsage
+		require.NoError(t, db.Where("bill_date = ?", 20261122).Find(&rows).Error)
+		got := make(map[int]resolved, len(rows))
+		for _, row := range rows {
+			got[row.RemoteChannelId] = resolved{row.ProviderId, row.ProviderSource, row.PayableDiscount}
+			if row.ProviderId > 0 {
+				assert.NotEmpty(t, row.ProviderName)
+			} else {
+				assert.Empty(t, row.ProviderName)
+			}
+		}
+		return got
+	}
+	assert.Equal(t, map[int]resolved{
+		1: {s1.Id, model.PayableProviderParsed, &discount},
+		2: {s2.Id, model.PayableProviderParsed, nil},
+		3: {0, model.PayableProviderUnknown, nil},
+		4: {s2.Id, model.PayableProviderManual, nil},
+		5: {s1.Id, model.PayableProviderParsed, &discount},
+		6: {s1.Id, model.PayableProviderInherited, &discount},
+		7: {0, model.PayableProviderUnknown, nil},
+	}, snapshot())
+
+	// 之后改折扣，已写入的快照不变
+	require.NoError(t, db.Model(s1).Update("payable_discount", 0.5).Error)
+	assert.Equal(t, 0.8, *snapshot()[1].Discount)
+
+	// 供应商被禁用仍然算供应商；改成普通用户后，手动指定、标记、历史都不再命中
+	require.NoError(t, db.Model(s2).Update("status", 2).Error)
+	providers, err := model.ResolvePayableProviders(site.Id, 20261123, []model.PayableRemoteChannel{{ID: 2, LocalChannelID: ch2.Id}, {ID: 4}})
+	require.NoError(t, err)
+	assert.Equal(t, s2.Id, providers[2].ID)
+	assert.Equal(t, s2.Id, providers[4].ID)
+	require.NoError(t, db.Model(s2).Update("role", common.RoleCommonUser).Error)
+	providers, err = model.ResolvePayableProviders(site.Id, 20261123, []model.PayableRemoteChannel{{ID: 2, LocalChannelID: ch2.Id}, {ID: 4}})
+	require.NoError(t, err)
+	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, providers[2])
+	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, providers[4])
 }
