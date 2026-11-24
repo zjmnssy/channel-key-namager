@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,9 +28,11 @@ import (
 func setupPayableBillTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupThirdPartySiteTest(t)
-	originalOptions := service.PayableBillClientOptions
+	originalOptions, originalSince := service.PayableBillClientOptions, service.PayableBillSince
 	service.PayableBillClientOptions = service.ChannelPushClientOptions{Pace: 0, Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute}
-	t.Cleanup(func() { service.PayableBillClientOptions = originalOptions })
+	// 扫描写库的时刻是传入的 now 加上扫描开始以来经过的时间；这里经过的时间恒为 0，时刻只由测试传入的 now 决定。
+	service.PayableBillSince = func(time.Time) time.Duration { return 0 }
+	t.Cleanup(func() { service.PayableBillClientOptions, service.PayableBillSince = originalOptions, originalSince })
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.AuditLog{},
 		&model.PayablePullTask{}, &model.PayablePullSite{}, &model.PayableChannelUsage{}, &model.PayableProviderOverride{}))
 	clearTables := func() {
@@ -772,14 +775,14 @@ func TestPayableBillDeltaRules(t *testing.T) {
 
 func TestPayableBillDeltaAfterCountMismatch(t *testing.T) {
 	db := setupPayableBillTest(t)
-	const a, b, c = 11, 12, 13
-	fake := newFakeChannelSite(t, fakeChannel{ID: a, UsedQuota: 100}, fakeChannel{ID: b, UsedQuota: 500})
+	const a, b, c, d = 11, 12, 13, 14
+	fake := newFakeChannelSite(t, fakeChannel{ID: a, UsedQuota: 100}, fakeChannel{ID: b, UsedQuota: 500}, fakeChannel{ID: d, UsedQuota: 300})
 	site := receivableSeedSite(t, db, "pb-mismatch", fake.server.URL, 1)
 	const day1, day = int64(1795363800), int64(86400) // 北京 2026-11-23 00:10 拉账单日期 20261122，之后每天 00:10
 
 	// 日 1：完整拉取
 	assert.Equal(t, []int{1}, payableScan(fake, day1))
-	// 日 2：站点报 3 个渠道，两遍都只给 2 个：以已拉到的为准结束（success，总数不一致）
+	// 日 2：站点报 3 个渠道，两遍都只给 2 个（d 被漏掉）：以已拉到的为准结束（success，总数不一致）
 	fake.update(func() {
 		fake.channels = []fakeChannel{{ID: a, UsedQuota: 160}, {ID: b, UsedQuota: 520}}
 		fake.total = 3
@@ -791,14 +794,169 @@ func TestPayableBillDeltaAfterCountMismatch(t *testing.T) {
 	require.Equal(t, 3, mismatched.ReportedTotal)
 	assert.Equal(t, map[int]string{a: "normal 60", b: "normal 20"}, payableDeltas(t, db, 20261123))
 
-	// 日 3：第三个渠道出现。日 2 少拉了渠道，基线里没有它不能说明它是新建的，按首次同步（增量为空，不计入账单）；
-	// 基线里有的渠道照常算增量
+	// 日 3：c 从没出现过。日 2 少拉了渠道，基线里没有它不能说明它是新建的，按首次同步（增量为空，不计入账单）；
+	// d 在日 2 被漏掉，基线取它在日 1 完整拉取里的累计值；日 2 有的渠道照常以日 2 为基线
 	fake.update(func() {
-		fake.channels = []fakeChannel{{ID: a, UsedQuota: 200}, {ID: b, UsedQuota: 550}, {ID: c, UsedQuota: 70}}
+		fake.channels = []fakeChannel{{ID: a, UsedQuota: 200}, {ID: b, UsedQuota: 550}, {ID: c, UsedQuota: 70}, {ID: d, UsedQuota: 330}}
 		fake.total = -1
 	})
 	assert.Equal(t, []int{1}, payableScan(fake, day1+2*day))
-	assert.Equal(t, map[int]string{a: "normal 40", b: "normal 30", c: "first_sync nil"}, payableDeltas(t, db, 20261124))
+	assert.Equal(t, map[int]string{a: "normal 40", b: "normal 30", c: "first_sync nil", d: "normal 30"}, payableDeltas(t, db, 20261124))
+}
+
+// 拉取期间渠道被删、站点临时返回空列表时，成功的拉取也可能漏掉已有的渠道；它再出现时，
+// 基线是它在更早的完整拉取里最近的累计值，不能当作新渠道把全部累计值记成增量。
+func TestPayableBillBaselineSurvivesMissedChannels(t *testing.T) {
+	const day1, day = int64(1795363800), int64(86400) // 北京 2026-11-23 00:10 拉账单日期 20261122，之后每天 00:10
+
+	t.Run("channel deleted between pages", func(t *testing.T) {
+		db := setupPayableBillTest(t)
+		channels := make([]fakeChannel, 101)
+		for i := range channels {
+			channels[i] = fakeChannel{ID: i + 1, UsedQuota: 50000000}
+		}
+		fake := newFakeChannelSite(t, channels...)
+		site := receivableSeedSite(t, db, "pb-shift", fake.server.URL, 1)
+		assert.Equal(t, []int{1, 2}, payableScan(fake, day1))
+
+		// 日 2：拉完第 1 页（渠道 101~2）后渠道 50 被删，后面的渠道前移一位，渠道 1 不在任何一页上，
+		// 第 2 页报的总数降到 100。按本遍见过的最大总数 101 核对，补扫一遍拉回渠道 1
+		fake.update(func() {
+			fake.intercept = func(page int) (int, string) {
+				if page == 2 {
+					fake.channels = slices.DeleteFunc(fake.channels, func(channel fakeChannel) bool { return channel.ID == 50 })
+				}
+				return 0, ""
+			}
+		})
+		assert.Equal(t, []int{1, 2, 1}, payableScan(fake, day1+day))
+		pull := payablePullOf(t, db, 20261123, site.Id)
+		assert.Equal(t, model.PayablePullSuccess, pull.Status)
+		assert.Equal(t, 101, pull.ChannelCount)
+		assert.Equal(t, 100, pull.ReportedTotal) // 补扫一遍重新计总数
+		assert.Empty(t, pull.Note)
+
+		// 日 3：渠道 1 照常以日 2 为基线；日 2 一致地完整拉取过，没见过的渠道 102 是新渠道
+		fake.update(func() {
+			fake.intercept = nil
+			fake.channels = append(slices.DeleteFunc(fake.channels, func(channel fakeChannel) bool { return channel.ID == 1 }),
+				fakeChannel{ID: 1, UsedQuota: 50000030}, fakeChannel{ID: 102, UsedQuota: 7})
+		})
+		assert.Equal(t, []int{1, 2}, payableScan(fake, day1+2*day))
+		deltas := payableDeltas(t, db, 20261124)
+		assert.Len(t, deltas, 101)
+		assert.Equal(t, "normal 30", deltas[1])
+		assert.Equal(t, "normal 0", deltas[2])
+		assert.Equal(t, "new_channel 7", deltas[102])
+	})
+
+	t.Run("temporarily empty list", func(t *testing.T) {
+		db := setupPayableBillTest(t)
+		const a, b, c = 11, 12, 13
+		fake := newFakeChannelSite(t, fakeChannel{ID: a, UsedQuota: 100}, fakeChannel{ID: b, UsedQuota: 500})
+		site := receivableSeedSite(t, db, "pb-empty", fake.server.URL, 1)
+		assert.Equal(t, []int{1}, payableScan(fake, day1))
+
+		// 日 2：站点临时返回 {"items":[],"total":0}，拉取以 0 个渠道成功
+		fake.update(func() { fake.channels = nil })
+		assert.Equal(t, []int{1}, payableScan(fake, day1+day))
+		require.Equal(t, model.PayablePullSuccess, payablePullOf(t, db, 20261123, site.Id).Status)
+
+		// 日 3：站点恢复。a、b 的基线是日 1 的累计值；c 是新渠道
+		fake.update(func() {
+			fake.channels = []fakeChannel{{ID: a, UsedQuota: 160}, {ID: b, UsedQuota: 520}, {ID: c, UsedQuota: 70}}
+		})
+		assert.Equal(t, []int{1}, payableScan(fake, day1+2*day))
+		assert.Equal(t, map[int]string{a: "normal 60", b: "normal 20", c: "new_channel 70"}, payableDeltas(t, db, 20261124))
+	})
+}
+
+// 建任务与改地址的站点编辑几乎同时发生时，进度快照可能还是旧地址：拉取改按站点当前的地址从头重拉，
+// 基线不取旧地址的完整拉取。
+func TestPayableBillPullFollowsCurrentSiteAddress(t *testing.T) {
+	db := setupPayableBillTest(t)
+	fake := newFakeChannelSite(t, fakeChannel{ID: 1, UsedQuota: 100})
+	site := receivableSeedSite(t, db, "pb-race", fake.server.URL, 1)
+	const day1, day = int64(1795363800), int64(86400) // 北京 2026-11-23 00:10 拉账单日期 20261122，之后每天 00:10
+	assert.Equal(t, []int{1}, payableScan(fake, day1))
+
+	// 日 2 的任务按旧地址建好之后地址才改（直接改库，模拟站点编辑没看到这个任务），
+	// 新地址是同一个假站点的另一种写法
+	created, err := model.CreatePayablePullTask(20261123, []*model.ThirdPartySite{site}, day1+day)
+	require.NoError(t, err)
+	require.True(t, created)
+	newURL := strings.Replace(fake.server.URL, "127.0.0.1", "localhost", 1)
+	require.NotEqual(t, fake.server.URL, newURL)
+	require.NoError(t, db.Model(&model.ThirdPartySite{}).Where("id = ?", site.Id).Update("base_url", newURL).Error)
+	fake.update(func() { fake.channels = []fakeChannel{{ID: 1, UsedQuota: 160}} })
+
+	assert.Equal(t, []int{1}, payableScan(fake, day1+day))
+	pull := payablePullOf(t, db, 20261123, site.Id)
+	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Equal(t, newURL, pull.SiteBaseURL)
+	assert.Equal(t, map[int]string{1: "first_sync nil"}, payableDeltas(t, db, 20261123))
+}
+
+// 扫描写库的时刻是传入的 now 加上扫描开始以来经过的时间：一次扫描可能持续数分钟，
+// 租约从认领的时刻起算，重试时间从请求实际结束的时刻起算，完成时间是实际结束的时刻。
+func TestPayableBillScanTimesIncludeElapsedTime(t *testing.T) {
+	db := setupPayableBillTest(t)
+	var elapsed atomic.Int64 // 扫描开始以来经过的秒数，由假站点在回答请求时推进
+	service.PayableBillSince = func(time.Time) time.Duration { return time.Duration(elapsed.Load()) * time.Second }
+	channels := make([]fakeChannel, 150)
+	for i := range channels {
+		channels[i] = fakeChannel{ID: i + 1, UsedQuota: 10}
+	}
+	fake := newFakeChannelSite(t, channels...)
+	site := receivableSeedSite(t, db, "pb-elapsed", fake.server.URL, 1)
+	const now = int64(1795363800) // 北京 2026-11-23 00:10
+	var leaseOfPage2 int64
+	var leaseErr error
+	page2Failed := false
+	fake.update(func() {
+		fake.intercept = func(page int) (int, string) {
+			if page == 1 {
+				elapsed.Store(300) // 第 1 页很慢，回答时扫描已进行了 300 秒
+				return 0, ""
+			}
+			var pull model.PayablePullSite
+			leaseErr = db.Where("site_id = ?", site.Id).First(&pull).Error
+			leaseOfPage2 = pull.LeaseUntil
+			elapsed.Add(4)
+			if !page2Failed {
+				page2Failed = true
+				return http.StatusBadGateway, ""
+			}
+			return 0, ""
+		}
+	})
+
+	assert.Equal(t, []int{1, 2}, payableScan(fake, now))
+	require.NoError(t, leaseErr)
+	assert.Equal(t, now+300+model.PayablePullLeaseSeconds, leaseOfPage2) // 第 2 页在第 1 页落库后（第 300 秒）认领
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullRetrying, pull.Status)
+	assert.Equal(t, now+304+60, pull.NextRetryAt) // 第 2 页在第 304 秒失败，从那时起等满 1 分钟
+	assert.Equal(t, now+304, pull.UpdatedTime)
+	assert.Equal(t, 100, pull.ChannelCount)
+	var syncedAt, createdTime []int64
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ?", pull.Id).Distinct().Pluck("synced_at", &syncedAt).Error)
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ?", pull.Id).Distinct().Pluck("created_time", &createdTime).Error)
+	assert.Equal(t, []int64{now + 300}, syncedAt) // 第 1 页的 100 行在第 300 秒拉到并写入
+	assert.Equal(t, []int64{now + 300}, createdTime)
+	task := payableTaskOf(t, db, 20261122)
+	assert.Equal(t, now, task.StartedTime) // 第一次请求在扫描开始时发出
+
+	// 到了重试时间再扫：第 2 页在这次扫描的第 4 秒拉完，进度与任务的完成时间都是那一刻
+	elapsed.Store(0)
+	assert.Equal(t, []int{2}, payableScan(fake, now+364))
+	pull = payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullSuccess, pull.Status)
+	assert.Equal(t, now+368, pull.FinishedTime)
+	task = payableTaskOf(t, db, 20261122)
+	assert.Equal(t, model.PayableTaskSuccess, task.Status)
+	assert.Equal(t, now, task.StartedTime)
+	assert.Equal(t, now+368, task.FinishedTime)
 }
 
 func TestPayableBillProviderResolution(t *testing.T) {

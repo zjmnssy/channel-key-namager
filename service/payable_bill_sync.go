@@ -20,7 +20,22 @@ const (
 	payableChannelNameSize = 255
 )
 
-// RunPayableBillScan 在 now 扫描一次，所有到期的站点进度处理完后返回。
+// PayableBillSince 量出扫描开始以来经过的时间（扫描开始时取的 time.Now() 带单调时钟读数），测试替换它来控制时间。
+var PayableBillSince = time.Since
+
+// payableScanClock 给出一次扫描里写库用的时刻：调用扫描时的 now 加上扫描开始以来经过的整秒数。
+// 一次扫描可能持续数分钟，认领租约、重试时间、完成时间都按当时的时刻算，不停在扫描开始的那一秒：
+// 否则排队几分钟后才认领的租约一认领就已过期，限流后等的时间也会比站点要求的短。
+type payableScanClock struct {
+	start time.Time // 扫描开始时的 time.Now()
+	at    int64     // 调用扫描时的 now，Unix 秒
+}
+
+func (c payableScanClock) now() int64 {
+	return c.at + int64(PayableBillSince(c.start)/time.Second)
+}
+
+// RunPayableBillScan 在 now 扫描一次，所有到期的站点进度处理完后返回。写库的时刻是 now 加上扫描开始以来经过的时间。
 // 先把已删除站点未完成的进度改为失败，并补正进度都已结束却仍为 running 的任务；
 // 北京时间过了当天 00:10 时创建账单日期为昨天的拉取任务（已有则跳过）；
 // 再给每个到期的进度一个回合，最多 payableBillMaxConcurrentSites 个站点同时进行。
@@ -30,24 +45,25 @@ func RunPayableBillScan(ctx context.Context, now time.Time) {
 			common.SysError(common.LogText("payable bill scan panicked: %v", recovered))
 		}
 	}()
+	clock := payableScanClock{start: time.Now(), at: now.Unix()}
 
-	if err := model.FailPayablePullsOfDeletedSites(model.DB, now.Unix()); err != nil {
+	if err := model.FailPayablePullsOfDeletedSites(model.DB, clock.now()); err != nil {
 		common.SysError(common.LogText("payable bill scan could not fail the pulls of deleted sites: %v", err))
 	}
-	if err := model.RefreshSettledPayableTasks(now.Unix()); err != nil {
+	if err := model.RefreshSettledPayableTasks(clock.now()); err != nil {
 		common.SysError(common.LogText("payable bill scan could not refresh the settled tasks: %v", err))
 	}
 	today := receivableBeijingDay(now)
 	if !now.Before(today.Add(payableBillPullTime)) {
 		sites, err := model.ListReceivableSyncSites()
 		if err == nil {
-			_, err = model.CreatePayablePullTask(model.ReceivableBillDate(today.AddDate(0, 0, -1)), sites, now.Unix())
+			_, err = model.CreatePayablePullTask(model.ReceivableBillDate(today.AddDate(0, 0, -1)), sites, clock.now())
 		}
 		if err != nil {
 			common.SysError(common.LogText("payable bill scan could not create the pull task: %v", err))
 		}
 	}
-	pulls, err := model.DuePayablePulls(now.Unix())
+	pulls, err := model.DuePayablePulls(clock.now())
 	if err != nil {
 		common.SysError(common.LogText("payable bill scan failed: %v", err))
 		return
@@ -66,7 +82,7 @@ func RunPayableBillScan(ctx context.Context, now time.Time) {
 				<-slots
 				wg.Done()
 			}()
-			if err := pullPayableSite(ctx, now.Unix(), pull.Id); err != nil {
+			if err := pullPayableSite(ctx, clock, pull.Id); err != nil {
 				common.SysError(common.LogText("payable bill pull failed: pull=%d error=%v", pull.Id, err))
 			}
 		})
@@ -77,9 +93,9 @@ func RunPayableBillScan(ctx context.Context, now time.Time) {
 // pullPayableSite 是一个站点进度在本次扫描中的回合：从进度记下的页码起逐页拉取，每页认领一次租约、请求一次、落库一次。
 // 请求失败（不论能否重试）、进度结束、租约丢失或拉满 channelPushMaxListPages 页时结束，剩下的等下一次扫描，
 // 所以出错的站点每次扫描只收到一个失败的请求。返回的是数据库错误；没来得及释放的租约到期后自然失效。
-func pullPayableSite(ctx context.Context, now int64, pullID int) error {
+func pullPayableSite(ctx context.Context, clock payableScanClock, pullID int) error {
 	for attempt := range channelPushMaxListPages {
-		lease, claimed, err := model.ClaimPayablePull(pullID, now)
+		lease, claimed, err := model.ClaimPayablePull(pullID, clock.now())
 		if err != nil || !claimed {
 			return err
 		}
@@ -89,7 +105,7 @@ func pullPayableSite(ctx context.Context, now int64, pullID int) error {
 			return err
 		}
 		if attempt == 0 {
-			if err := model.StartPayableTask(pull.TaskId, now); err != nil {
+			if err := model.StartPayableTask(pull.TaskId, clock.now()); err != nil {
 				return err
 			}
 		}
@@ -100,7 +116,15 @@ func pullPayableSite(ctx context.Context, now int64, pullID int) error {
 		if err != nil {
 			return err
 		}
-		goOn, err := pullPayablePage(ctx, now, pull, lease, site)
+		if site.BaseURL != pull.SiteBaseURL {
+			// 建任务与改地址的站点编辑几乎同时发生时，编辑没看到这个任务，快照仍是旧地址。按站点编辑改地址的做法
+			// 从第 1 页重拉（同时释放租约），下一轮重新认领后按新地址拉取，基线也只认新地址的完整拉取。
+			if err := model.RestartPayablePullAtBaseURL(pullID, lease, site, clock.now()); err != nil {
+				return err
+			}
+			continue
+		}
+		goOn, err := pullPayablePage(ctx, clock, pull, lease, site)
 		if err != nil || !goOn {
 			return err
 		}
@@ -110,8 +134,12 @@ func pullPayableSite(ctx context.Context, now int64, pullID int) error {
 
 // pullPayablePage 是一次尝试：向站点请求进度的下一页，把结果连同本页新出现渠道的明细一起落库，返回回合是否继续。
 // 一遍拉完、已写入的渠道仍少于站点报的总数时，从第 1 页补扫一遍；补扫后仍对不上，以已拉到的为准结束并记下说明。
-func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite, lease int64, site *model.ThirdPartySite) (bool, error) {
+// 站点报的总数取这一遍里见过的最大值，每遍从第 1 页重新计：拉取期间有渠道被删时后面的页报的总数变小，
+// 排在它后面的渠道整体前移、可能不在任何一页上，按变小的总数核对会漏掉它们。
+func pullPayablePage(ctx context.Context, clock payableScanClock, pull model.PayablePullSite, lease int64, site *model.ThirdPartySite) (bool, error) {
 	page := NewChannelPushClient(site, PayableBillClientOptions).ReadChannelPage(ctx, pull.NextPage)
+	// 请求结束的时刻：重试时间从这里起算，本页明细的同步时间、进度的完成时间也是它。
+	now := clock.now()
 	if page.Failure != nil {
 		attempts := pull.Attempts + 1
 		// 参数都是字符串的消息总能编码。
@@ -131,8 +159,12 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 	if err != nil {
 		return false, err
 	}
+	reportedTotal := page.Total
+	if pull.NextPage > 1 {
+		reportedTotal = max(pull.ReportedTotal, page.Total)
+	}
 	status := model.PayablePullPending
-	updates := map[string]any{"attempts": 0, "last_error": "", "reported_total": page.Total, "next_retry_at": int64(0)}
+	updates := map[string]any{"attempts": 0, "last_error": "", "reported_total": reportedTotal, "next_retry_at": int64(0)}
 	endOfPass := len(page.Items) == 0 || pull.NextPage*channelPushListPageSize >= page.Total
 	count := pull.ChannelCount + len(rows)
 	switch {
@@ -143,7 +175,7 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 		lastError, _ := common.Marshal(common.NewMessage("Site channel list exceeds the page limit"))
 		updates["last_error"] = string(lastError)
 		updates["finished_time"] = now
-	case count >= page.Total:
+	case count >= reportedTotal:
 		status = model.PayablePullSuccess
 		updates["finished_time"] = now
 	case pull.Pass == 1:
@@ -152,7 +184,7 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 	default:
 		status = model.PayablePullSuccess
 		note, _ := common.Marshal(common.NewMessage("Site reported {{total}} channels but {{count}} were pulled",
-			map[string]any{"total": page.Total, "count": count}))
+			map[string]any{"total": reportedTotal, "count": count}))
 		updates["note"] = string(note)
 		updates["finished_time"] = now
 	}
@@ -161,9 +193,10 @@ func pullPayablePage(ctx context.Context, now int64, pull model.PayablePullSite,
 	return saved && status == model.PayablePullPending, err
 }
 
-// newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行。增量以该站点上一次地址相同的完整拉取为基线：
-// 没有基线时为空（首次同步）；基线里没有的渠道是新渠道，基线为 0，但基线那次拉取少于站点报的总数时，
-// 这样的渠道可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
+// newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行，同步时间与写入时间都是 now。
+// 增量以该渠道在站点（地址相同的）更早的完整拉取里最近的累计值为基线（见 model.PayableBaseline）：
+// 站点在这个地址还没有完整拉取时为空（首次同步）；渠道在更早的完整拉取里都没有记录时，若最近一次完整拉取与站点报的总数一致，
+// 它是新渠道，基线为 0，否则它可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
 // 提供商按手动指定、渠道名标记、历史明细的顺序确定（每页批量解析一次），并快照该用户此刻的应付折扣。
 func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
 	if len(items) == 0 {
@@ -207,7 +240,6 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 		return nil, err
 	}
 
-	syncedAt := time.Now().Unix()
 	rows := make([]*model.PayableChannelUsage, 0, len(fresh))
 	for _, item := range fresh {
 		provider := providers[item.ID]
@@ -226,7 +258,7 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 			ProviderName:      provider.Name,
 			ProviderSource:    provider.Source,
 			PayableDiscount:   provider.Discount,
-			SyncedAt:          syncedAt,
+			SyncedAt:          now,
 			CreatedTime:       now,
 			UpdatedTime:       now,
 		}
@@ -234,7 +266,7 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 		delta := item.UsedQuota - base // 不在基线里时 base 为 0
 		switch {
 		case !found, !inBaseline && !complete:
-			// 没有基线；或基线那次拉取少于站点报的总数，基线里没有这个渠道不能说明它是新建的
+			// 站点在这个地址没有完整拉取；或渠道在更早的完整拉取里都没有记录、最近一次完整拉取又少于站点报的总数，不能说明它是新建的
 			row.DeltaFlag = model.PayableDeltaFirstSync
 		case !inBaseline:
 			row.DeltaQuota, row.DeltaFlag = &delta, model.PayableDeltaNewChannel

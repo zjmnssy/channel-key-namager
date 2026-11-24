@@ -45,7 +45,7 @@ const MsgPayablePullSuperseded = "Replaced by the next day's pull task"
 // payablePullUnfinished 是还要继续拉取的进度状态。
 var payablePullUnfinished = []string{PayablePullPending, PayablePullRetrying}
 
-// errPayablePullLeaseLost 让 SavePayablePullAttempt 的事务回滚：这一行进度已不归本次拉取。
+// errPayablePullLeaseLost 让 SavePayablePullAttempt、RestartPayablePullAtBaseURL 的事务回滚：这一行进度已不归本次拉取。
 var errPayablePullLeaseLost = errors.New("payable pull lease lost")
 
 // PayablePullTask 是某个北京日期的每日拉取任务。
@@ -307,21 +307,7 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 	case baseURLChanged && pull.Status != PayablePullSuccess && pull.Status != PayablePullSuperseded:
 		// 先改进度行（并清掉租约）再删明细：正在保存的拉取要么先提交，它写的明细随后一起删掉；
 		// 要么等这里提交后因租约不符被拒。旧地址拉到的页不会在重置后写回。
-		err = tx.Model(&PayablePullSite{}).Where("id = ?", pull.Id).Updates(map[string]any{
-			"status":         PayablePullPending,
-			"next_page":      1,
-			"pass":           1,
-			"channel_count":  0,
-			"reported_total": 0,
-			"site_name":      site.Name,
-			"site_base_url":  site.BaseURL,
-			"attempts":       0,
-			"next_retry_at":  0,
-			"last_error":     "",
-			"lease_until":    0,
-			"finished_time":  0,
-			"updated_time":   now,
-		}).Error
+		err = tx.Model(&PayablePullSite{}).Where("id = ?", pull.Id).Updates(payablePullRestartValues(site, now)).Error
 		if err == nil {
 			err = tx.Where("pull_site_id = ?", pull.Id).Delete(&PayableChannelUsage{}).Error
 		}
@@ -340,6 +326,47 @@ func reopenPayablePullsOnSiteEdit(tx *gorm.DB, site *ThirdPartySite, baseURLChan
 		return err
 	}
 	return RefreshPayableTask(tx, latest.Id, now)
+}
+
+// payablePullRestartValues 是按站点当前的名称与地址从第 1 页重拉一个进度要写入的值。
+// 地址变了可能换了一个实例，旧地址拉到的页、计数与错误都作废；同时清掉租约，正在进行的拉取不能再写回。
+func payablePullRestartValues(site *ThirdPartySite, now int64) map[string]any {
+	return map[string]any{
+		"status":         PayablePullPending,
+		"next_page":      1,
+		"pass":           1,
+		"channel_count":  0,
+		"reported_total": 0,
+		"site_name":      site.Name,
+		"site_base_url":  site.BaseURL,
+		"attempts":       0,
+		"next_retry_at":  0,
+		"last_error":     "",
+		"lease_until":    0,
+		"finished_time":  0,
+		"updated_time":   now,
+	}
+}
+
+// RestartPayablePullAtBaseURL 在仍持有租约时，把地址快照已不是站点当前地址的进度按当前地址从第 1 页重拉，
+// 并删掉它已写入的明细，与站点编辑改地址时的做法相同；租约随之释放。
+// 租约已丢失或进度已不再未完成（被取代、站点已删除）时什么都不改。
+func RestartPayablePullAtBaseURL(pullID int, lease int64, site *ThirdPartySite, now int64) error {
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&PayablePullSite{}).Where("id = ? AND lease_until = ? AND status IN ?", pullID, lease, payablePullUnfinished).
+			Updates(payablePullRestartValues(site, now))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errPayablePullLeaseLost
+		}
+		return tx.Where("pull_site_id = ?", pullID).Delete(&PayableChannelUsage{}).Error
+	})
+	if errors.Is(err, errPayablePullLeaseLost) {
+		return nil
+	}
+	return err
 }
 
 // payablePullsDue 选出到了拉取时间、没有人在拉、属于最新任务的未完成进度。
@@ -374,22 +401,32 @@ func StartPayableTask(taskID int, now int64) error {
 		Updates(map[string]any{"started_time": now, "updated_time": now}).Error
 }
 
-// PayableBaseline 找站点在账单日期 billDate 之前、地址为 baseURL 的最近一次完整拉取（进度 success），
-// 返回其中 remoteIDs 各渠道的累计值。没有这样的拉取时 found 为 false：站点还没有完整拉取过，或地址变了、基线已重置。
-// 失败、被取代的进度留下的是不完整拉取，永不作基线。
-// complete 表示那次拉取写入的渠道数不少于站点报的总数；少于时（补扫后仍对不上、以已拉到的为准结束），
-// 基线里没有的渠道可能只是那次漏拉了，不能当作新建的渠道。
+// PayableBaseline 返回 remoteIDs 各渠道的基线：该渠道在站点账单日期 billDate 之前、地址为 baseURL 的完整拉取（进度 success）
+// 里最近一行的累计值。不只看最近一次完整拉取：拉取期间渠道被删导致翻页移位、站点临时返回空列表、总数不一致等情况下，
+// 成功的拉取也可能漏掉已有的渠道；累计值只增不减，更早的完整拉取里的值同样可以作基线。失败、被取代的进度留下的是不完整拉取，永不作基线。
+// found 表示站点在这个地址有过完整拉取；没有时（站点还没有完整拉取过，或地址变了、基线已重置）所有渠道都是首次同步。
+// complete 表示最近一次完整拉取写入的渠道数不少于站点报的总数：这时它里面没有、更早也没有记录的渠道是新建的；
+// 少于时这样的渠道可能只是那次漏拉了，不能当作新建的渠道。
 func PayableBaseline(siteID, billDate int, baseURL string, remoteIDs []int) (found, complete bool, quotas map[int]int64, err error) {
-	var pull PayablePullSite
+	var latest PayablePullSite
 	err = DB.Select("id", "channel_count", "reported_total").
 		Where("site_id = ? AND bill_date < ? AND status = ? AND site_base_url = ?", siteID, billDate, PayablePullSuccess, baseURL).
-		Order("bill_date DESC").Limit(1).Find(&pull).Error
-	if err != nil || pull.Id == 0 {
+		Order("bill_date DESC").Limit(1).Find(&latest).Error
+	if err != nil || latest.Id == 0 {
 		return false, false, nil, err
 	}
+	// 每个渠道在这些完整拉取里最近的一天由派生表求出，再连回明细取那一天的累计值；同一站点同一天只有一个进度，
+	// 连回的行唯一。远端渠道最多一页 100 个，走 (site_id, remote_channel_id, bill_date) 索引。
+	completePulls := DB.Model(&PayablePullSite{}).Select("id").
+		Where("site_id = ? AND bill_date < ? AND status = ? AND site_base_url = ?", siteID, billDate, PayablePullSuccess, baseURL)
+	latestDays := DB.Model(&PayableChannelUsage{}).Select("remote_channel_id, MAX(bill_date) AS bill_date").
+		Where("site_id = ? AND remote_channel_id IN ? AND bill_date < ? AND pull_site_id IN (?)", siteID, remoteIDs, billDate, completePulls).
+		Group("remote_channel_id")
 	var usages []PayableChannelUsage
-	err = DB.Select("remote_channel_id", "used_quota").
-		Where("pull_site_id = ? AND remote_channel_id IN ?", pull.Id, remoteIDs).Find(&usages).Error
+	err = DB.Table("payable_channel_usages AS u").Select("u.remote_channel_id, u.used_quota").
+		Joins("JOIN (?) AS latest ON latest.remote_channel_id = u.remote_channel_id AND latest.bill_date = u.bill_date", latestDays).
+		Where("u.site_id = ? AND u.pull_site_id IN (?)", siteID, completePulls).
+		Scan(&usages).Error
 	if err != nil {
 		return false, false, nil, err
 	}
@@ -397,7 +434,7 @@ func PayableBaseline(siteID, billDate int, baseURL string, remoteIDs []int) (fou
 	for _, usage := range usages {
 		quotas[usage.RemoteChannelId] = usage.UsedQuota
 	}
-	return true, pull.ChannelCount >= pull.ReportedTotal, quotas, nil
+	return true, latest.ChannelCount >= latest.ReportedTotal, quotas, nil
 }
 
 // ExistingPayableChannels 返回 remoteIDs 中在该进度下已有明细行的远端渠道。
