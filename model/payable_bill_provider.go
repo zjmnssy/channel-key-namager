@@ -99,8 +99,10 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 		return nil, err
 	}
 
-	// 历史只查前两步没确定的渠道，且每个渠道只取 bill_date 更早、provider_id > 0 的最近一天的行
+	// 历史只查前两步没确定的渠道，且每个渠道只取 bill_date 更早、provider_id > 0、来源不是手动的最近一天的行
 	// （同一天有多行时取 id 最大的）；该用户已不是供应商时结果为未知，不再往更早找。
+	// 手动设置的行不沿用：清除手动设置后，下一次同步要按标记与历史重新确定，不能又从手动设置留下的行沿用回来。
+	// 用派生表按渠道求出那一天再连回明细，不用逐行的关联子查询，数据多时 MySQL 也能走 (site_id, remote_channel_id, bill_date) 索引。
 	unresolved := make([]int, 0, len(channels))
 	for _, channel := range channels {
 		if id, ok := manual[channel.ID]; ok && hasSupplier(suppliers, id) {
@@ -114,12 +116,15 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 	inherited := map[int]int{}
 	if len(unresolved) > 0 {
 		var history []PayableChannelUsage
-		latestEarlier := DB.Model(&PayableChannelUsage{}).Table("payable_channel_usages AS earlier").Select("MAX(earlier.bill_date)").
-			Where("earlier.site_id = ? AND earlier.remote_channel_id = payable_channel_usages.remote_channel_id AND earlier.bill_date < ? AND earlier.provider_id > 0", siteID, billDate)
-		if err := DB.Select("id", "remote_channel_id", "provider_id").
-			Where("site_id = ? AND remote_channel_id IN ? AND provider_id > 0", siteID, unresolved).
-			Where("bill_date = (?)", latestEarlier).
-			Order("id DESC").Find(&history).Error; err != nil {
+		latestDays := DB.Model(&PayableChannelUsage{}).Select("remote_channel_id, MAX(bill_date) AS bill_date").
+			Where("site_id = ? AND remote_channel_id IN ? AND bill_date < ? AND provider_id > 0 AND provider_source <> ?",
+				siteID, unresolved, billDate, PayableProviderManual).
+			Group("remote_channel_id")
+		err := DB.Table("payable_channel_usages AS u").Select("u.id, u.remote_channel_id, u.provider_id").
+			Joins("JOIN (?) AS latest ON latest.remote_channel_id = u.remote_channel_id AND latest.bill_date = u.bill_date", latestDays).
+			Where("u.site_id = ? AND u.provider_id > 0 AND u.provider_source <> ?", siteID, PayableProviderManual).
+			Order("u.id DESC").Scan(&history).Error
+		if err != nil {
 			return nil, err
 		}
 		historyIDs := []int{}

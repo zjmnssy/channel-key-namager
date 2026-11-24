@@ -1546,6 +1546,11 @@ func TestPayableBillSetProvider(t *testing.T) {
 	assert.EqualValues(t, s2.Id, params[3]["previous_provider_id"])
 	assert.EqualValues(t, 0, params[3]["provider_id"])
 
+	// 清除后再同步：渠道名没有标记，这一行的提供商来自手动设置，不能再被沿用；没有别的依据时为未知
+	resolved, err = model.ResolvePayableProviders(site.Id, 20261123, []model.PayableRemoteChannel{{ID: 1}})
+	require.NoError(t, err)
+	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, resolved[1])
+
 	// 5. 不存在的明细、非法参数
 	reply = receivableReplyOf(t, setProvider("999999", `{"provider_id":`+strconv.Itoa(s1.Id)+`}`))
 	assert.False(t, reply.Success)
