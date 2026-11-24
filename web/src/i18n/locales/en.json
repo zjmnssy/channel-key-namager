@@ -5457,6 +5457,7 @@
     "Reasoning Effort": "Reasoning Effort",
     "Reasoning effort: {{effort}}": "Reasoning effort: {{effort}}",
     "Recalculated from tokens: tokens {{tokens}}, model ratio {{model_ratio}}, group ratio {{group_ratio}}, other multiplier {{other_multiplier}}": "Recalculated from tokens: tokens {{tokens}}, model ratio {{model_ratio}}, group ratio {{group_ratio}}, other multiplier {{other_multiplier}}",
+    "Receivable Amount ($)": "Receivable Amount ($)",
     "Receivable Bills": "Receivable Bills",
     "Receivable Discount": "Receivable Discount",
     "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places",

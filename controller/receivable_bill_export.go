@@ -36,8 +36,8 @@ func ExportReceivableBills(c *gin.Context) {
 	}
 
 	headers := []string{
-		i18n.MsgReceivableBillExportBillDate, i18n.MsgReceivableBillExportSiteName, i18n.MsgReceivableBillExportSiteURL,
-		i18n.MsgReceivableBillExportAmount, i18n.MsgReceivableBillExportDiscount, i18n.MsgReceivableBillExportStatus,
+		i18n.MsgReceivableBillExportBillDate, i18n.MsgReceivableBillExportSiteName, i18n.MsgReceivableBillExportAmount,
+		i18n.MsgReceivableBillExportDiscount, i18n.MsgReceivableBillExportReceivableAmount, i18n.MsgReceivableBillExportStatus,
 		i18n.MsgReceivableBillExportFailureReason, i18n.MsgReceivableBillExportSyncedAt,
 	}
 	for i, key := range headers {
@@ -58,10 +58,11 @@ func ExportReceivableBills(c *gin.Context) {
 		cells := make([]any, len(headers))
 		date, _ := model.ReceivableBillDayStart(bill.BillDate)
 		cells[0] = date.Format("2006-01-02")
-		cells[1], cells[2] = bill.SiteName, bill.SiteBaseURL
+		cells[1] = bill.SiteName
 		if bill.Status == model.ReceivableBillStatusSuccess {
-			cells[3] = model.ReceivableAmount(bill.Quota, bill.QuotaPerUnit).Round(6).InexactFloat64()
-			cells[4] = bill.ReceivableDiscount
+			cells[2] = model.ReceivableAmount(bill.Quota, bill.QuotaPerUnit).Round(6).InexactFloat64()
+			cells[3] = bill.ReceivableDiscount
+			cells[4] = model.ReceivableAmountAfterDiscount(bill.Quota, bill.QuotaPerUnit, bill.ReceivableDiscount).Round(6).InexactFloat64()
 		}
 		cells[5] = i18n.T(c, statusKeys[bill.Status])
 		if message := newReceivableBillView(bill, false).Error; message != nil {
@@ -86,10 +87,13 @@ func ExportReceivableBills(c *gin.Context) {
 			return
 		}
 		if bill.Status == model.ReceivableBillStatusSuccess {
-			cell, _ := excelize.CoordinatesToCellName(4, row)
-			if err := file.SetCellStyle(sheet, cell, cell, amountStyle); err != nil {
-				common.ApiError(c, err)
-				return
+			// 第 3 列金额(折前)、第 5 列应收金额都显示 6 位小数。
+			for _, column := range []int{3, 5} {
+				cell, _ := excelize.CoordinatesToCellName(column, row)
+				if err := file.SetCellStyle(sheet, cell, cell, amountStyle); err != nil {
+					common.ApiError(c, err)
+					return
+				}
 			}
 		}
 	}

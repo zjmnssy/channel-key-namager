@@ -5457,6 +5457,7 @@
     "Reasoning Effort": "Интенсивность рассуждения",
     "Reasoning effort: {{effort}}": "Интенсивность рассуждения: {{effort}}",
     "Recalculated from tokens: tokens {{tokens}}, model ratio {{model_ratio}}, group ratio {{group_ratio}}, other multiplier {{other_multiplier}}": "Пересчитано по токенам: токены {{tokens}}, коэффициент модели {{model_ratio}}, коэффициент группы {{group_ratio}}, прочий множитель {{other_multiplier}}",
+    "Receivable Amount ($)": "Сумма к получению ($)",
     "Receivable Bills": "Счета к получению",
     "Receivable Discount": "Ставка скидки",
     "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places": "Ставка скидки должна быть больше 0 и не более 1, не более 4 знаков после запятой",

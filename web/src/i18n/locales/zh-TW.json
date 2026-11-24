@@ -5457,6 +5457,7 @@
     "Reasoning Effort": "推理強度",
     "Reasoning effort: {{effort}}": "推理強度：{{effort}}",
     "Recalculated from tokens: tokens {{tokens}}, model ratio {{model_ratio}}, group ratio {{group_ratio}}, other multiplier {{other_multiplier}}": "按 token 重算：tokens {{tokens}}，模型倍率 {{model_ratio}}，分組倍率 {{group_ratio}}，其他倍數 {{other_multiplier}}",
+    "Receivable Amount ($)": "應收金額($)",
     "Receivable Bills": "應收帳單",
     "Receivable Discount": "應收折扣",
     "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places": "應收折扣必須大於 0 且不超過 1，最多 4 位小數",

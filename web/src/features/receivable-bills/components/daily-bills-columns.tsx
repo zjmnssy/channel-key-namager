@@ -63,16 +63,6 @@ export function useDailyBillsColumns(): ColumnDef<ReceivableBill>[] {
         ),
       },
       {
-        accessorKey: 'site_base_url',
-        header: t('Bill Site URL'),
-        cell: ({ row }) => (
-          <TruncatedText
-            text={row.original.site_base_url}
-            maxWidth='max-w-[240px]'
-          />
-        ),
-      },
-      {
         accessorKey: 'amount',
         header: t('Amount Before Discount ($)'),
         cell: ({ row }) =>
@@ -89,6 +79,15 @@ export function useDailyBillsColumns(): ColumnDef<ReceivableBill>[] {
           ) : (
             EMPTY
           ),
+      },
+      {
+        accessorKey: 'receivable_amount',
+        header: t('Receivable Amount ($)'),
+        cell: ({ row }) =>
+          row.original.status === 'success' &&
+          row.original.receivable_amount !== null
+            ? row.original.receivable_amount
+            : EMPTY,
       },
       {
         accessorKey: 'status',

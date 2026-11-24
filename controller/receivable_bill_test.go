@@ -685,9 +685,12 @@ func TestReceivableBillList(t *testing.T) {
 	assert.Equal(t, 3, total)
 	require.Equal(t, []string{a1122, b1122, a1121}, receivableRowKeys(items))
 	assert.Equal(t, "123.456788", items[0]["amount"])
+	// 应收金额 = 金额(折前) × 应收折扣：123.456788 × 0.85 = 104.9382698，四舍五入到 6 位
+	assert.Equal(t, "104.938270", items[0]["receivable_amount"])
 	assert.Nil(t, items[0]["error"])
 	assert.Equal(t, false, items[0]["site_deleted"])
 	assert.Nil(t, items[2]["amount"])
+	assert.Nil(t, items[2]["receivable_amount"])
 	assert.EqualValues(t, 3, items[2]["attempts"])
 	assert.Equal(t, map[string]any{"key": "Site request failed: {{detail}}", "params": map[string]any{"detail": "HTTP 502"}}, items[2]["error"])
 	assert.Equal(t, true, items[1]["site_deleted"])
@@ -1066,22 +1069,26 @@ func TestReceivableBillExport(t *testing.T) {
 	file, rows := rowsOf(export("start_date=20261101&end_date=20261123", "zh-CN"))
 	sheet := file.GetSheetName(0)
 	require.Len(t, rows, 4)
-	assert.Equal(t, []string{"账单日期", "站点名称", "站点URL", "金额(折前)($)", "应收折扣", "同步结果", "失败原因", "同步时间"}, rows[0])
-	assert.Equal(t, []string{"2026-11-22", siteA.Name, siteA.BaseURL, "123.456788", "0.85", "成功", "", "2026-11-23 01:00:05"}, rows[1])
-	// Rows without a success carry no amount or discount, and a bill that never synced has no sync time.
+	assert.Equal(t, []string{"账单日期", "站点名称", "金额(折前)($)", "应收折扣", "应收金额($)", "同步结果", "失败原因", "同步时间"}, rows[0])
+	// 应收金额 = 123.456788 × 0.85 = 104.9382698，四舍五入到 6 位为 104.938270，单元格存的数字是 104.93827
+	assert.Equal(t, []string{"2026-11-22", siteA.Name, "123.456788", "0.85", "104.93827", "成功", "", "2026-11-23 01:00:05"}, rows[1])
+	// Rows without a success carry no amount, discount or receivable amount, and a bill that never synced has no sync time.
 	assert.Equal(t, []string{"2026-11-22", siteB.Name, "", "", "", "失败", "站点已删除"}, rows[2])
 	assert.Equal(t, []string{"2026-11-21", siteA.Name, "", "", "", "重试中", "站点请求失败：HTTP 502"}, rows[3])
 
+	// 金额(折前)和应收金额是 6 位小数格式的数字单元格，应收折扣是数字单元格。
+	for _, cell := range []string{"C2", "E2"} {
+		cellType, err := file.GetCellType(sheet, cell)
+		require.NoError(t, err)
+		assert.Contains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType, cell)
+		styleID, err := file.GetCellStyle(sheet, cell)
+		require.NoError(t, err)
+		style, err := file.GetStyle(styleID)
+		require.NoError(t, err)
+		require.NotNil(t, style.CustomNumFmt, cell)
+		assert.Equal(t, "0.000000", *style.CustomNumFmt, cell)
+	}
 	cellType, err := file.GetCellType(sheet, "D2")
-	require.NoError(t, err)
-	assert.Contains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType)
-	styleID, err := file.GetCellStyle(sheet, "D2")
-	require.NoError(t, err)
-	style, err := file.GetStyle(styleID)
-	require.NoError(t, err)
-	require.NotNil(t, style.CustomNumFmt)
-	assert.Equal(t, "0.000000", *style.CustomNumFmt)
-	cellType, err = file.GetCellType(sheet, "E2")
 	require.NoError(t, err)
 	assert.Contains(t, []excelize.CellType{excelize.CellTypeUnset, excelize.CellTypeNumber}, cellType)
 	cellType, err = file.GetCellType(sheet, "A2")

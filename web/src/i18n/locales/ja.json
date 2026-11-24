@@ -5457,6 +5457,7 @@
     "Reasoning Effort": "推論強度",
     "Reasoning effort: {{effort}}": "推論強度：{{effort}}",
     "Recalculated from tokens: tokens {{tokens}}, model ratio {{model_ratio}}, group ratio {{group_ratio}}, other multiplier {{other_multiplier}}": "トークンで再計算：トークン {{tokens}}、モデル倍率 {{model_ratio}}、グループ倍率 {{group_ratio}}、その他の倍数 {{other_multiplier}}",
+    "Receivable Amount ($)": "売掛金額($)",
     "Receivable Bills": "売掛請求",
     "Receivable Discount": "割引率",
     "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places": "割引率は 0 より大きく 1 以下で、小数点以下は 4 桁までにしてください",

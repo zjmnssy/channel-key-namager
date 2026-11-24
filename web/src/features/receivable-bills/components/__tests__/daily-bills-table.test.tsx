@@ -58,6 +58,7 @@ const baseBill: ReceivableBill = {
   created_time: 1700000000,
   updated_time: 1700000000,
   amount: '123.456788',
+  receivable_amount: '98.765430',
   error: null,
   site_deleted: false,
 }
@@ -138,6 +139,25 @@ describe('DailyBillsTable', () => {
     )
   })
 
+  it('lists the receivable amount after the discount without a site URL column', async () => {
+    await renderBills()
+
+    expect(await screen.findByText('123.456788')).toBeInTheDocument()
+    expect(
+      screen.getAllByRole('columnheader').map((header) => header.textContent)
+    ).toEqual([
+      'Bill Date',
+      'Site Name',
+      'Amount Before Discount ($)',
+      'Receivable Discount',
+      'Receivable Amount ($)',
+      'Sync Result',
+      'Sync Time',
+      'Actions',
+    ])
+    expect(screen.queryByText('https://a.example.com')).not.toBeInTheDocument()
+  })
+
   it('shows amounts only for successful bills', async () => {
     await renderBills([
       baseBill,
@@ -148,6 +168,7 @@ describe('DailyBillsTable', () => {
         status: 'retrying',
         attempts: 3,
         amount: null,
+        receivable_amount: null,
       },
       {
         ...baseBill,
@@ -155,13 +176,16 @@ describe('DailyBillsTable', () => {
         site_name: 'Site F',
         status: 'failed',
         amount: null,
+        receivable_amount: null,
       },
     ])
 
     expect(await screen.findByText('123.456788')).toBeInTheDocument()
+    expect(screen.getByText('98.765430')).toBeInTheDocument()
     expect(screen.getByText('Retrying (attempt 3)')).toBeInTheDocument()
     expect(screen.getByText('Failed')).toBeInTheDocument()
-    expect(screen.getAllByText('—')).toHaveLength(4)
+    // Each unsuccessful bill leaves its amount, discount and receivable amount empty.
+    expect(screen.getAllByText('—')).toHaveLength(6)
   })
 
   it('sends selected sites and statuses as filters', async () => {

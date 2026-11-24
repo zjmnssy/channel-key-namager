@@ -15,19 +15,21 @@ import (
 )
 
 // receivableBillView 是一行日账单的接口形态：账单字段加上由 last_error 解析出的错误，
-// 以及只有成功的行才有的金额。
+// 以及只有成功的行才有的金额（折前）和应收金额（金额 × 应收折扣）。
 type receivableBillView struct {
 	model.ReceivableBill
-	Amount      *string         `json:"amount"`
-	Error       *common.Message `json:"error"`
-	SiteDeleted bool            `json:"site_deleted"`
+	Amount           *string         `json:"amount"`
+	ReceivableAmount *string         `json:"receivable_amount"`
+	Error            *common.Message `json:"error"`
+	SiteDeleted      bool            `json:"site_deleted"`
 }
 
 func newReceivableBillView(bill *model.ReceivableBill, deleted bool) receivableBillView {
 	view := receivableBillView{ReceivableBill: *bill, SiteDeleted: deleted}
 	if bill.Status == model.ReceivableBillStatusSuccess {
 		amount := model.ReceivableAmount(bill.Quota, bill.QuotaPerUnit).StringFixed(6)
-		view.Amount = &amount
+		receivable := model.ReceivableAmountAfterDiscount(bill.Quota, bill.QuotaPerUnit, bill.ReceivableDiscount).StringFixed(6)
+		view.Amount, view.ReceivableAmount = &amount, &receivable
 	}
 	if bill.LastError != "" {
 		var message common.Message

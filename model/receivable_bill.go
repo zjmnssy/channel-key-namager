@@ -103,6 +103,11 @@ func ReceivableAmount(quota, quotaPerUnit int64) decimal.Decimal {
 	return decimal.NewFromInt(quota).Div(decimal.NewFromInt(quotaPerUnit))
 }
 
+// ReceivableAmountAfterDiscount 返回应收金额：额度换算的金额（折前）× 应收折扣，不做舍入。
+func ReceivableAmountAfterDiscount(quota, quotaPerUnit int64, discount float64) decimal.Decimal {
+	return ReceivableAmount(quota, quotaPerUnit).Mul(decimal.NewFromFloat(discount))
+}
+
 // ClaimReceivableRow 认领一行的同步租约，只有租约已过期且本次抢到时 ok 才为 true。
 func ClaimReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok bool, err error) {
 	lease = now + ReceivableBillLeaseSeconds

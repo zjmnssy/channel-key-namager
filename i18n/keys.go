@@ -124,20 +124,20 @@ const (
 // Receivable bill export: the header and the status and failure texts written into the
 // downloaded xlsx, which reaches the reader without passing through the web console
 const (
-	MsgReceivableBillExportBillDate      = "receivable_bill.export.bill_date"
-	MsgReceivableBillExportSiteName      = "receivable_bill.export.site_name"
-	MsgReceivableBillExportSiteURL       = "receivable_bill.export.site_url"
-	MsgReceivableBillExportAmount        = "receivable_bill.export.amount"
-	MsgReceivableBillExportDiscount      = "receivable_bill.export.receivable_discount"
-	MsgReceivableBillExportStatus        = "receivable_bill.export.status"
-	MsgReceivableBillExportFailureReason = "receivable_bill.export.failure_reason"
-	MsgReceivableBillExportSyncedAt      = "receivable_bill.export.synced_at"
-	MsgReceivableBillStatusSuccess       = "receivable_bill.status.success"
-	MsgReceivableBillStatusRetrying      = "receivable_bill.status.retrying"
-	MsgReceivableBillStatusFailed        = "receivable_bill.status.failed"
-	MsgReceivableBillErrorRequestFailed  = "receivable_bill.error.request_failed"
-	MsgReceivableBillErrorNoValidQuota   = "receivable_bill.error.no_valid_quota"
-	MsgReceivableBillErrorSiteDeleted    = "receivable_bill.error.site_deleted"
+	MsgReceivableBillExportBillDate         = "receivable_bill.export.bill_date"
+	MsgReceivableBillExportSiteName         = "receivable_bill.export.site_name"
+	MsgReceivableBillExportAmount           = "receivable_bill.export.amount"
+	MsgReceivableBillExportDiscount         = "receivable_bill.export.receivable_discount"
+	MsgReceivableBillExportReceivableAmount = "receivable_bill.export.receivable_amount"
+	MsgReceivableBillExportStatus           = "receivable_bill.export.status"
+	MsgReceivableBillExportFailureReason    = "receivable_bill.export.failure_reason"
+	MsgReceivableBillExportSyncedAt         = "receivable_bill.export.synced_at"
+	MsgReceivableBillStatusSuccess          = "receivable_bill.status.success"
+	MsgReceivableBillStatusRetrying         = "receivable_bill.status.retrying"
+	MsgReceivableBillStatusFailed           = "receivable_bill.status.failed"
+	MsgReceivableBillErrorRequestFailed     = "receivable_bill.error.request_failed"
+	MsgReceivableBillErrorNoValidQuota      = "receivable_bill.error.no_valid_quota"
+	MsgReceivableBillErrorSiteDeleted       = "receivable_bill.error.site_deleted"
 )
 
 // Payable bill export: the header and the texts written into the downloaded xlsx files

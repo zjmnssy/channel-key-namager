@@ -55,6 +55,7 @@ const baseBill: ReceivableBill = {
   created_time: 1700000000,
   updated_time: 1700000000,
   amount: '123.456788',
+  receivable_amount: '98.765430',
   error: null,
   site_deleted: false,
 }
