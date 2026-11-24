@@ -164,14 +164,17 @@ func pullPayablePage(ctx context.Context, clock payableScanClock, pull model.Pay
 		reportedTotal = max(pull.ReportedTotal, page.Total)
 	}
 	status := model.PayablePullPending
-	// 拉成功一页页码就加 1，已拉页数 = next_page − 1；补扫从第 1 页重来，见下面的 case。
+	// 拉成功一页页码就加 1，已拉页数 = next_page − 1；补扫从第 1 页重来，页数超限的失败不推进（见下面的 case）。
 	updates := map[string]any{"attempts": 0, "last_error": "", "reported_total": reportedTotal, "next_retry_at": int64(0), "next_page": pull.NextPage + 1}
 	endOfPass := len(page.Items) == 0 || pull.NextPage*channelPushListPageSize >= page.Total
 	count := pull.ChannelCount + len(rows)
 	switch {
 	case !endOfPass && pull.NextPage < channelPushMaxListPages:
+		// 还没拉完且没到页数上限：保持 pending，按默认的下一页继续。
 	case !endOfPass:
+		// 页数超限：页码停在上限页，编辑站点重开后仍从这一页续拉，不越过上限。
 		status = model.PayablePullFailed
+		updates["next_page"] = pull.NextPage
 		lastError, _ := common.Marshal(common.NewMessage("Site channel list exceeds the page limit"))
 		updates["last_error"] = string(lastError)
 		updates["finished_time"] = now

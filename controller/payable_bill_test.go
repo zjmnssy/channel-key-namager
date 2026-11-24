@@ -586,6 +586,38 @@ func TestPayableBillNonRetryableFailureStops(t *testing.T) {
 	assert.Equal(t, model.PayablePullFailed, payablePullOf(t, db, 20261122, site.Id).Status)
 }
 
+// 站点渠道多到超过页数上限时进度失败，页码停在上限页；编辑站点（地址不变）重开后仍从这一页续拉，不越过上限。
+func TestPayableBillPageLimitKeepsPage(t *testing.T) {
+	db := setupPayableBillTest(t)
+	fake := newFakeChannelSite(t)
+	fake.update(func() {
+		fake.intercept = func(int) (int, string) {
+			return http.StatusOK, `{"success":true,"data":{"items":[{"id":1,"name":"ch-1","used_quota":10}],"total":100500}}`
+		}
+	})
+	site := receivableSeedSite(t, db, "pb-page-limit", fake.server.URL, 1)
+	const now = int64(1795363800) // 北京 2026-11-23 00:10
+	created, err := model.CreatePayablePullTask(20261122, []*model.ThirdPartySite{site}, now)
+	require.NoError(t, err)
+	require.True(t, created)
+	pull := payablePullOf(t, db, 20261122, site.Id)
+	require.NoError(t, db.Model(&pull).Update("next_page", 1000).Error)
+
+	assert.Equal(t, []int{1000}, payableScan(fake, now))
+	pull = payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullFailed, pull.Status)
+	assert.Equal(t, 1000, pull.NextPage)
+	assert.Equal(t, "Site channel list exceeds the page limit", receivableLastError(t, pull.LastError).Key)
+
+	_, err = model.UpdateThirdPartySite(site.Id, model.ThirdPartySiteInput{Name: site.Name + "-edited", Type: model.ThirdPartySiteTypeNewAPI,
+		BaseURL: site.BaseURL, RemoteUserID: site.RemoteUserID, ReceivableDiscount: site.ReceivableDiscount})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1000}, payableScan(fake, now+60))
+	pull = payablePullOf(t, db, 20261122, site.Id)
+	assert.Equal(t, model.PayablePullFailed, pull.Status)
+	assert.Equal(t, 1000, pull.NextPage)
+}
+
 func TestPayableBillScanRefreshesSettledTasks(t *testing.T) {
 	db := setupPayableBillTest(t)
 	sites := []*model.ThirdPartySite{
