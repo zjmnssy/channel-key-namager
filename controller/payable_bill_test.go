@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -884,4 +885,323 @@ func TestPayableBillProviderResolution(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, providers[2])
 	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, providers[4])
+}
+
+func payablePtr[T any](value T) *T { return &value }
+
+func payableGet(t *testing.T, target string, params gin.Params, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	return receivableRequest(t, http.MethodGet, target, nil, params, handler)
+}
+
+func payableSeedTask(t *testing.T, db *gorm.DB, billDate int, status string) *model.PayablePullTask {
+	t.Helper()
+	task := &model.PayablePullTask{BillDate: billDate, Status: status}
+	require.NoError(t, db.Create(task).Error)
+	return task
+}
+
+func payableSeedPull(t *testing.T, db *gorm.DB, task *model.PayablePullTask, siteID int, status string) *model.PayablePullSite {
+	t.Helper()
+	pull := &model.PayablePullSite{TaskId: task.Id, SiteId: siteID, BillDate: task.BillDate, Status: status}
+	require.NoError(t, db.Create(pull).Error)
+	return pull
+}
+
+func payableSeedUsage(t *testing.T, db *gorm.DB, pull *model.PayablePullSite, channelID int, used int64, delta *int64, providerID int, discount *float64) *model.PayableChannelUsage {
+	t.Helper()
+	usage := &model.PayableChannelUsage{TaskId: pull.TaskId, PullSiteId: pull.Id, BillDate: pull.BillDate, SiteId: pull.SiteId,
+		RemoteChannelId: channelID, UsedQuota: used, DeltaQuota: delta, QuotaPerUnit: 500000,
+		ProviderId: providerID, ProviderName: "p" + strconv.Itoa(providerID), PayableDiscount: discount}
+	require.NoError(t, db.Create(usage).Error)
+	return usage
+}
+
+func TestPayablePullTaskList(t *testing.T) {
+	db := setupPayableBillTest(t)
+	siteA := receivableSeedSite(t, db, "pq-a", "https://pq-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pq-b", "https://pq-b.example.com", 1)
+	siteC := receivableSeedSite(t, db, "pq-c", "https://pq-c.example.com", 1)
+
+	// 任务 B 先建（id 小）：已结束，A 成功、B 失败、C 被取代；只有完整拉取的行进入合计。
+	taskB := payableSeedTask(t, db, 20261121, model.PayableTaskPartialFailed)
+	pullBA := payableSeedPull(t, db, taskB, siteA.Id, model.PayablePullSuccess)
+	pullBB := payableSeedPull(t, db, taskB, siteB.Id, model.PayablePullFailed)
+	pullBC := payableSeedPull(t, db, taskB, siteC.Id, model.PayablePullSuperseded)
+	payableSeedUsage(t, db, pullBA, 1, 1000000, payablePtr(int64(500000)), 0, nil)
+	payableSeedUsage(t, db, pullBA, 2, 500000, payablePtr(int64(250000)), 0, nil)
+	payableSeedUsage(t, db, pullBB, 1, 999, payablePtr(int64(999)), 0, nil)
+	payableSeedUsage(t, db, pullBC, 1, 888, payablePtr(int64(888)), 0, nil)
+
+	// 任务 A：进行中，A 成功含 2 行（增量 10 和 nil），B 重试中含 1 行。
+	taskA := payableSeedTask(t, db, 20261122, model.PayableTaskRunning)
+	pullAA := payableSeedPull(t, db, taskA, siteA.Id, model.PayablePullSuccess)
+	pullAB := payableSeedPull(t, db, taskA, siteB.Id, model.PayablePullRetrying)
+	require.NoError(t, db.Model(pullAB).Updates(map[string]any{"last_error": `{"key":"Site request failed: {{detail}}","params":{"detail":"HTTP 502"}}`,
+		"note": `{"key":"The site reported a different channel total"}`}).Error)
+	payableSeedUsage(t, db, pullAA, 1, 100, payablePtr(int64(10)), 0, nil)
+	payableSeedUsage(t, db, pullAA, 2, 50, nil, 0, nil)
+	payableSeedUsage(t, db, pullAB, 1, 7, payablePtr(int64(3)), 0, nil)
+
+	response := payableGet(t, "/api/payable_bill/tasks?p=1&page_size=10", nil, GetPayablePullTasks)
+	total, items := receivableListOf(t, response)
+	require.Equal(t, 2, total)
+	require.Len(t, items, 2)
+	assert.EqualValues(t, taskA.Id, items[0]["id"])
+	assert.EqualValues(t, 20261122, items[0]["bill_date"])
+	assert.EqualValues(t, 1, items[0]["finished_sites"])
+	assert.EqualValues(t, 1, items[0]["retrying_sites"])
+	assert.EqualValues(t, 0, items[0]["failed_sites"])
+	assert.EqualValues(t, 3, items[0]["channel_total"])
+	assert.Nil(t, items[0]["delta_amount"])
+	assert.Nil(t, items[0]["used_amount"])
+	assert.EqualValues(t, taskB.Id, items[1]["id"])
+	assert.EqualValues(t, 1, items[1]["finished_sites"])
+	assert.EqualValues(t, 0, items[1]["retrying_sites"])
+	assert.EqualValues(t, 2, items[1]["failed_sites"]) // superseded 算失败
+	assert.EqualValues(t, 4, items[1]["channel_total"])
+	assert.Equal(t, "1.500000", items[1]["delta_amount"])
+	assert.Equal(t, "3.000000", items[1]["used_amount"])
+
+	_, items = receivableListOf(t, payableGet(t, "/api/payable_bill/tasks?p=2&page_size=1", nil, GetPayablePullTasks))
+	require.Len(t, items, 1)
+	assert.EqualValues(t, taskB.Id, items[0]["id"])
+
+	response = payableGet(t, "/api/payable_bill/tasks/x/sites", gin.Params{{Key: "id", Value: strconv.Itoa(taskA.Id)}}, GetPayablePullTaskSites)
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var sites []map[string]any
+	require.NoError(t, common.Unmarshal(reply.Data, &sites))
+	require.Len(t, sites, 2)
+	assert.EqualValues(t, siteA.Id, sites[0]["site_id"])
+	assert.Nil(t, sites[0]["error"])
+	assert.Nil(t, sites[0]["note"])
+	assert.EqualValues(t, siteB.Id, sites[1]["site_id"])
+	assert.Equal(t, "retrying", sites[1]["status"])
+	assert.Equal(t, map[string]any{"key": "Site request failed: {{detail}}", "params": map[string]any{"detail": "HTTP 502"}}, sites[1]["error"])
+	assert.Equal(t, map[string]any{"key": "The site reported a different channel total"}, sites[1]["note"])
+	assert.NotContains(t, response.Body.String(), "last_error")
+	assert.NotContains(t, response.Body.String(), "lease_until")
+
+	reply = receivableReplyOf(t, payableGet(t, "/api/payable_bill/tasks/0/sites", gin.Params{{Key: "id", Value: "0"}}, GetPayablePullTaskSites))
+	assert.False(t, reply.Success)
+}
+
+func TestPayableUsageList(t *testing.T) {
+	db := setupPayableBillTest(t)
+	siteA := receivableSeedSite(t, db, "pu-a", "https://pu-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pu-b", "https://pu-b.example.com", 1)
+	task1121 := payableSeedTask(t, db, 20261121, model.PayableTaskSuccess)
+	task1122 := payableSeedTask(t, db, 20261122, model.PayableTaskPartialFailed)
+	pullA1121 := payableSeedPull(t, db, task1121, siteA.Id, model.PayablePullSuccess)
+	pullA := payableSeedPull(t, db, task1122, siteA.Id, model.PayablePullSuccess)
+	pullB := payableSeedPull(t, db, task1122, siteB.Id, model.PayablePullFailed)
+	payableSeedUsage(t, db, pullA1121, 1, 500000, payablePtr(int64(500000)), 7, payablePtr(0.8))
+	payableSeedUsage(t, db, pullA, 1, 1000000, payablePtr(int64(500000)), 7, payablePtr(0.8))
+	payableSeedUsage(t, db, pullA, 2, 250000, nil, 0, nil)
+	payableSeedUsage(t, db, pullB, 1, 100, payablePtr(int64(100)), 0, nil)
+	require.NoError(t, db.Create(&model.PayableProviderOverride{SiteId: siteA.Id, RemoteChannelId: 2, ProviderId: 7}).Error)
+	// 另一个站点的同号渠道有手动指定，不能算到 A 站点的渠道 1 头上。
+	require.NoError(t, db.Create(&model.PayableProviderOverride{SiteId: siteB.Id, RemoteChannelId: 2, ProviderId: 7}).Error)
+
+	list := func(query string) (int, []map[string]any) {
+		return receivableListOf(t, payableGet(t, "/api/payable_bill/usages?"+query, nil, GetPayableUsages))
+	}
+	keys := func(items []map[string]any) []string {
+		keys := make([]string, len(items))
+		for i, item := range items {
+			keys[i] = strconv.Itoa(int(item["bill_date"].(float64))) + "/" + strconv.Itoa(int(item["site_id"].(float64))) + "/" + strconv.Itoa(int(item["remote_channel_id"].(float64)))
+		}
+		return keys
+	}
+	keyOf := func(date, siteID, channelID int) string {
+		return strconv.Itoa(date) + "/" + strconv.Itoa(siteID) + "/" + strconv.Itoa(channelID)
+	}
+	a1122c1, a1122c2, b1122c1, a1121c1 := keyOf(20261122, siteA.Id, 1), keyOf(20261122, siteA.Id, 2), keyOf(20261122, siteB.Id, 1), keyOf(20261121, siteA.Id, 1)
+
+	response := payableGet(t, "/api/payable_bill/usages?start_date=20261121&end_date=20261123", nil, GetPayableUsages)
+	total, items := receivableListOf(t, response)
+	assert.Equal(t, 4, total)
+	require.Equal(t, []string{a1122c1, a1122c2, b1122c1, a1121c1}, keys(items))
+	assert.Equal(t, []any{true, true, false, true}, []any{items[0]["counted"], items[1]["counted"], items[2]["counted"], items[3]["counted"]})
+	assert.Equal(t, []any{false, true, false, false}, []any{items[0]["manual"], items[1]["manual"], items[2]["manual"], items[3]["manual"]})
+	assert.Equal(t, "1.000000", items[0]["delta_amount"])
+	assert.Equal(t, "2.000000", items[0]["used_amount"])
+	assert.Nil(t, items[1]["delta_amount"])
+	assert.Nil(t, items[1]["delta_quota"])
+	assert.Equal(t, "0.500000", items[1]["used_amount"])
+	assert.EqualValues(t, 0.8, items[0]["payable_discount"])
+	assert.NotContains(t, response.Body.String(), "last_error")
+
+	_, items = list("start_date=20261122&end_date=20261122&site_ids=" + strconv.Itoa(siteB.Id))
+	assert.Equal(t, []string{b1122c1}, keys(items))
+
+	total, items = list("start_date=20261121&end_date=20261123&provider_ids=0")
+	assert.Equal(t, 2, total)
+	assert.Equal(t, []string{a1122c2, b1122c1}, keys(items))
+	total, _ = list("start_date=20261121&end_date=20261123&provider_ids=0,7")
+	assert.Equal(t, 4, total)
+	total, items = list("start_date=20261121&end_date=20261121")
+	assert.Equal(t, 1, total)
+	assert.Equal(t, []string{a1121c1}, keys(items))
+
+	total, items = list("start_date=20261121&end_date=20261123&p=2&page_size=3")
+	assert.Equal(t, 4, total)
+	assert.Equal(t, []string{a1121c1}, keys(items))
+
+	for _, query := range []string{
+		"", "start_date=20261123&end_date=20261121", "start_date=2026&end_date=20261123", "start_date=20261121&end_date=20261123&provider_ids=-1",
+		"start_date=20261121&end_date=20261123&provider_ids=a", "start_date=20261121&end_date=20261123&site_ids=0",
+	} {
+		reply := receivableReplyOf(t, payableGet(t, "/api/payable_bill/usages?"+query, nil, GetPayableUsages))
+		assert.False(t, reply.Success, query)
+	}
+}
+
+func TestPayableProviderBills(t *testing.T) {
+	db := setupPayableBillTest(t)
+	siteA := receivableSeedSite(t, db, "pp-a", "https://pp-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pp-b", "https://pp-b.example.com", 1)
+	siteC := receivableSeedSite(t, db, "pp-c", "https://pp-c.example.com", 1)
+	task := payableSeedTask(t, db, 20261122, model.PayableTaskPartialFailed)
+	pullA := payableSeedPull(t, db, task, siteA.Id, model.PayablePullSuccess)
+	pullB := payableSeedPull(t, db, task, siteB.Id, model.PayablePullFailed)
+	pullC := payableSeedPull(t, db, task, siteC.Id, model.PayablePullSuccess)
+	half, d08, d09 := payablePtr(int64(500000)), payablePtr(0.8), payablePtr(0.9)
+
+	// 提供商 7：增量 50 万和 100 万折扣 0.8，增量为 nil 的行不计。名称取组内 id 最大的参与行。
+	usage := payableSeedUsage(t, db, pullA, 1, 0, half, 7, d08)
+	require.NoError(t, db.Model(usage).Update("provider_name", "p7-old").Error)
+	usage = payableSeedUsage(t, db, pullA, 2, 0, payablePtr(int64(1000000)), 7, d08)
+	require.NoError(t, db.Model(usage).Update("provider_name", "p7-new").Error)
+	usage = payableSeedUsage(t, db, pullA, 3, 0, nil, 7, nil)
+	require.NoError(t, db.Model(usage).Update("provider_name", "p7-nil").Error)
+	// 提供商 8：折扣 0.8 与 0.9 各一行。
+	payableSeedUsage(t, db, pullA, 4, 0, half, 8, d08)
+	payableSeedUsage(t, db, pullA, 5, 0, half, 8, d09)
+	// 提供商 9：一行 0.8、一行缺折扣。
+	payableSeedUsage(t, db, pullA, 6, 0, half, 9, d08)
+	payableSeedUsage(t, db, pullA, 7, 0, half, 9, nil)
+	// 提供商 10：全部缺折扣。
+	payableSeedUsage(t, db, pullA, 8, 0, half, 10, nil)
+	// 不完整拉取的行不计入。
+	payableSeedUsage(t, db, pullB, 1, 0, payablePtr(int64(999999)), 7, d08)
+	// 站点 C：未知提供商和提供商 11。
+	payableSeedUsage(t, db, pullC, 1, 0, half, 0, nil)
+	payableSeedUsage(t, db, pullC, 2, 0, half, 11, payablePtr(1.0))
+
+	list := func(query string) map[string]any {
+		response := payableGet(t, "/api/payable_bill/providers?"+query, nil, GetPayableProviderBills)
+		reply := receivableReplyOf(t, response)
+		require.True(t, reply.Success, response.Body.String())
+		var page map[string]any
+		require.NoError(t, common.Unmarshal(reply.Data, &page))
+		return page
+	}
+	itemsOf := func(page map[string]any) []map[string]any {
+		var items []map[string]any
+		for _, item := range page["items"].([]any) {
+			items = append(items, item.(map[string]any))
+		}
+		return items
+	}
+
+	page := list("start_date=20261122&end_date=20261122")
+	items := itemsOf(page)
+	require.Len(t, items, 6)
+	assert.EqualValues(t, 6, page["total"])
+	assert.EqualValues(t, 1, page["incomplete_site_count"])
+	providerIDs := make([]any, len(items))
+	for i, item := range items {
+		providerIDs[i] = item["provider_id"]
+	}
+	assert.Equal(t, []any{0.0, 7.0, 8.0, 9.0, 10.0, 11.0}, providerIDs)
+
+	assert.EqualValues(t, 20261122, items[1]["bill_date"])
+	assert.Equal(t, "p7-new", items[1]["provider_name"])
+	assert.Equal(t, "3.000000", items[1]["amount"])
+	assert.EqualValues(t, 0.8, items[1]["discount"])
+	assert.Equal(t, false, items[1]["discount_mixed"])
+	assert.Equal(t, false, items[1]["discount_missing"])
+	assert.Equal(t, "2.400000", items[1]["payable_amount"])
+
+	assert.Equal(t, "2.000000", items[2]["amount"])
+	assert.Nil(t, items[2]["discount"])
+	assert.Equal(t, true, items[2]["discount_mixed"])
+	assert.Equal(t, false, items[2]["discount_missing"])
+	assert.Equal(t, "1.700000", items[2]["payable_amount"])
+
+	assert.Equal(t, "2.000000", items[3]["amount"])
+	assert.Nil(t, items[3]["discount"])
+	assert.Equal(t, false, items[3]["discount_mixed"])
+	assert.Equal(t, true, items[3]["discount_missing"])
+	assert.Equal(t, "0.800000", items[3]["payable_amount"])
+
+	assert.Equal(t, "1.000000", items[4]["amount"])
+	assert.Equal(t, true, items[4]["discount_missing"])
+	assert.Nil(t, items[4]["payable_amount"])
+	assert.Equal(t, "p0", items[0]["provider_name"])
+	assert.Nil(t, items[0]["payable_amount"])
+
+	page = list("start_date=20261122&end_date=20261122&site_ids=" + strconv.Itoa(siteA.Id))
+	assert.EqualValues(t, 4, page["total"])
+	assert.EqualValues(t, 0, page["incomplete_site_count"])
+	assert.Equal(t, "3.000000", itemsOf(page)[0]["amount"])
+
+	page = list("start_date=20261122&end_date=20261122&provider_ids=0")
+	items = itemsOf(page)
+	require.Len(t, items, 1)
+	assert.EqualValues(t, 0, items[0]["provider_id"])
+	assert.Equal(t, "1.000000", items[0]["amount"])
+
+	page = list("start_date=20261122&end_date=20261122&p=2&page_size=2")
+	items = itemsOf(page)
+	assert.EqualValues(t, 6, page["total"])
+	assert.EqualValues(t, 2, page["page"])
+	require.Len(t, items, 2)
+	assert.EqualValues(t, 8, items[0]["provider_id"])
+	assert.EqualValues(t, 9, items[1]["provider_id"])
+	assert.Equal(t, "1.700000", items[0]["payable_amount"])
+
+	// 范围内没有数据，也没有未完成进度。
+	page = list("start_date=20261101&end_date=20261121")
+	assert.EqualValues(t, 0, page["total"])
+	assert.Empty(t, page["items"])
+	assert.EqualValues(t, 0, page["incomplete_site_count"])
+
+	// limit <= 0 返回全部组（导出用）。
+	bills, total, err := model.ListPayableProviderBills(model.PayableUsageFilter{StartDate: 20261122, EndDate: 20261122}, 0, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 6, total)
+	assert.Len(t, bills, 6)
+
+	reply := receivableReplyOf(t, payableGet(t, "/api/payable_bill/providers?start_date=x&end_date=20261122", nil, GetPayableProviderBills))
+	assert.False(t, reply.Success)
+}
+
+func TestPayableOptions(t *testing.T) {
+	db := setupPayableBillTest(t)
+	site := receivableSeedSite(t, db, "po-site", "https://po.example.com", 1)
+	enabled := channelPushSeedSupplier(t, db, "po-enabled")
+	disabled := channelPushSeedSupplier(t, db, "po-disabled")
+	deleted := channelPushSeedSupplier(t, db, "po-deleted")
+	require.NoError(t, db.Create(&model.User{Username: "po-common", Role: common.RoleCommonUser, Status: 1, AffCode: "po-common"}).Error)
+	require.NoError(t, db.Model(enabled).Update("payable_discount", 0.8).Error)
+	require.NoError(t, db.Model(disabled).Update("status", 2).Error)
+	require.NoError(t, db.Delete(deleted).Error)
+
+	response := payableGet(t, "/api/payable_bill/options", nil, GetPayableOptions)
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var data struct {
+		Sites     []map[string]any `json:"sites"`
+		Providers []map[string]any `json:"providers"`
+	}
+	require.NoError(t, common.Unmarshal(reply.Data, &data))
+	require.Len(t, data.Sites, 1)
+	assert.EqualValues(t, site.Id, data.Sites[0]["id"])
+	assert.Equal(t, []map[string]any{
+		{"id": float64(enabled.Id), "username": "po-enabled", "disabled": false, "payable_discount": 0.8},
+		{"id": float64(disabled.Id), "username": "po-disabled", "disabled": true, "payable_discount": nil},
+	}, data.Providers)
 }
