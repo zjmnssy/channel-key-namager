@@ -156,7 +156,7 @@ func GetPayableProviderBills(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	incomplete, err := model.CountIncompletePayablePulls(filter)
+	incomplete, mismatched, err := model.CountPayablePullGaps(filter)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -175,7 +175,7 @@ func GetPayableProviderBills(c *gin.Context) {
 	}
 	common.ApiSuccess(c, gin.H{
 		"page": pageInfo.GetPage(), "page_size": pageInfo.GetPageSize(), "total": total, "items": views,
-		"incomplete_site_count": incomplete,
+		"incomplete_site_count": incomplete, "mismatch_site_count": mismatched,
 	})
 }
 
@@ -200,19 +200,21 @@ func SetPayableUsageProvider(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid ID")
 		return
 	}
+	// 指针区分缺少或为 null 的 provider_id 与显式的 0（清除手动设置）：前者是非法参数，不能当作清除。
 	var input struct {
-		ProviderId int `json:"provider_id"`
+		ProviderId *int `json:"provider_id"`
 	}
-	if err := common.DecodeJson(c.Request.Body, &input); err != nil || input.ProviderId < 0 {
+	if err := common.DecodeJson(c.Request.Body, &input); err != nil || input.ProviderId == nil || *input.ProviderId < 0 {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
+	providerID := *input.ProviderId
 
 	action := "payable_bill.set_provider"
-	if input.ProviderId == 0 {
+	if providerID == 0 {
 		action = "payable_bill.clear_provider"
 	}
-	params := model.AuditFields{"usage_id": id, "provider_id": input.ProviderId}
+	params := model.AuditFields{"usage_id": id, "provider_id": providerID}
 	success := false
 	defer func() {
 		content := auditContentEN(action, params)
@@ -226,7 +228,7 @@ func SetPayableUsageProvider(c *gin.Context) {
 		markAuditLogged(c)
 	}()
 
-	before, after, err := model.SetPayableUsageProvider(id, input.ProviderId, common.GetTimestamp())
+	before, after, err := model.SetPayableUsageProvider(id, providerID, common.GetTimestamp())
 	if before.Id != 0 {
 		params["site_id"] = before.SiteId
 		params["site_name"] = before.SiteName
@@ -251,15 +253,15 @@ func SetPayableUsageProvider(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// 改动已提交：之后重读这一行失败，也不能把审计记成失败。
+	success = true
 	params["provider_name"] = after.ProviderName
 	params["discount"] = after.PayableDiscount
 
 	row, err := model.GetPayableUsageRow(id)
 	if err != nil {
-		params["failure_reason"] = "database_error"
 		common.ApiError(c, err)
 		return
 	}
-	success = true
 	common.ApiSuccess(c, newPayableUsageView(row))
 }

@@ -1093,11 +1093,15 @@ func TestPayablePullTaskList(t *testing.T) {
 	payableSeedUsage(t, db, pullBA, 2, 500000, payablePtr(int64(250000)), 0, nil)
 	payableSeedUsage(t, db, pullBB, 1, 999, payablePtr(int64(999)), 0, nil)
 	payableSeedUsage(t, db, pullBC, 1, 888, payablePtr(int64(888)), 0, nil)
+	// A 成功但写入的渠道数少于站点报的总数（补扫后仍对不上）；B 失败时的计数不算总数不一致。
+	require.NoError(t, db.Model(pullBA).Updates(map[string]any{"channel_count": 2, "reported_total": 3}).Error)
+	require.NoError(t, db.Model(pullBB).Updates(map[string]any{"channel_count": 1, "reported_total": 5}).Error)
 
 	// 任务 A：进行中，A 成功含 2 行（增量 10 和 nil），B 重试中含 1 行。
 	taskA := payableSeedTask(t, db, 20261122, model.PayableTaskRunning)
 	pullAA := payableSeedPull(t, db, taskA, siteA.Id, model.PayablePullSuccess)
 	pullAB := payableSeedPull(t, db, taskA, siteB.Id, model.PayablePullRetrying)
+	require.NoError(t, db.Model(pullAA).Updates(map[string]any{"channel_count": 2, "reported_total": 2}).Error)
 	require.NoError(t, db.Model(pullAB).Updates(map[string]any{"last_error": `{"key":"Site request failed: {{detail}}","params":{"detail":"HTTP 502"}}`,
 		"note": `{"key":"The site reported a different channel total"}`}).Error)
 	payableSeedUsage(t, db, pullAA, 1, 100, payablePtr(int64(10)), 0, nil)
@@ -1113,6 +1117,7 @@ func TestPayablePullTaskList(t *testing.T) {
 	assert.EqualValues(t, 1, items[0]["finished_sites"])
 	assert.EqualValues(t, 1, items[0]["retrying_sites"])
 	assert.EqualValues(t, 0, items[0]["failed_sites"])
+	assert.EqualValues(t, 0, items[0]["mismatch_sites"])
 	assert.EqualValues(t, 3, items[0]["channel_total"])
 	assert.Nil(t, items[0]["delta_amount"])
 	assert.Nil(t, items[0]["used_amount"])
@@ -1120,6 +1125,7 @@ func TestPayablePullTaskList(t *testing.T) {
 	assert.EqualValues(t, 1, items[1]["finished_sites"])
 	assert.EqualValues(t, 0, items[1]["retrying_sites"])
 	assert.EqualValues(t, 2, items[1]["failed_sites"]) // superseded 算失败
+	assert.EqualValues(t, 1, items[1]["mismatch_sites"])
 	assert.EqualValues(t, 4, items[1]["channel_total"])
 	assert.Equal(t, "1.500000", items[1]["delta_amount"])
 	assert.Equal(t, "3.000000", items[1]["used_amount"])
@@ -1229,7 +1235,11 @@ func TestPayableProviderBills(t *testing.T) {
 	pullB := payableSeedPull(t, db, task, siteB.Id, model.PayablePullFailed)
 	pullC := payableSeedPull(t, db, task, siteC.Id, model.PayablePullSuccess)
 	half, d08, d09 := payablePtr(int64(500000)), payablePtr(0.8), payablePtr(0.9)
+	zero := payablePtr(int64(0))
 
+	// 提供商 7：增量为 0 的行不计金额，也不影响折扣是否"多个"、"未设置"。
+	payableSeedUsage(t, db, pullA, 11, 0, zero, 7, nil)
+	payableSeedUsage(t, db, pullA, 12, 0, zero, 7, d09)
 	// 提供商 7：增量 50 万和 100 万折扣 0.8，增量为 nil 的行不计。名称取组内 id 最大的参与行。
 	usage := payableSeedUsage(t, db, pullA, 1, 0, half, 7, d08)
 	require.NoError(t, db.Model(usage).Update("provider_name", "p7-old").Error)
@@ -1250,6 +1260,14 @@ func TestPayableProviderBills(t *testing.T) {
 	// 站点 C：未知提供商和提供商 11。
 	payableSeedUsage(t, db, pullC, 1, 0, half, 0, nil)
 	payableSeedUsage(t, db, pullC, 2, 0, half, 11, payablePtr(1.0))
+	// C 成功但写入的渠道数少于站点报的总数；B 失败时的计数不算总数不一致。
+	require.NoError(t, db.Model(pullC).Updates(map[string]any{"channel_count": 2, "reported_total": 3}).Error)
+	require.NoError(t, db.Model(pullB).Updates(map[string]any{"channel_count": 1, "reported_total": 5}).Error)
+	// 次日提供商 12 的行增量全为 0：金额与应付金额都是 0，没有折扣可显示，也不算"未设置"。
+	nextTask := payableSeedTask(t, db, 20261123, model.PayableTaskSuccess)
+	nextPull := payableSeedPull(t, db, nextTask, siteA.Id, model.PayablePullSuccess)
+	payableSeedUsage(t, db, nextPull, 1, 0, zero, 12, d08)
+	payableSeedUsage(t, db, nextPull, 2, 0, zero, 12, nil)
 
 	list := func(query string) map[string]any {
 		response := payableGet(t, "/api/payable_bill/providers?"+query, nil, GetPayableProviderBills)
@@ -1272,6 +1290,7 @@ func TestPayableProviderBills(t *testing.T) {
 	require.Len(t, items, 6)
 	assert.EqualValues(t, 6, page["total"])
 	assert.EqualValues(t, 1, page["incomplete_site_count"])
+	assert.EqualValues(t, 1, page["mismatch_site_count"])
 	providerIDs := make([]any, len(items))
 	for i, item := range items {
 		providerIDs[i] = item["provider_id"]
@@ -1307,7 +1326,18 @@ func TestPayableProviderBills(t *testing.T) {
 	page = list("start_date=20261122&end_date=20261122&site_ids=" + strconv.Itoa(siteA.Id))
 	assert.EqualValues(t, 4, page["total"])
 	assert.EqualValues(t, 0, page["incomplete_site_count"])
+	assert.EqualValues(t, 0, page["mismatch_site_count"])
 	assert.Equal(t, "3.000000", itemsOf(page)[0]["amount"])
+
+	page = list("start_date=20261123&end_date=20261123")
+	items = itemsOf(page)
+	require.Len(t, items, 1)
+	assert.EqualValues(t, 12, items[0]["provider_id"])
+	assert.Equal(t, "0.000000", items[0]["amount"])
+	assert.Nil(t, items[0]["discount"])
+	assert.Equal(t, false, items[0]["discount_mixed"])
+	assert.Equal(t, false, items[0]["discount_missing"])
+	assert.Equal(t, "0.000000", items[0]["payable_amount"])
 
 	page = list("start_date=20261122&end_date=20261122&provider_ids=0")
 	items = itemsOf(page)
@@ -1329,6 +1359,7 @@ func TestPayableProviderBills(t *testing.T) {
 	assert.EqualValues(t, 0, page["total"])
 	assert.Empty(t, page["items"])
 	assert.EqualValues(t, 0, page["incomplete_site_count"])
+	assert.EqualValues(t, 0, page["mismatch_site_count"])
 
 	// limit <= 0 返回全部组（导出用）。
 	bills, total, err := model.ListPayableProviderBills(model.PayableUsageFilter{StartDate: 20261122, EndDate: 20261122}, 0, 0)
@@ -1524,6 +1555,16 @@ func TestPayableBillSetProvider(t *testing.T) {
 	assert.False(t, success[2])
 	assert.Equal(t, "invalid_provider", params[2]["failure_reason"])
 
+	// 缺少 provider_id 或为 null 是非法参数，不能当作 0 清除手动设置；参数不合法时不记审计
+	for _, body := range []string{`{}`, `{"provider_id":null}`} {
+		reply = receivableReplyOf(t, setProvider(rowID, body))
+		assert.False(t, reply.Success, body)
+		assert.Equal(t, "Invalid parameters", reply.MessageKey, body)
+	}
+	require.NoError(t, db.Find(&overrides).Error)
+	require.Len(t, overrides, 1)
+	assert.Equal(t, s2.Id, overrides[0].ProviderId)
+
 	// 4. provider_id 0 清除指定记录，行不变
 	var reloaded model.PayableChannelUsage
 	require.NoError(t, db.First(&reloaded, row.Id).Error)
@@ -1642,22 +1683,34 @@ func TestPayableBillExport(t *testing.T) {
 		require.NotNil(t, style.CustomNumFmt, cell)
 		assert.Equal(t, "0.000000", *style.CustomNumFmt)
 	}
+	// 任务ID、站点ID 与金额一样是数字单元格，不是文本
+	numberType, err := file.GetCellType(sheet, "H2")
+	require.NoError(t, err)
+	require.NotEqual(t, excelize.CellTypeSharedString, numberType)
+	for _, cell := range []string{"A2", "C2"} {
+		cellType, err := file.GetCellType(sheet, cell)
+		require.NoError(t, err)
+		assert.Equal(t, numberType, cellType, cell)
+	}
 
 	payableSeedUsage(t, db, pull, 9, 0, payablePtr(int64(1000000)), 7, d08)
 	_, rows = export(ExportPayableProviderBills, "/api/payable_bill/providers/export", "start_date=20261122&end_date=20261122", "en", "payable-bills.xlsx")
-	assert.Equal(t, []string{"Bill Date", "Provider", "Amount Before Discount ($)", "Discount (Payable)", "Payable Amount ($)"}, rows[0])
+	assert.Equal(t, []string{"Bill Date", "Provider", "Amount Before Discount ($)", "Discount (Payable)", "Payable Amount ($)", "Note"}, rows[0])
 	byProvider := map[string][]string{}
 	for _, row := range rows[1:] {
 		byProvider[row[1]] = row
 	}
+	// 有行缺折扣（不论折扣是否"多个"）时备注说明应付金额不完整
+	const incomplete = "Some rows have no discount and are not included in the payable amount"
 	assert.Equal(t, []string{"2026-11-22", "p7", "2", "0.8", "1.6"}, byProvider["p7"])
-	assert.Equal(t, []string{"2026-11-22", "Unknown provider", "0.12", "Not set"}, byProvider["Unknown provider"])
+	assert.Equal(t, []string{"2026-11-22", "Unknown provider", "0.12", "Not set", "", incomplete}, byProvider["Unknown provider"])
 	assert.Equal(t, []string{"2026-11-22", "p8", "2", "Multiple", "1.7"}, byProvider["p8"])
-	assert.Equal(t, []string{"2026-11-22", "p9", "1", "Not set"}, byProvider["p9"])
-	assert.Equal(t, "Multiple", byProvider["p10"][3])
+	assert.Equal(t, []string{"2026-11-22", "p9", "1", "Not set", "", incomplete}, byProvider["p9"])
+	assert.Equal(t, []string{"2026-11-22", "p10", "3", "Multiple", "1.7", incomplete}, byProvider["p10"])
 
 	_, rows = export(ExportPayableProviderBills, "/api/payable_bill/providers/export", "start_date=20261122&end_date=20261122", "zh-CN", "payable-bills.xlsx")
-	assert.Contains(t, []string{"未知提供商"}, rows[1][1])
+	assert.Equal(t, []string{"账单日期", "提供商", "金额(折前)($)", "折扣(应付)", "应付金额($)", "备注"}, rows[0])
+	assert.Equal(t, []string{"2026-11-22", "未知提供商", "0.12", "未设置", "", "部分行未设置折扣，未计入应付金额"}, rows[1])
 
 	for _, handler := range []gin.HandlerFunc{ExportPayableUsages, ExportPayableProviderBills} {
 		reply := receivableReplyOf(t, receivableRequest(t, http.MethodGet, "/export?start_date=x&end_date=20261122", nil, nil, handler))

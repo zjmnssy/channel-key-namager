@@ -21,7 +21,8 @@ type PayablePullTaskSummary struct {
 	PayablePullTask
 	FinishedSites int   `json:"finished_sites"`
 	RetryingSites int   `json:"retrying_sites"`
-	FailedSites   int   `json:"failed_sites"` // 含 superseded
+	FailedSites   int   `json:"failed_sites"`   // 含 superseded
+	MismatchSites int   `json:"mismatch_sites"` // 成功但写入的渠道数少于站点报的总数（补扫后仍对不上）
 	ChannelTotal  int   `json:"channel_total"`
 	DeltaQuota    int64 `json:"-"`
 	UsedQuota     int64 `json:"-"`
@@ -34,17 +35,17 @@ type PayableUsageRow struct {
 	Manual  bool `json:"manual" gorm:"-"`
 }
 
-// PayableProviderBill 是某天某提供商的账单汇总。
+// PayableProviderBill 是某天某提供商的账单汇总。折扣的统计只看增量非 0 的行：增量为 0 的行不计金额，折扣也无所谓。
 type PayableProviderBill struct {
 	BillDate        int
 	ProviderId      int
 	ProviderName    string // 组内 id 最大的一行的快照
 	DeltaQuota      int64
 	QuotaPerUnit    int64
-	Discount        *float64         // 组内折扣全部相同且非空时有值
-	DiscountMixed   bool             // 组内出现 >= 2 种非空折扣
-	DiscountMissing bool             // 组内有折扣为空的行
-	PayableAmount   *decimal.Decimal // 有折扣行的 金额×折扣 之和；没有任何有折扣的行时 nil
+	Discount        *float64         // 组内增量非 0 的行折扣全部相同且非空时有值
+	DiscountMixed   bool             // 组内增量非 0 的行出现 >= 2 种非空折扣
+	DiscountMissing bool             // 组内有增量非 0 而折扣为空的行
+	PayableAmount   *decimal.Decimal // 有折扣行的 金额×折扣 之和；增量全为 0 时为 0；增量非 0 的行都没有折扣时 nil
 }
 
 // PayableProviderOption 是提供商筛选和手动指定里的一个渠道供应商。
@@ -111,6 +112,21 @@ func ListPayablePullTasks(offset, limit int) ([]PayablePullTaskSummary, int64, e
 		case PayablePullFailed, PayablePullSuperseded:
 			summary.FailedSites += row.Count
 		}
+	}
+
+	var mismatched []struct {
+		TaskId int
+		Count  int
+	}
+	// 成功但写入的渠道数少于站点报的总数：补扫后仍对不上、以已拉到的为准结束的进度。
+	err = DB.Model(&PayablePullSite{}).Select("task_id, COUNT(*) AS count").
+		Where("task_id IN ? AND status = ? AND channel_count < reported_total", taskIDs, PayablePullSuccess).
+		Group("task_id").Scan(&mismatched).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, row := range mismatched {
+		summaries[index[row.TaskId]].MismatchSites = row.Count
 	}
 
 	var totals []struct {
@@ -268,6 +284,10 @@ func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]P
 		bill := &bills[i]
 		bill.ProviderName = usage.ProviderName // id 升序遍历，最后留下的是组内 id 最大的行
 		bill.QuotaPerUnit = usage.QuotaPerUnit
+		// 增量为 0 的行不计金额，它的折扣也不影响"多个"、"未设置"。
+		if *usage.DeltaQuota == 0 {
+			continue
+		}
 		if usage.PayableDiscount == nil {
 			bill.DiscountMissing = true
 			continue
@@ -290,20 +310,28 @@ func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]P
 				bill.Discount = &discount
 			}
 		}
+		// 组内增量全为 0：没有要付的钱，应付金额为 0，没有折扣可显示
+		if bill.PayableAmount == nil && !bill.DiscountMissing {
+			zero := decimal.Zero
+			bill.PayableAmount = &zero
+		}
 	}
 	return bills, total, nil
 }
 
-// CountIncompletePayablePulls 返回筛选日期内、筛选站点的未成功（含失败、被取代、进行中）进度行数。
-func CountIncompletePayablePulls(filter PayableUsageFilter) (int64, error) {
-	query := DB.Model(&PayablePullSite{}).
-		Where("bill_date >= ? AND bill_date <= ? AND status <> ?", filter.StartDate, filter.EndDate, PayablePullSuccess)
+// CountPayablePullGaps 返回筛选日期内、筛选站点里会让账单不完整的两类进度数：incomplete 是未成功的（含失败、被取代、进行中），
+// 它们的明细不计入账单；mismatched 是成功但写入的渠道数少于站点报的总数的（补扫后仍对不上、以已拉到的为准结束）。
+func CountPayablePullGaps(filter PayableUsageFilter) (incomplete, mismatched int64, err error) {
+	pulls := DB.Model(&PayablePullSite{}).Where("bill_date >= ? AND bill_date <= ?", filter.StartDate, filter.EndDate)
 	if len(filter.SiteIDs) > 0 {
-		query = query.Where("site_id IN ?", filter.SiteIDs)
+		pulls = pulls.Where("site_id IN ?", filter.SiteIDs)
 	}
-	var count int64
-	err := query.Count(&count).Error
-	return count, err
+	pulls = pulls.Session(&gorm.Session{}) // 两次计数各自在这些条件上追加状态条件
+	if err := pulls.Where("status <> ?", PayablePullSuccess).Count(&incomplete).Error; err != nil {
+		return 0, 0, err
+	}
+	err = pulls.Where("status = ? AND channel_count < reported_total", PayablePullSuccess).Count(&mismatched).Error
+	return incomplete, mismatched, err
 }
 
 // ListPayableProviderOptions 返回所有渠道供应商（角色 5、未软删除，含已禁用），按 id 升序。

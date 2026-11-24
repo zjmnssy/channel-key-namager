@@ -2,7 +2,6 @@ package controller
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -69,6 +68,13 @@ func ExportPayableUsages(c *gin.Context) {
 		return
 	}
 
+	headerKeys := []string{
+		i18n.MsgPayableBillExportTaskID, i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportSiteID,
+		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportSiteURL, i18n.MsgPayableBillExportChannelName,
+		i18n.MsgPayableBillExportDeltaAmount, i18n.MsgPayableBillExportUsedAmount, i18n.MsgPayableBillExportDeltaNote,
+		i18n.MsgPayableBillExportProvider, i18n.MsgPayableBillExportProviderSource, i18n.MsgPayableBillExportSyncedAt,
+		i18n.MsgPayableBillExportCounted,
+	}
 	deltaKeys := map[string]string{
 		model.PayableDeltaFirstSync:  i18n.MsgPayableBillDeltaFirstSync,
 		model.PayableDeltaNewChannel: i18n.MsgPayableBillDeltaNewChannel,
@@ -82,10 +88,10 @@ func ExportPayableUsages(c *gin.Context) {
 	}
 	rows := make([][]any, len(usages))
 	for i, usage := range usages {
-		cells := make([]any, 13)
+		cells := make([]any, len(headerKeys))
 		date, _ := model.ReceivableBillDayStart(usage.BillDate)
-		cells[0], cells[1] = strconv.Itoa(usage.TaskId), date.Format("2006-01-02")
-		cells[2], cells[3], cells[4], cells[5] = strconv.Itoa(usage.SiteId), usage.SiteName, usage.SiteBaseURL, usage.RemoteChannelName
+		cells[0], cells[1] = usage.TaskId, date.Format("2006-01-02")
+		cells[2], cells[3], cells[4], cells[5] = usage.SiteId, usage.SiteName, usage.SiteBaseURL, usage.RemoteChannelName
 		if usage.DeltaQuota != nil {
 			cells[6] = model.ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
 		}
@@ -112,13 +118,7 @@ func ExportPayableUsages(c *gin.Context) {
 		}
 		rows[i] = cells
 	}
-	writePayableBillExport(c, "payable-channel-usages.xlsx", []string{
-		i18n.MsgPayableBillExportTaskID, i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportSiteID,
-		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportSiteURL, i18n.MsgPayableBillExportChannelName,
-		i18n.MsgPayableBillExportDeltaAmount, i18n.MsgPayableBillExportUsedAmount, i18n.MsgPayableBillExportDeltaNote,
-		i18n.MsgPayableBillExportProvider, i18n.MsgPayableBillExportProviderSource, i18n.MsgPayableBillExportSyncedAt,
-		i18n.MsgPayableBillExportCounted,
-	}, rows, []int{7, 8})
+	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{7, 8})
 }
 
 // ExportPayableProviderBills writes the provider bills that match the list filter into an xlsx file.
@@ -133,9 +133,13 @@ func ExportPayableProviderBills(c *gin.Context) {
 		return
 	}
 
+	headerKeys := []string{
+		i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportProvider, i18n.MsgPayableBillExportAmount,
+		i18n.MsgPayableBillExportDiscount, i18n.MsgPayableBillExportPayableAmount, i18n.MsgPayableBillExportNote,
+	}
 	rows := make([][]any, len(bills))
 	for i, bill := range bills {
-		cells := make([]any, 5)
+		cells := make([]any, len(headerKeys))
 		date, _ := model.ReceivableBillDayStart(bill.BillDate)
 		cells[0] = date.Format("2006-01-02")
 		cells[1] = bill.ProviderName
@@ -155,10 +159,11 @@ func ExportPayableProviderBills(c *gin.Context) {
 		if bill.PayableAmount != nil {
 			cells[4] = bill.PayableAmount.Round(6).InexactFloat64()
 		}
+		// Like the "incomplete" mark on the page: rows without a discount add nothing to the payable amount.
+		if bill.DiscountMissing {
+			cells[5] = i18n.T(c, i18n.MsgPayableBillPayableIncomplete)
+		}
 		rows[i] = cells
 	}
-	writePayableBillExport(c, "payable-bills.xlsx", []string{
-		i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportProvider, i18n.MsgPayableBillExportAmount,
-		i18n.MsgPayableBillExportDiscount, i18n.MsgPayableBillExportPayableAmount,
-	}, rows, []int{3, 5})
+	writePayableBillExport(c, "payable-bills.xlsx", headerKeys, rows, []int{3, 5})
 }
