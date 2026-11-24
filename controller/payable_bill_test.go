@@ -1,10 +1,14 @@
 package controller
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -13,6 +17,9 @@ import (
 func setupPayableBillTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupThirdPartySiteTest(t)
+	originalOptions := service.PayableBillClientOptions
+	service.PayableBillClientOptions = service.ChannelPushClientOptions{Pace: 0, Timeout: 2 * time.Second, MaxRetryAfter: 30 * time.Minute}
+	t.Cleanup(func() { service.PayableBillClientOptions = originalOptions })
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.AuditLog{},
 		&model.PayablePullTask{}, &model.PayablePullSite{}, &model.PayableChannelUsage{}, &model.PayableProviderOverride{}))
 	clearTables := func() {
@@ -191,4 +198,87 @@ func TestPayablePullSiteHooks(t *testing.T) {
 	// A 仍是 pending，任务保持 running
 	assert.Equal(t, model.PayablePullPending, payablePullOf(t, db, 20261123, siteA.Id).Status)
 	assert.Equal(t, model.PayableTaskRunning, payableTaskOf(t, db, 20261123).Status)
+}
+
+func TestPayableChannelPageAttempt(t *testing.T) {
+	const remoteFailure = "Site request failed: {{detail}}"
+	const invalidList = "Site returned an invalid channel list"
+	json200 := func(body string) func() (int, string, http.Header) {
+		return func() (int, string, http.Header) { return http.StatusOK, body, nil }
+	}
+	tests := []struct {
+		name      string
+		reply     func() (int, string, http.Header)
+		total     int
+		quota     int64
+		key       string
+		retryable bool
+		wait      time.Duration
+	}{
+		{name: "ok", reply: json200(`{"success":true,"data":{"items":[{"id":3,"name":"a-dcmark-1-9","used_quota":1500000}],"total":101}}`), total: 101, quota: 1500000},
+		{name: "empty page", reply: json200(`{"success":true,"data":{"items":[],"total":0}}`)},
+		{name: "bad gateway", reply: func() (int, string, http.Header) { return http.StatusBadGateway, "", nil }, key: remoteFailure, retryable: true},
+		{name: "rate limited", reply: func() (int, string, http.Header) {
+			return http.StatusTooManyRequests, "", http.Header{"Retry-After": {"120"}}
+		}, key: remoteFailure, retryable: true, wait: 120 * time.Second},
+		{name: "refusal", reply: json200(`{"success":false,"message":"无权进行此操作"}`), key: remoteFailure},
+		{name: "missing used_quota", reply: json200(`{"success":true,"data":{"items":[{"id":3,"name":"a"}],"total":1}}`), key: invalidList},
+		{name: "negative used_quota", reply: json200(`{"success":true,"data":{"items":[{"id":3,"used_quota":-1}],"total":1}}`), key: invalidList},
+		{name: "zero id", reply: json200(`{"success":true,"data":{"items":[{"id":0,"used_quota":1}],"total":1}}`), key: invalidList},
+		{name: "missing items", reply: json200(`{"success":true,"data":{"total":1}}`), key: invalidList},
+		{name: "null items", reply: json200(`{"success":true,"data":{"items":null,"total":1}}`), key: invalidList},
+		{name: "missing total", reply: json200(`{"success":true,"data":{"items":[{"id":3,"used_quota":1}]}}`), key: invalidList},
+		{name: "negative total", reply: json200(`{"success":true,"data":{"items":[],"total":-1}}`), key: invalidList},
+		{name: "null data", reply: json200(`{"success":true,"data":null}`), key: invalidList},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupPayableBillTest(t)
+			var seen *http.Request
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = r
+				status, body, header := tt.reply()
+				for name, values := range header {
+					for _, value := range values {
+						w.Header().Add(name, value)
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+			}))
+			t.Cleanup(server.Close)
+			site := receivableSeedSite(t, db, "pb-page", server.URL, 1)
+
+			got := service.NewChannelPushClient(site, service.PayableBillClientOptions).ReadChannelPage(t.Context(), 2)
+
+			assert.Equal(t, tt.retryable, got.Retryable)
+			assert.Equal(t, tt.wait, got.RetryAfter)
+			if tt.key == "" {
+				require.Nil(t, got.Failure)
+				assert.Equal(t, tt.total, got.Total)
+				if tt.quota > 0 {
+					require.Len(t, got.Items, 1)
+					assert.Equal(t, 3, got.Items[0].ID)
+					assert.Equal(t, tt.quota, got.Items[0].UsedQuota)
+				} else {
+					assert.Empty(t, got.Items)
+				}
+			} else {
+				require.NotNil(t, got.Failure)
+				assert.Equal(t, tt.key, got.Failure.Key)
+				assert.Empty(t, got.Items)
+			}
+			// httptest 处理函数在客户端读完响应前已返回，这里读 seen 无竞争。
+			require.NotNil(t, seen)
+			assert.Equal(t, http.MethodGet, seen.Method)
+			assert.Equal(t, "/api/channel/", seen.URL.Path)
+			assert.Equal(t, "false", seen.URL.Query().Get("tag_mode"))
+			assert.Equal(t, "true", seen.URL.Query().Get("id_sort"))
+			assert.Equal(t, "2", seen.URL.Query().Get("p"))
+			assert.Equal(t, "100", seen.URL.Query().Get("page_size"))
+			assert.Equal(t, "Bearer remote-access-token", seen.Header.Get("Authorization"))
+			assert.Equal(t, "7", seen.Header.Get("New-Api-User"))
+		})
+	}
 }
