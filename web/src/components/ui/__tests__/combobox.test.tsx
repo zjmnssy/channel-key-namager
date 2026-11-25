@@ -182,6 +182,42 @@ describe('searchable single selection', () => {
     )
     expect(change).not.toHaveBeenCalled()
   })
+
+  it('does not filter options when filterOptions is false', async () => {
+    render(
+      <Combobox
+        options={options}
+        value='openai'
+        aria-label='Provider'
+        filterOptions={false}
+      />
+    )
+    const user = userEvent.setup()
+    const input = screen.getByRole('combobox', { name: 'Provider' })
+    await user.click(input)
+    await user.type(input, 'zzz')
+    expect(screen.getByRole('option', { name: 'OpenAI' })).toBeVisible()
+    expect(screen.getByRole('option', { name: 'Google' })).toBeVisible()
+  })
+
+  it('reports the typed search term and clears it when closed', async () => {
+    const onSearchChange = vi.fn()
+    render(
+      <Combobox
+        options={options}
+        value='openai'
+        aria-label='Provider'
+        onSearchChange={onSearchChange}
+      />
+    )
+    const user = userEvent.setup()
+    const input = screen.getByRole('combobox', { name: 'Provider' })
+    await user.click(input)
+    await user.type(input, 'g')
+    expect(onSearchChange).toHaveBeenLastCalledWith('g')
+    await user.keyboard('{Escape}')
+    expect(onSearchChange).toHaveBeenLastCalledWith('')
+  })
 })
 
 const pluginOptions = [
