@@ -1539,7 +1539,7 @@ func TestPayableBillSetProvider(t *testing.T) {
 	require.NoError(t, db.Find(&overrides).Error)
 	require.Len(t, overrides, 1)
 	assert.Equal(t, model.PayableProviderOverride{Id: overrides[0].Id, SiteId: site.Id, RemoteChannelId: 1, ProviderId: s1.Id,
-		CreatedTime: overrides[0].CreatedTime, UpdatedTime: overrides[0].UpdatedTime}, overrides[0])
+		CreatedTime: overrides[0].CreatedTime, UpdatedTime: overrides[0].UpdatedTime, RuleType: model.PayableRuleChannel}, overrides[0])
 	var otherAfter, siblingAfter model.PayableChannelUsage
 	require.NoError(t, db.First(&otherAfter, other.Id).Error)
 	assert.Equal(t, *other, otherAfter) // 其他日期的行不变
