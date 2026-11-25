@@ -206,6 +206,8 @@ func TestProviderMappingApplyScope(t *testing.T) {
 				}
 			}
 			channel7 := providerMappingSeedRule(t, db, siteA.Id, 7, s4.Id, model.PayableRuleChannel)
+			// 站点 B 的同号渠道有一条有效的指定渠道规则：只跳过站点 B 的渠道 1，站点 A 的渠道 1 照改
+			providerMappingSeedRule(t, db, siteB.Id, 1, s1.Id, model.PayableRuleChannel)
 			if tc.invalidateChannel7 {
 				require.NoError(t, db.Model(channel7).Update("provider_id", s2.Id).Error)
 				require.NoError(t, db.Model(s2).Update("role", common.RoleCommonUser).Error)
@@ -230,7 +232,7 @@ func TestProviderMappingApplyScope(t *testing.T) {
 
 			_, applied, err := model.CreatePayableRule(input, now)
 			require.NoError(t, err)
-			assert.EqualValues(t, len(want), applied)
+			assert.Equal(t, model.PayableRuleApplyResult{Rows: int64(len(want))}, applied)
 			var changed [][3]int
 			for id, row := range providerMappingUsages(t, db) {
 				expected := before[id]
@@ -243,6 +245,32 @@ func TestProviderMappingApplyScope(t *testing.T) {
 			assert.ElementsMatch(t, want, changed)
 		})
 	}
+}
+
+func TestProviderMappingUnknownRuleTypeChangesNothing(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-unknown-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-unknown-s2")
+	site := receivableSeedSite(t, db, "pm-unknown", "https://pm-unknown.example.com", 1)
+	pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+	providerMappingSeedUsage(t, db, pull, 1, 0, model.PayableProviderUnknown, nil)
+	providerMappingSeedUsage(t, db, pull, 2, s2.Id, model.PayableProviderManual, nil)
+	providerMappingSeedUsage(t, db, pull, 3, s2.Id, model.PayableProviderParsed, nil)
+	// 站点级规则的类型不认识（不是新建接口能写入的值）：回改与预览都不能改任何行，更不能写入空来源
+	rule := providerMappingSeedRule(t, db, site.Id, 0, s2.Id, "x")
+	scope := model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}
+	usages := providerMappingUsages(t, db)
+
+	count, err := model.CountPayableRuleApply(model.PayableProviderOverride{SiteId: site.Id, ProviderId: s1.Id, RuleType: "x"}, scope)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	_, _, applied, err := model.UpdatePayableRule(rule.Id, s1.Id, &scope, 100)
+	require.NoError(t, err)
+	assert.Zero(t, applied)
+	assert.Equal(t, usages, providerMappingUsages(t, db))
+	var emptySource int64
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("provider_source = ?", "").Count(&emptySource).Error)
+	assert.Zero(t, emptySource)
 }
 
 func TestProviderMappingCreateValidation(t *testing.T) {
@@ -350,7 +378,7 @@ func TestProviderMappingUpdateAndDelete(t *testing.T) {
 	_, after, applied, err = model.UpdatePayableRule(old.Id, s2.Id, scope, 300)
 	require.NoError(t, err)
 	assert.Equal(t, s2.Id, after.ProviderId)
-	assert.EqualValues(t, 2, applied)
+	assert.Equal(t, model.PayableRuleApplyResult{Rows: 2}, applied)
 	usages = providerMappingUsages(t, db)
 	assert.Equal(t, providerMappingApplied(*manualRow, s2, model.PayableProviderManual, 300), usages[manualRow.Id])
 	assert.Equal(t, providerMappingApplied(*unknownRow, s2, model.PayableProviderManual, 300), usages[unknownRow.Id])
@@ -368,7 +396,7 @@ func TestProviderMappingUpdateAndDelete(t *testing.T) {
 	_, after, applied, err = model.UpdatePayableRule(siteRule.Id, s2.Id, scope, 500)
 	require.NoError(t, err)
 	assert.Equal(t, s2.Id, after.ProviderId)
-	assert.EqualValues(t, 1, applied)
+	assert.Equal(t, model.PayableRuleApplyResult{Rows: 1}, applied)
 	assert.Equal(t, providerMappingApplied(*goneRow, s2, model.PayableProviderRuleAll, 500), providerMappingUsages(t, db)[goneRow.Id])
 
 	// 删除（站点已删除的规则也能删）：返回被删的规则，明细不变；再删报不存在
@@ -401,7 +429,7 @@ func TestProviderMappingApplyInBatches(t *testing.T) {
 	_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id,
 		Apply: &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}}, 100)
 	require.NoError(t, err)
-	assert.EqualValues(t, 2500, applied)
+	assert.Equal(t, model.PayableRuleApplyResult{Rows: 2500}, applied)
 	var changed int64
 	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("provider_id = ? AND provider_source = ? AND updated_time = ?",
 		supplier.Id, model.PayableProviderRuleAll, 100).Count(&changed).Error)
@@ -536,7 +564,7 @@ func TestProviderMappingApplyAndPulls(t *testing.T) {
 	_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: siteA.Id, RuleType: model.PayableRuleAll,
 		ProviderID: target.Id, Apply: scope}, 100)
 	require.NoError(t, err)
-	assert.EqualValues(t, 2, applied) // 事务里改的 1 行 + 补扫改的 1 行
+	assert.Equal(t, model.PayableRuleApplyResult{Rows: 2}, applied) // 事务里改的 1 行 + 补扫改的 1 行
 	usages := providerMappingUsages(t, db)
 	require.Len(t, late, 4)
 	assert.Equal(t, providerMappingApplied(*late[0], target, model.PayableProviderRuleAll, 100), usages[late[0].Id])
@@ -572,12 +600,171 @@ func TestProviderMappingApplyAndPulls(t *testing.T) {
 		_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: siteC.Id, RuleType: model.PayableRuleAll,
 			ProviderID: target.Id, Apply: scope}, 200)
 		require.NoError(t, err)
-		assert.EqualValues(t, 1, applied)
+		assert.Equal(t, model.PayableRuleApplyResult{Rows: 1}, applied)
 		var written int64
 		require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ? AND remote_channel_id = ?", pullB.Id, 9).
 			Count(&written).Error)
 		assert.EqualValues(t, 1, written)
 	})
+}
+
+// providerMappingFailUsageUpdates 在 fail 返回 true 时让明细表的 UPDATE 报错，用来模拟提交后的补扫失败；测试结束时移除。
+func providerMappingFailUsageUpdates(t *testing.T, db *gorm.DB, fail func() bool) {
+	t.Helper()
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:pm-sweep-fail", func(tx *gorm.DB) {
+		if tx.Statement.Table == "payable_channel_usages" && fail() {
+			tx.AddError(errors.New("sweep boom"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("test:pm-sweep-fail") })
+}
+
+// 提交之后、补扫之前规则被删除、改了提供商或提供商已不是渠道供应商时，补扫跳过，不按事务里的旧规则改新插入的行，也不算失败；
+// 补扫偶发失败时重试，后一次成功就不报告失败。
+func TestProviderMappingSweepAfterCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// change 在事务提交之后、补扫之前执行
+		change    func(t *testing.T, db *gorm.DB, rule *model.PayableProviderOverride, target, other *model.User)
+		failFirst bool // 补扫第一次更新明细失败，之后成功
+		swept     bool // 期间新插入的旧结果行被补改
+	}{
+		{name: "rule deleted", change: func(t *testing.T, db *gorm.DB, rule *model.PayableProviderOverride, _, _ *model.User) {
+			require.NoError(t, db.Delete(rule).Error)
+		}},
+		{name: "provider changed", change: func(t *testing.T, db *gorm.DB, rule *model.PayableProviderOverride, _, other *model.User) {
+			require.NoError(t, db.Model(rule).Update("provider_id", other.Id).Error)
+		}},
+		{name: "provider no longer a supplier", change: func(t *testing.T, db *gorm.DB, _ *model.PayableProviderOverride, target, _ *model.User) {
+			require.NoError(t, db.Model(target).Update("role", common.RoleCommonUser).Error)
+		}},
+		{name: "first attempt fails", failFirst: true, swept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupPayableBillTest(t)
+			target := channelPushSeedSupplier(t, db, "pm-sweep-s")
+			other := channelPushSeedSupplier(t, db, "pm-sweep-o")
+			site := receivableSeedSite(t, db, "pm-sweep", "https://pm-sweep.example.com", 1)
+			pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+			providerMappingSeedUsage(t, db, pull, 1, 0, model.PayableProviderUnknown, nil)
+			var failNext atomic.Bool
+			providerMappingFailUsageUpdates(t, db, func() bool { return failNext.CompareAndSwap(true, false) })
+			var late *model.PayableChannelUsage
+			model.PayableRuleApplyHook = func(stage string) {
+				if stage != "after_commit" {
+					return
+				}
+				var rule model.PayableProviderOverride
+				require.NoError(t, db.Where("site_id = ? AND remote_channel_id = 0", site.Id).First(&rule).Error)
+				if tc.change != nil {
+					tc.change(t, db, &rule, target, other)
+				}
+				// 拉取在回改期间按旧规则写入的一行
+				late = providerMappingSeedUsage(t, db, pull, 2, 0, model.PayableProviderUnknown, nil)
+				failNext.Store(tc.failFirst)
+			}
+			t.Cleanup(func() { model.PayableRuleApplyHook = nil })
+
+			_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll,
+				ProviderID: target.Id, Apply: &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}}, 100)
+			require.NoError(t, err)
+			require.NotNil(t, late)
+			want, wantLate := model.PayableRuleApplyResult{Rows: 1}, *late
+			if tc.swept {
+				want.Rows, wantLate = 2, providerMappingApplied(*late, target, model.PayableProviderRuleAll, 100)
+			}
+			assert.Equal(t, want, applied)
+			assert.Equal(t, wantLate, providerMappingUsages(t, db)[late.Id])
+		})
+	}
+}
+
+// providerMappingSaveReply 是新建、编辑接口的返回；sweep_failed 总是有，用指针区分“没有这个字段”。
+type providerMappingSaveReply struct {
+	Rule        model.PayableRuleRow `json:"rule"`
+	AppliedRows int64                `json:"applied_rows"`
+	SweepFailed *bool                `json:"sweep_failed"`
+}
+
+// 补扫重试后仍失败：保存照常成功、返回事务里改的行数，并告诉调用方补扫失败，成功的审计记下 sweep_failed。
+// 按提示编辑这条规则再回改一次，上次漏改的行在事务里补上。
+func TestProviderMappingSweepFailureIsReported(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-sweep-fail-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-sweep-fail-s2")
+	site := receivableSeedSite(t, db, "pm-sweep-fail", "https://pm-sweep-fail.example.com", 1)
+	pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+	providerMappingSeedUsage(t, db, pull, 1, 0, model.PayableProviderUnknown, nil)
+	// 提交之后补扫的每次尝试都失败；拉取在回改期间写入了一行旧结果（每次保存一个新渠道）
+	var failing atomic.Bool
+	var attempts atomic.Int32
+	providerMappingFailUsageUpdates(t, db, func() bool {
+		if failing.Load() {
+			attempts.Add(1)
+			return true
+		}
+		return false
+	})
+	var late *model.PayableChannelUsage
+	channel := 1
+	model.PayableRuleApplyHook = func(stage string) {
+		if stage == "after_commit" {
+			channel++
+			late = providerMappingSeedUsage(t, db, pull, channel, 0, model.PayableProviderUnknown, nil)
+			attempts.Store(0)
+			failing.Store(true)
+		}
+	}
+	t.Cleanup(func() { model.PayableRuleApplyHook = nil })
+	apply := map[string]any{"start_date": 20261101, "end_date": 20261101}
+	save := func(method, id string, fields map[string]any, handler gin.HandlerFunc) providerMappingSaveReply {
+		failing.Store(false)
+		encoded, err := common.Marshal(fields)
+		require.NoError(t, err)
+		reply := providerMappingCall(t, method, "/api/provider_mapping_rule/"+id, string(encoded), id, handler)
+		require.True(t, reply.Success, reply.MessageKey)
+		var result providerMappingSaveReply
+		require.NoError(t, common.Unmarshal(reply.Data, &result))
+		return result
+	}
+	ruleParams := func(row model.PayableRuleRow, extra map[string]any) map[string]any {
+		params := map[string]any{"rule_id": row.Id, "site_id": site.Id, "site_name": site.Name, "rule_type": "all", "remote_channel_id": 0,
+			"remote_channel_name": "", "provider_id": row.ProviderId, "provider_name": row.ProviderName,
+			"apply_start_date": 20261101, "apply_end_date": 20261101, "sweep_failed": true}
+		maps.Copy(params, extra)
+		return providerMappingJSON(t, params)
+	}
+
+	created := save(http.MethodPost, "", map[string]any{"site_id": site.Id, "rule_type": "all", "provider_id": s1.Id, "apply": apply},
+		CreateProviderMappingRule)
+	assert.EqualValues(t, 1, created.AppliedRows)
+	assert.Equal(t, payablePtr(true), created.SweepFailed)
+	assert.EqualValues(t, 3, attempts.Load()) // 一共尝试 3 次
+	require.NotNil(t, late)
+	missed := *late
+	assert.Equal(t, missed, providerMappingUsages(t, db)[missed.Id]) // 没有补改
+	ruleID := strconv.Itoa(created.Rule.Id)
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.create", Success: true, Content: "Created provider mapping rule #" + ruleID,
+		Params: ruleParams(created.Rule, map[string]any{"applied_rows": 1})}}, providerMappingAudits(t))
+
+	updated := save(http.MethodPut, ruleID, map[string]any{"provider_id": s2.Id, "apply": apply}, UpdateProviderMappingRule)
+	assert.EqualValues(t, 2, updated.AppliedRows) // 原有的一行 + 上次漏改的一行
+	assert.Equal(t, payablePtr(true), updated.SweepFailed)
+	usages := providerMappingUsages(t, db)
+	assert.Equal(t, s2.Id, usages[missed.Id].ProviderId)
+	assert.Equal(t, model.PayableProviderRuleAll, usages[missed.Id].ProviderSource)
+	assert.Equal(t, *late, usages[late.Id]) // 这次补扫同样失败
+	audits := providerMappingAudits(t)
+	require.Len(t, audits, 2)
+	assert.Equal(t, providerMappingAudit{Action: "provider_mapping.update", Success: true, Content: "Updated provider mapping rule #" + ruleID,
+		Params: ruleParams(updated.Rule, map[string]any{"previous_provider_id": s1.Id, "previous_provider_name": s1.Username,
+			"applied_rows": 2})}, audits[1])
+
+	// model 的调用方拿到的也是：保存没有出错，事务里改的 3 行照算，补扫失败单独标明
+	failing.Store(false)
+	_, _, applied, err := model.UpdatePayableRule(created.Rule.Id, s1.Id, &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}, 100)
+	require.NoError(t, err)
+	assert.Equal(t, model.PayableRuleApplyResult{Rows: 3, SweepFailed: true}, applied)
 }
 
 // providerMappingSeedNamedUsage 写一行指定渠道名的明细。
@@ -739,6 +926,10 @@ func TestProviderMappingChannelSearch(t *testing.T) {
 	// 渠道 ID 精确命中排最前，再接名称匹配；精确命中的名称取最近一天
 	providerMappingSeedNamedUsage(t, db, pull, 20, "has 12 inside")
 	assert.Equal(t, []int{12, 20}, search(siteA.Id, "12", 20))
+	// 精确命中的 ID 不是最小时仍排在最前；只取一个时保留的也是精确命中
+	providerMappingSeedNamedUsage(t, db, pull, 3, "ch 20")
+	assert.Equal(t, []int{20, 3}, search(siteA.Id, "20", 20))
+	assert.Equal(t, []int{20}, search(siteA.Id, "20", 1))
 	options, err := model.SearchPayableChannels(siteA.Id, "99", 20)
 	require.NoError(t, err)
 	assert.Equal(t, []model.PayableChannelOption{{RemoteChannelId: 99, RemoteChannelName: "az-old"}}, options)
@@ -750,7 +941,7 @@ func TestProviderMappingChannelSearch(t *testing.T) {
 	for _, option := range options {
 		hasRule[option.RemoteChannelId] = option.HasRule
 	}
-	assert.Equal(t, map[int]bool{10: true, 11: false, 12: false, 13: false, 20: false}, hasRule)
+	assert.Equal(t, map[int]bool{3: false, 10: true, 11: false, 12: false, 13: false, 20: false}, hasRule)
 }
 
 var providerMappingActor = &model.User{Id: 1, Username: "root", Role: common.RoleRootUser}
@@ -828,15 +1019,12 @@ func TestProviderMappingRuleAPI(t *testing.T) {
 		require.NoError(t, err)
 		return string(encoded)
 	}
-	type saveResult struct {
-		Rule        model.PayableRuleRow `json:"rule"`
-		AppliedRows int64                `json:"applied_rows"`
-	}
-	save := func(method, id string, fields map[string]any, handler gin.HandlerFunc) saveResult {
+	save := func(method, id string, fields map[string]any, handler gin.HandlerFunc) providerMappingSaveReply {
 		reply := providerMappingCall(t, method, rules+id, body(fields), id, handler)
 		require.True(t, reply.Success, reply.MessageKey)
-		var result saveResult
+		var result providerMappingSaveReply
 		require.NoError(t, common.Unmarshal(reply.Data, &result))
+		assert.Equal(t, payablePtr(false), result.SweepFailed) // 回改与不回改都带这个字段
 		return result
 	}
 	previewTarget := func(siteID int, ruleType string, channelID, providerID, startDate, endDate int) string {

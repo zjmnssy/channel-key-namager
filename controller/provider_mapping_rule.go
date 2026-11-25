@@ -90,6 +90,18 @@ func auditProviderMappingRule(params model.AuditFields, row model.PayableRuleRow
 	params["rule_type"], params["remote_channel_id"], params["remote_channel_name"] = row.RuleType, row.RemoteChannelId, row.RemoteChannelName
 }
 
+// auditProviderMappingApplied 把保存成功后的回改结果写进审计参数：回改时记下改动的行数；提交后的补扫重试后仍失败时
+// 再记 sweep_failed，补扫成功的审计不带这个字段。
+func auditProviderMappingApplied(params model.AuditFields, apply *model.PayableRuleApply, applied model.PayableRuleApplyResult) {
+	if apply == nil {
+		return
+	}
+	params["applied_rows"] = applied.Rows
+	if applied.SweepFailed {
+		params["sweep_failed"] = true
+	}
+}
+
 // GetProviderMappingRules 分页返回映射规则，按 ID 倒序；site_ids、types、provider_ids 是逗号分隔的筛选条件。
 func GetProviderMappingRules(c *gin.Context) {
 	siteIDs, sitesOK := parseReceivableIDList(c.Query("site_ids"), 1)
@@ -146,9 +158,7 @@ func CreateProviderMappingRule(c *gin.Context) {
 	// 规则与回改已提交：之后重读规则失败，也不能把审计记成失败。
 	success = true
 	params["rule_id"] = rule.Id
-	if input.Apply != nil {
-		params["applied_rows"] = applied
-	}
+	auditProviderMappingApplied(params, input.Apply, applied)
 	row, err := model.GetPayableRuleRow(rule.Id)
 	if err != nil {
 		common.ApiError(c, err)
@@ -156,7 +166,7 @@ func CreateProviderMappingRule(c *gin.Context) {
 	}
 	auditProviderMappingRule(params, row)
 	params["provider_name"] = row.ProviderName
-	common.ApiSuccess(c, gin.H{"rule": row, "applied_rows": applied})
+	common.ApiSuccess(c, gin.H{"rule": row, "applied_rows": applied.Rows, "sweep_failed": applied.SweepFailed})
 }
 
 // UpdateProviderMappingRule 修改规则的提供商，可选同时回改；提供商不变也可以保存，只做回改。站点、类型与站点渠道不能改。
@@ -201,16 +211,14 @@ func UpdateProviderMappingRule(c *gin.Context) {
 	}
 	// 规则与回改已提交：之后重读规则失败，也不能把审计记成失败。
 	success = true
-	if input.Apply != nil {
-		params["applied_rows"] = applied
-	}
+	auditProviderMappingApplied(params, input.Apply, applied)
 	row, err := model.GetPayableRuleRow(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	params["provider_name"] = row.ProviderName
-	common.ApiSuccess(c, gin.H{"rule": row, "applied_rows": applied})
+	common.ApiSuccess(c, gin.H{"rule": row, "applied_rows": applied.Rows, "sweep_failed": applied.SweepFailed})
 }
 
 // DeleteProviderMappingRule 删除一条规则：已拉取的明细不变，下一次拉取起不再使用。站点已删除的规则也可以删。

@@ -200,7 +200,8 @@ func pullPayablePage(ctx context.Context, clock payableScanClock, pull model.Pay
 // 增量以该渠道在站点（地址相同的）更早的完整拉取里最近的累计值为基线（见 model.PayableBaseline）：
 // 站点在这个地址还没有完整拉取时为空（首次同步）；渠道在更早的完整拉取里都没有记录时，若最近一次完整拉取与站点报的总数一致，
 // 它是新渠道，基线为 0，否则它可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
-// 提供商按手动指定、渠道名标记、历史明细的顺序确定（每页批量解析一次），并快照该用户此刻的应付折扣。
+// 提供商按指定渠道规则、全部渠道规则、渠道名标记、沿用上次、不能解析的渠道规则的顺序确定，都没有时为未知
+// （见 model.ResolvePayableProviders，每页批量解析一次），并快照该用户此刻的应付折扣。
 func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
 	if len(items) == 0 {
 		return nil, nil

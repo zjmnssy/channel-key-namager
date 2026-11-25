@@ -14,6 +14,9 @@ import (
 // PayableRuleMaxApplyDays 是一次回改最多覆盖的账单天数（首尾都算），由调用方校验。
 const PayableRuleMaxApplyDays = 92
 
+// payableRuleSweepAttempts 是提交后补扫最多尝试的次数，含第一次。
+const payableRuleSweepAttempts = 3
+
 var (
 	ErrPayableRuleNotFound      = errors.New("Mapping rule does not exist")
 	ErrPayableSiteRuleExists    = errors.New("This site already has a site-level mapping rule")
@@ -39,6 +42,13 @@ type PayableRuleInput struct {
 	Apply           *PayableRuleApply `json:"apply"` // nil = 不回改
 }
 
+// PayableRuleApplyResult 是保存规则时回改的结果。Rows 是改动的明细行数，含提交后的补扫；SweepFailed 表示提交后的补扫
+// 重试后仍失败：规则与事务里的回改已经提交，但回改期间新拉取的明细可能有一部分还是旧结果。
+type PayableRuleApplyResult struct {
+	Rows        int64
+	SweepFailed bool
+}
+
 // payableRuleSources 是各类规则回改后明细的提供商来源，与拉取时按规则确定的来源相同。
 var payableRuleSources = map[string]string{
 	PayableRuleChannel:    PayableProviderManual,
@@ -46,10 +56,10 @@ var payableRuleSources = map[string]string{
 	PayableRuleUnresolved: PayableProviderRuleUnresolved,
 }
 
-// CreatePayableRule 新建一条规则；input.Apply 不为空时在同一事务里回改范围内的明细，applied 是改动的行数（含提交后的补扫）。
+// CreatePayableRule 新建一条规则；input.Apply 不为空时在同一事务里回改范围内的明细，applied 是回改的结果（见 PayableRuleApplyResult）。
 // 站点必须存在且未删除，提供商必须是渠道供应商，指定渠道必须在该站点拉取过。站点已有站点级规则、该渠道已有规则时
 // 分别返回 ErrPayableSiteRuleExists、ErrPayableChannelRuleExists。
-func CreatePayableRule(input PayableRuleInput, now int64) (rule PayableProviderOverride, applied int64, err error) {
+func CreatePayableRule(input PayableRuleInput, now int64) (rule PayableProviderOverride, applied PayableRuleApplyResult, err error) {
 	return savePayableRule(input.Apply, now, func(tx *gorm.DB) (saved PayableProviderOverride, supplier User, err error) {
 		var sites int64
 		if err = tx.Model(&ThirdPartySite{}).Where("id = ?", input.SiteID).Count(&sites).Error; err != nil {
@@ -101,7 +111,7 @@ func CreatePayableRule(input PayableRuleInput, now int64) (rule PayableProviderO
 
 // UpdatePayableRule 把规则的提供商改为 providerID；apply 不为空时在同一事务里回改范围内的明细。提供商不变也可以保存，只做回改。
 // 站点、类型、渠道不能改；站点已删除的规则也可以编辑（回改历史账单的归属）。规则存在时 before 总是有值，便于调用方写审计。
-func UpdatePayableRule(id, providerID int, apply *PayableRuleApply, now int64) (before, after PayableProviderOverride, applied int64, err error) {
+func UpdatePayableRule(id, providerID int, apply *PayableRuleApply, now int64) (before, after PayableProviderOverride, applied PayableRuleApplyResult, err error) {
 	after, applied, err = savePayableRule(apply, now, func(tx *gorm.DB) (saved PayableProviderOverride, supplier User, err error) {
 		if err = lockForUpdate(tx).Where("id = ?", id).First(&before).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -154,12 +164,17 @@ func CountPayableRuleApply(rule PayableProviderOverride, apply PayableRuleApply)
 
 // savePayableRule 是新建与编辑共用的保存流程：在一个事务里由 save 校验并写入规则，返回写入后的规则与目标供应商；
 // apply 不为空时在同一事务里回改，规则与明细要么都改，要么都不改。回改期间该站点的拉取可能按旧规则写入，
-// 所以提交后再对回改开始之后新插入的明细补扫一次。返回的行数含补扫；补扫出错只记日志，规则与回改已经提交。
-func savePayableRule(apply *PayableRuleApply, now int64, save func(tx *gorm.DB) (PayableProviderOverride, User, error)) (PayableProviderOverride, int64, error) {
+// 所以提交后再对回改开始之后新插入的明细补扫一次。返回的行数含补扫。
+//
+// 补扫按提交后重读的规则与提供商执行：规则已被删除、提供商已不是刚保存的那个、或该提供商已不是渠道供应商时跳过，
+// 不按事务里的旧规则改新插入的行，也不算失败（之后的回改与拉取按新的规则走）。每次尝试一个事务并锁住规则行，
+// 补扫期间别人改不了这条规则；偶发失败时重试，一共 payableRuleSweepAttempts 次。仍失败时只记日志并在结果里标明
+// SweepFailed，不返回错误：规则与事务里的回改已经提交，调用方据此提示用户再回改一次。
+func savePayableRule(apply *PayableRuleApply, now int64, save func(tx *gorm.DB) (PayableProviderOverride, User, error)) (PayableProviderOverride, PayableRuleApplyResult, error) {
 	sweepFrom := 0
 	if apply != nil {
 		if err := DB.Model(&PayableChannelUsage{}).Select("COALESCE(MAX(id), 0)").Scan(&sweepFrom).Error; err != nil {
-			return PayableProviderOverride{}, 0, err
+			return PayableProviderOverride{}, PayableRuleApplyResult{}, err
 		}
 	}
 	var rule PayableProviderOverride
@@ -179,19 +194,47 @@ func savePayableRule(apply *PayableRuleApply, now int64, save func(tx *gorm.DB) 
 		return nil
 	})
 	if err != nil {
-		return PayableProviderOverride{}, 0, err
+		return PayableProviderOverride{}, PayableRuleApplyResult{}, err
 	}
 	if apply == nil {
-		return rule, 0, nil
+		return rule, PayableRuleApplyResult{}, nil
 	}
 	if PayableRuleApplyHook != nil {
 		PayableRuleApplyHook("after_commit")
 	}
-	swept, err := applyPayableRule(DB, rule, supplier, *apply, sweepFrom, now)
-	if err != nil {
-		common.SysError(common.LogText("payable rule sweep failed: %v", err))
+	result := PayableRuleApplyResult{Rows: applied}
+	for range payableRuleSweepAttempts {
+		var swept int64
+		err = DB.Transaction(func(tx *gorm.DB) error {
+			var current PayableProviderOverride
+			if err := lockForUpdate(tx).Where("id = ?", rule.Id).First(&current).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			if current.ProviderId != rule.ProviderId {
+				return nil
+			}
+			currentSupplier, err := payableRuleSupplier(tx, current.ProviderId)
+			if errors.Is(err, ErrPayableProviderInvalid) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			swept, err = applyPayableRule(tx, current, currentSupplier, *apply, sweepFrom, now)
+			return err
+		})
+		if err == nil {
+			result.Rows += swept
+			return rule, result, nil
+		}
 	}
-	return rule, applied + swept, nil
+	common.SysError(common.LogText("payable rule sweep failed after %d attempts: rule=%d site=%d type=%s bill_dates=%d~%d after_id=%d error=%v",
+		payableRuleSweepAttempts, rule.Id, rule.SiteId, rule.Type(), apply.StartDate, apply.EndDate, sweepFrom, err))
+	result.SweepFailed = true
+	return rule, result, nil
 }
 
 // payableRuleSupplier 返回规则的目标提供商：此刻必须是渠道供应商（已禁用的也算），否则为 ErrPayableProviderInvalid。
@@ -209,7 +252,7 @@ func payableRuleSupplier(db *gorm.DB, providerID int) (User, error) {
 
 // payableRuleSourceCondition 是规则回改一行明细的提供商与来源条件，预览、回改与分批更新共用。提供商已是目标的行一概不动
 // （否则会改掉已对过账的折扣快照、抹掉名称解析的痕迹）；“全部渠道”不改手动设置的行，“不能解析”只改未知与它自己确定的行，
-// 指定渠道不限来源。分批更新时重复这些条件，不覆盖期间别人刚改的行。
+// 指定渠道不限来源；不认识的类型不改任何行（也就不会写入空来源）。分批更新时重复这些条件，不覆盖期间别人刚改的行。
 func payableRuleSourceCondition(tx *gorm.DB, rule PayableProviderOverride) *gorm.DB {
 	query := tx.Model(&PayableChannelUsage{}).Where("provider_id <> ?", rule.ProviderId)
 	switch rule.Type() {
@@ -217,8 +260,11 @@ func payableRuleSourceCondition(tx *gorm.DB, rule PayableProviderOverride) *gorm
 		return query.Where("provider_source <> ?", PayableProviderManual)
 	case PayableRuleUnresolved:
 		return query.Where("provider_source IN ?", []string{PayableProviderUnknown, PayableProviderRuleUnresolved})
+	case PayableRuleChannel:
+		return query
+	default:
+		return query.Where("1 = 0")
 	}
-	return query
 }
 
 // payableRuleUsages 是规则在 apply 范围内要回改的明细，预览与回改共用：在 payableRuleSourceCondition 之上限定站点与账单日期，
