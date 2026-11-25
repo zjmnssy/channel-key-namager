@@ -165,6 +165,7 @@ const (
 	MsgPayableBillSourceParsed         = "payable_bill.source.parsed"
 	MsgPayableBillSourceInherited      = "payable_bill.source.inherited"
 	MsgPayableBillSourceUnknown        = "payable_bill.source.unknown"
+	MsgPayableBillSourceRule           = "payable_bill.source.rule"
 	MsgPayableBillDiscountMixed        = "payable_bill.discount.mixed"
 	MsgPayableBillDiscountMissing      = "payable_bill.discount.missing"
 	MsgPayableBillPayableIncomplete    = "payable_bill.payable.incomplete"

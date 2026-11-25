@@ -2,6 +2,9 @@ package controller
 
 import (
 	"errors"
+	"fmt"
+	"maps"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -747,4 +751,371 @@ func TestProviderMappingChannelSearch(t *testing.T) {
 		hasRule[option.RemoteChannelId] = option.HasRule
 	}
 	assert.Equal(t, map[int]bool{10: true, 11: false, 12: false, 13: false, 20: false}, hasRule)
+}
+
+var providerMappingActor = &model.User{Id: 1, Username: "root", Role: common.RoleRootUser}
+
+// providerMappingCall 以超级管理员的控制台会话调用规则接口；id 不为空时作为路由参数 :id。
+func providerMappingCall(t *testing.T, method, target, body, id string, handler gin.HandlerFunc) receivableReply {
+	t.Helper()
+	var params gin.Params
+	if id != "" {
+		params = gin.Params{{Key: "id", Value: id}}
+	}
+	return receivableReplyOf(t, channelSupplierRequest(t, method, target, body, providerMappingActor, params, handler))
+}
+
+// providerMappingJSON 把值经 JSON 往返成 map。期望的审计参数与读出的审计参数都这样处理，数字同为 float64，可以整体比较。
+func providerMappingJSON(t *testing.T, value any) map[string]any {
+	t.Helper()
+	encoded, err := common.Marshal(value)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, common.Unmarshal(encoded, &decoded))
+	return decoded
+}
+
+type providerMappingAudit struct {
+	Action  string
+	Success bool
+	Content string
+	Params  map[string]any
+}
+
+// providerMappingAudits 按写入顺序读出 provider_mapping.* 审计。
+func providerMappingAudits(t *testing.T) []providerMappingAudit {
+	t.Helper()
+	var logs []model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action LIKE ?", "provider_mapping.%").Order("id").Find(&logs).Error)
+	audits := make([]providerMappingAudit, 0, len(logs))
+	for _, log := range logs {
+		require.NotNil(t, log.Other.Op)
+		audits = append(audits, providerMappingAudit{Action: log.Action, Success: log.Success, Content: log.Content,
+			Params: providerMappingJSON(t, log.Other.Op.Params)})
+	}
+	return audits
+}
+
+func TestProviderMappingRuleAPI(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-api-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-api-s2")
+	plain := &model.User{Username: "pm-api-u", Role: common.RoleCommonUser, Status: 1, AffCode: "pm-api-u"}
+	require.NoError(t, db.Create(plain).Error)
+	siteA := receivableSeedSite(t, db, "pm-api-a", "https://pm-api-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pm-api-b", "https://pm-api-b.example.com", 1)
+	gone := receivableSeedSite(t, db, "pm-api-gone", "https://pm-api-gone.example.com", 1)
+	require.NoError(t, db.Delete(gone).Error)
+	task := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+	pullA := payableSeedPull(t, db, task, siteA.Id, model.PayablePullSuccess)
+	providerMappingSeedUsage(t, db, pullA, 1, 0, model.PayableProviderUnknown, nil)
+	providerMappingSeedUsage(t, db, pullA, 2, 0, model.PayableProviderUnknown, nil)
+	providerMappingSeedUsage(t, db, pullA, 3, s2.Id, model.PayableProviderParsed, nil)
+	// 回改范围前一天的一行，回改不动它
+	early := payableSeedPull(t, db, payableSeedTask(t, db, 20260831, model.PayableTaskSuccess), siteA.Id, model.PayablePullSuccess)
+	providerMappingSeedUsage(t, db, early, 1, 0, model.PayableProviderUnknown, nil)
+	// 站点 B 拉取过 25 个渠道，渠道搜索最多返回 20 个
+	pullB := payableSeedPull(t, db, task, siteB.Id, model.PayablePullSuccess)
+	for channel := 1; channel <= 25; channel++ {
+		providerMappingSeedUsage(t, db, pullB, channel, 0, model.PayableProviderUnknown, nil)
+	}
+
+	const rules = "/api/provider_mapping_rule/"
+	const start, end = 20260901, 20261201 // 首尾都算，恰好 92 天
+	apply := map[string]any{"start_date": start, "end_date": end}
+	body := func(fields map[string]any) string {
+		encoded, err := common.Marshal(fields)
+		require.NoError(t, err)
+		return string(encoded)
+	}
+	type saveResult struct {
+		Rule        model.PayableRuleRow `json:"rule"`
+		AppliedRows int64                `json:"applied_rows"`
+	}
+	save := func(method, id string, fields map[string]any, handler gin.HandlerFunc) saveResult {
+		reply := providerMappingCall(t, method, rules+id, body(fields), id, handler)
+		require.True(t, reply.Success, reply.MessageKey)
+		var result saveResult
+		require.NoError(t, common.Unmarshal(reply.Data, &result))
+		return result
+	}
+	previewTarget := func(siteID int, ruleType string, channelID, providerID, startDate, endDate int) string {
+		return fmt.Sprintf(rules+"preview?site_id=%d&rule_type=%s&remote_channel_id=%d&provider_id=%d&start_date=%d&end_date=%d",
+			siteID, ruleType, channelID, providerID, startDate, endDate)
+	}
+	previewRows := func(target string) int64 {
+		reply := providerMappingCall(t, http.MethodGet, target, "", "", PreviewProviderMappingRule)
+		require.True(t, reply.Success, reply.MessageKey)
+		var result struct {
+			Rows int64 `json:"rows"`
+		}
+		require.NoError(t, common.Unmarshal(reply.Data, &result))
+		return result.Rows
+	}
+	ruleRow := func(id int) model.PayableRuleRow {
+		row, err := model.GetPayableRuleRow(id)
+		require.NoError(t, err)
+		return row
+	}
+	// changedSince 返回与快照相比改动过的明细行数
+	changedSince := func(before map[int]model.PayableChannelUsage) int64 {
+		var changed int64
+		for id, row := range providerMappingUsages(t, db) {
+			if !assert.ObjectsAreEqual(before[id], row) {
+				changed++
+			}
+		}
+		return changed
+	}
+	seen := 0
+	// newAudits 返回上次调用之后新写入的 provider_mapping.* 审计
+	newAudits := func() []providerMappingAudit {
+		audits := providerMappingAudits(t)
+		added := audits[seen:]
+		seen = len(audits)
+		return added
+	}
+
+	// 1. 新建“全部渠道”并回改恰好 92 天：预览的行数就是随后实际修改的行数（范围外的行不动），审计记下新规则、名称与回改
+	rows := previewRows(previewTarget(siteA.Id, model.PayableRuleAll, 0, s1.Id, start, end))
+	assert.EqualValues(t, 3, rows)
+	before := providerMappingUsages(t, db)
+	result := save(http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "all", "provider_id": s1.Id, "apply": apply},
+		CreateProviderMappingRule)
+	allRule := result.Rule
+	assert.Equal(t, model.PayableRuleAll, allRule.RuleType)
+	assert.Equal(t, ruleRow(allRule.Id), allRule)
+	assert.Equal(t, rows, result.AppliedRows)
+	assert.Equal(t, rows, changedSince(before))
+	allID := strconv.Itoa(allRule.Id)
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.create", Success: true, Content: "Created provider mapping rule #" + allID,
+		Params: providerMappingJSON(t, map[string]any{"rule_id": allRule.Id, "site_id": siteA.Id, "site_name": siteA.Name, "rule_type": "all",
+			"remote_channel_id": 0, "remote_channel_name": "", "provider_id": s1.Id, "provider_name": s1.Username,
+			"apply_start_date": start, "apply_end_date": end, "applied_rows": 3})}}, newAudits())
+
+	// 2. 新建“指定渠道”不回改：改动 0 行，审计没有回改的字段；另在站点 B 建一条“不能解析”
+	before = providerMappingUsages(t, db)
+	result = save(http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 2, "provider_id": s2.Id},
+		CreateProviderMappingRule)
+	channelRule := result.Rule
+	assert.Equal(t, model.PayableRuleChannel, channelRule.RuleType)
+	assert.Equal(t, ruleRow(channelRule.Id), channelRule)
+	assert.Zero(t, result.AppliedRows)
+	assert.Zero(t, changedSince(before))
+	channelID := strconv.Itoa(channelRule.Id)
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.create", Success: true, Content: "Created provider mapping rule #" + channelID,
+		Params: providerMappingJSON(t, map[string]any{"rule_id": channelRule.Id, "site_id": siteA.Id, "site_name": siteA.Name, "rule_type": "channel",
+			"remote_channel_id": 2, "remote_channel_name": "ch-2", "provider_id": s2.Id, "provider_name": s2.Username})}}, newAudits())
+	unresolvedRule := save(http.MethodPost, "", map[string]any{"site_id": siteB.Id, "rule_type": "unresolved", "provider_id": s1.Id},
+		CreateProviderMappingRule).Rule
+	require.Len(t, newAudits(), 1)
+
+	// 3. 业务错误：回对应的文案，各记一条失败审计。新建的审计记下请求的字段，编辑的审计还记下原规则
+	missingID := unresolvedRule.Id + 100
+	for _, tc := range []struct {
+		name, method, id string
+		fields           map[string]any
+		handler          gin.HandlerFunc
+		want             string
+		params           map[string]any
+	}{
+		{"site rule exists", http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "unresolved", "provider_id": s2.Id, "apply": apply},
+			CreateProviderMappingRule, "This site already has a site-level mapping rule",
+			map[string]any{"site_id": siteA.Id, "rule_type": "unresolved", "remote_channel_id": 0, "provider_id": s2.Id,
+				"apply_start_date": start, "apply_end_date": end, "failure_reason": "site_rule_exists"}},
+		{"channel rule exists", http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 2, "provider_id": s1.Id},
+			CreateProviderMappingRule, "This site channel already has a mapping rule",
+			map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 2, "provider_id": s1.Id, "failure_reason": "channel_rule_exists"}},
+		{"not a supplier", http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 1, "provider_id": plain.Id},
+			CreateProviderMappingRule, "The selected user is not a channel supplier",
+			map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 1, "provider_id": plain.Id, "failure_reason": "invalid_provider"}},
+		{"site not found", http.MethodPost, "", map[string]any{"site_id": gone.Id, "rule_type": "all", "provider_id": s1.Id},
+			CreateProviderMappingRule, "Site does not exist",
+			map[string]any{"site_id": gone.Id, "rule_type": "all", "remote_channel_id": 0, "provider_id": s1.Id, "failure_reason": "site_not_found"}},
+		{"channel not pulled", http.MethodPost, "", map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 99, "provider_id": s1.Id},
+			CreateProviderMappingRule, "This site channel has not been pulled yet",
+			map[string]any{"site_id": siteA.Id, "rule_type": "channel", "remote_channel_id": 99, "provider_id": s1.Id, "failure_reason": "channel_not_pulled"}},
+		{"update to a non-supplier", http.MethodPut, allID, map[string]any{"provider_id": plain.Id}, UpdateProviderMappingRule,
+			"The selected user is not a channel supplier",
+			map[string]any{"rule_id": allRule.Id, "site_id": siteA.Id, "site_name": siteA.Name, "rule_type": "all", "remote_channel_id": 0,
+				"remote_channel_name": "", "provider_id": plain.Id, "previous_provider_id": s1.Id, "previous_provider_name": s1.Username,
+				"failure_reason": "invalid_provider"}},
+		{"update a missing rule", http.MethodPut, strconv.Itoa(missingID), map[string]any{"provider_id": s1.Id}, UpdateProviderMappingRule,
+			"Mapping rule does not exist", map[string]any{"rule_id": missingID, "provider_id": s1.Id, "failure_reason": "rule_not_found"}},
+	} {
+		reply := providerMappingCall(t, tc.method, rules+tc.id, body(tc.fields), tc.id, tc.handler)
+		assert.False(t, reply.Success, tc.name)
+		assert.Equal(t, tc.want, reply.MessageKey, tc.name)
+		action := map[string]string{http.MethodPost: "provider_mapping.create", http.MethodPut: "provider_mapping.update"}[tc.method]
+		assert.Equal(t, []providerMappingAudit{{Action: action, Content: "Failed to change the provider mapping rule",
+			Params: providerMappingJSON(t, tc.params)}}, newAudits(), tc.name)
+	}
+
+	// 4. 参数不合法：在登记审计之前返回（由兜底审计记录），不写 provider_mapping.* 审计，也不改数据。
+	// 新建的请求体只有被测的一项不合法：漏过校验就会建出规则或写下失败审计
+	var rulesBefore, rulesAfter []model.PayableProviderOverride
+	require.NoError(t, db.Order("id").Find(&rulesBefore).Error)
+	usagesBefore := providerMappingUsages(t, db)
+	channelBody := func(changes map[string]any) string {
+		fields := map[string]any{"site_id": siteB.Id, "rule_type": "channel", "remote_channel_id": 5, "provider_id": s1.Id}
+		maps.Copy(fields, changes)
+		return body(fields)
+	}
+	const invalid, tooLong = "Invalid parameters", "Date range cannot exceed 92 days"
+	for _, tc := range []struct {
+		name, method, target, body, id string
+		handler                        gin.HandlerFunc
+		want                           string
+	}{
+		{"create: empty body", http.MethodPost, rules, `{}`, "", CreateProviderMappingRule, invalid},
+		{"create: not json", http.MethodPost, rules, `not json`, "", CreateProviderMappingRule, invalid},
+		{"create: site 0", http.MethodPost, rules, channelBody(map[string]any{"site_id": 0}), "", CreateProviderMappingRule, invalid},
+		{"create: unknown type", http.MethodPost, rules, channelBody(map[string]any{"rule_type": "x"}), "", CreateProviderMappingRule, invalid},
+		{"create: channel rule without a channel", http.MethodPost, rules, channelBody(map[string]any{"remote_channel_id": 0}), "", CreateProviderMappingRule, invalid},
+		{"create: site rule with a channel", http.MethodPost, rules, channelBody(map[string]any{"rule_type": "all"}), "", CreateProviderMappingRule, invalid},
+		{"create: provider 0", http.MethodPost, rules, channelBody(map[string]any{"provider_id": 0}), "", CreateProviderMappingRule, invalid},
+		{"create: not a date", http.MethodPost, rules, channelBody(map[string]any{"apply": map[string]any{"start_date": 20260230, "end_date": end}}),
+			"", CreateProviderMappingRule, invalid},
+		{"create: start after end", http.MethodPost, rules, channelBody(map[string]any{"apply": map[string]any{"start_date": 20261102, "end_date": 20261101}}),
+			"", CreateProviderMappingRule, invalid},
+		{"create: 93 days", http.MethodPost, rules, channelBody(map[string]any{"apply": map[string]any{"start_date": start, "end_date": 20261202}}),
+			"", CreateProviderMappingRule, tooLong},
+		{"update: invalid id", http.MethodPut, rules + "abc", body(map[string]any{"provider_id": s1.Id}), "abc", UpdateProviderMappingRule, "Invalid ID"},
+		{"update: provider 0", http.MethodPut, rules + allID, `{}`, allID, UpdateProviderMappingRule, invalid},
+		{"update: 93 days", http.MethodPut, rules + allID, body(map[string]any{"provider_id": s1.Id, "apply": map[string]any{"start_date": start, "end_date": 20261202}}),
+			allID, UpdateProviderMappingRule, tooLong},
+		{"delete: invalid id", http.MethodDelete, rules + "0", "", "0", DeleteProviderMappingRule, "Invalid ID"},
+		{"preview: no parameters", http.MethodGet, rules + "preview", "", "", PreviewProviderMappingRule, invalid},
+		{"preview: unknown type", http.MethodGet, previewTarget(siteA.Id, "x", 0, s1.Id, start, end), "", "", PreviewProviderMappingRule, invalid},
+		{"preview: channel rule without a channel", http.MethodGet, previewTarget(siteA.Id, model.PayableRuleChannel, 0, s1.Id, start, end),
+			"", "", PreviewProviderMappingRule, invalid},
+		{"preview: site rule with a channel", http.MethodGet, previewTarget(siteA.Id, model.PayableRuleAll, 3, s1.Id, start, end),
+			"", "", PreviewProviderMappingRule, invalid},
+		{"preview: channel not a number", http.MethodGet, fmt.Sprintf(rules+"preview?site_id=%d&rule_type=all&remote_channel_id=abc&provider_id=%d&start_date=%d&end_date=%d",
+			siteA.Id, s1.Id, start, end), "", "", PreviewProviderMappingRule, invalid},
+		{"preview: start after end", http.MethodGet, previewTarget(siteA.Id, model.PayableRuleAll, 0, s1.Id, 20261102, 20261101),
+			"", "", PreviewProviderMappingRule, invalid},
+		{"preview: 93 days", http.MethodGet, previewTarget(siteA.Id, model.PayableRuleAll, 0, s1.Id, start, 20261202), "", "", PreviewProviderMappingRule, tooLong},
+		{"channels: no site", http.MethodGet, rules + "channels?keyword=ch", "", "", SearchProviderMappingChannels, invalid},
+		{"channels: site 0", http.MethodGet, rules + "channels?site_id=0", "", "", SearchProviderMappingChannels, invalid},
+		{"list: unknown type", http.MethodGet, rules + "?types=channel,x", "", "", GetProviderMappingRules, invalid},
+		{"list: invalid site", http.MethodGet, rules + "?site_ids=1,a", "", "", GetProviderMappingRules, invalid},
+		{"list: invalid provider", http.MethodGet, rules + "?provider_ids=0", "", "", GetProviderMappingRules, invalid},
+	} {
+		reply := providerMappingCall(t, tc.method, tc.target, tc.body, tc.id, tc.handler)
+		assert.False(t, reply.Success, tc.name)
+		assert.Equal(t, tc.want, reply.MessageKey, tc.name)
+	}
+	assert.Empty(t, newAudits())
+	require.NoError(t, db.Order("id").Find(&rulesAfter).Error)
+	assert.Equal(t, rulesBefore, rulesAfter)
+	assert.Equal(t, usagesBefore, providerMappingUsages(t, db))
+
+	// 5. 编辑：改提供商并回改，审计记下原提供商与新提供商；预览（站点级规则可以不带 remote_channel_id）的行数就是实际修改的行数。
+	// 渠道 2 有有效的指定渠道规则，站点级规则跳过它
+	rows = previewRows(fmt.Sprintf(rules+"preview?site_id=%d&rule_type=all&provider_id=%d&start_date=%d&end_date=%d", siteA.Id, s2.Id, start, end))
+	assert.EqualValues(t, 2, rows)
+	before = providerMappingUsages(t, db)
+	result = save(http.MethodPut, allID, map[string]any{"provider_id": s2.Id, "apply": apply}, UpdateProviderMappingRule)
+	assert.Equal(t, ruleRow(allRule.Id), result.Rule)
+	assert.Equal(t, s2.Id, result.Rule.ProviderId)
+	assert.Equal(t, rows, result.AppliedRows)
+	assert.Equal(t, rows, changedSince(before))
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.update", Success: true, Content: "Updated provider mapping rule #" + allID,
+		Params: providerMappingJSON(t, map[string]any{"rule_id": allRule.Id, "site_id": siteA.Id, "site_name": siteA.Name, "rule_type": "all",
+			"remote_channel_id": 0, "remote_channel_name": "", "provider_id": s2.Id, "provider_name": s2.Username,
+			"previous_provider_id": s1.Id, "previous_provider_name": s1.Username, "apply_start_date": start, "apply_end_date": end,
+			"applied_rows": 2})}}, newAudits())
+
+	// 提供商不变也能保存，只做一次回改：渠道 2 那一行改为该规则的提供商
+	result = save(http.MethodPut, channelID, map[string]any{"provider_id": s2.Id, "apply": apply}, UpdateProviderMappingRule)
+	assert.EqualValues(t, 1, result.AppliedRows)
+	audits := newAudits()
+	require.Len(t, audits, 1)
+	assert.True(t, audits[0].Success)
+	assert.EqualValues(t, s2.Id, audits[0].Params["previous_provider_id"])
+	assert.EqualValues(t, s2.Id, audits[0].Params["provider_id"])
+	assert.EqualValues(t, 1, audits[0].Params["applied_rows"])
+
+	// 6. 列表：按 ID 倒序分页；site_ids、types、provider_ids 都可多选
+	type rulePage struct {
+		Page     int                    `json:"page"`
+		PageSize int                    `json:"page_size"`
+		Total    int                    `json:"total"`
+		Items    []model.PayableRuleRow `json:"items"`
+	}
+	list := func(query string) rulePage {
+		reply := providerMappingCall(t, http.MethodGet, rules+"?"+query, "", "", GetProviderMappingRules)
+		require.True(t, reply.Success, reply.MessageKey)
+		var page rulePage
+		require.NoError(t, common.Unmarshal(reply.Data, &page))
+		return page
+	}
+	assert.Equal(t, rulePage{Page: 2, PageSize: 1, Total: 3, Items: []model.PayableRuleRow{ruleRow(channelRule.Id)}}, list("p=2&page_size=1"))
+	for _, tc := range []struct {
+		query string
+		ids   []int
+	}{
+		{"", []int{unresolvedRule.Id, channelRule.Id, allRule.Id}},
+		{"types=channel,all", []int{channelRule.Id, allRule.Id}},
+		{fmt.Sprintf("site_ids=%d,%d", siteB.Id, gone.Id), []int{unresolvedRule.Id}},
+		{fmt.Sprintf("site_ids=%d,%d&types=unresolved,channel&provider_ids=%d,%d", siteA.Id, siteB.Id, s1.Id, s2.Id),
+			[]int{unresolvedRule.Id, channelRule.Id}},
+	} {
+		page := list(tc.query)
+		assert.Equal(t, tc.ids, providerMappingRuleIDs(page.Items), tc.query)
+		assert.Equal(t, len(tc.ids), page.Total, tc.query)
+	}
+
+	// 7. 渠道搜索：按关键字在站点拉取过的渠道里搜，最多返回 20 个，标出已有规则的渠道
+	searchChannels := func(query string) []model.PayableChannelOption {
+		reply := providerMappingCall(t, http.MethodGet, rules+"channels?"+query, "", "", SearchProviderMappingChannels)
+		require.True(t, reply.Success, reply.MessageKey)
+		var options []model.PayableChannelOption
+		require.NoError(t, common.Unmarshal(reply.Data, &options))
+		return options
+	}
+	options := searchChannels("site_id=" + strconv.Itoa(siteB.Id))
+	require.Len(t, options, 20)
+	assert.Equal(t, model.PayableChannelOption{RemoteChannelId: 20, RemoteChannelName: "ch-20"}, options[19])
+	assert.Equal(t, []model.PayableChannelOption{{RemoteChannelId: 2, RemoteChannelName: "ch-2", HasRule: true}},
+		searchChannels(fmt.Sprintf("site_id=%d&keyword=ch-2", siteA.Id)))
+
+	// 8. 删除：data 为 null，审计记下原提供商，明细不变；再删报规则不存在
+	usagesBefore = providerMappingUsages(t, db)
+	reply := providerMappingCall(t, http.MethodDelete, rules+channelID, "", channelID, DeleteProviderMappingRule)
+	require.True(t, reply.Success, reply.MessageKey)
+	assert.Equal(t, "null", string(reply.Data))
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.delete", Success: true, Content: "Deleted provider mapping rule #" + channelID,
+		Params: providerMappingJSON(t, map[string]any{"rule_id": channelRule.Id, "site_id": siteA.Id, "site_name": siteA.Name, "rule_type": "channel",
+			"remote_channel_id": 2, "remote_channel_name": "ch-2", "previous_provider_id": s2.Id, "previous_provider_name": s2.Username})}}, newAudits())
+	_, err := model.GetPayableRuleRow(channelRule.Id)
+	assert.ErrorIs(t, err, model.ErrPayableRuleNotFound)
+	assert.Equal(t, usagesBefore, providerMappingUsages(t, db))
+	reply = providerMappingCall(t, http.MethodDelete, rules+channelID, "", channelID, DeleteProviderMappingRule)
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Mapping rule does not exist", reply.MessageKey)
+	assert.Equal(t, []providerMappingAudit{{Action: "provider_mapping.delete", Content: "Failed to change the provider mapping rule",
+		Params: providerMappingJSON(t, map[string]any{"rule_id": channelRule.Id, "failure_reason": "rule_not_found"})}}, newAudits())
+
+	// 9. 预览同样要求提供商是渠道供应商
+	reply = providerMappingCall(t, http.MethodGet, previewTarget(siteA.Id, model.PayableRuleAll, 0, plain.Id, start, end), "", "",
+		PreviewProviderMappingRule)
+	assert.False(t, reply.Success)
+	assert.Equal(t, "The selected user is not a channel supplier", reply.MessageKey)
+
+	// 10. 其他错误按数据库错误回复，审计记为 database_error，规则不变
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:pm-api-fail", func(tx *gorm.DB) {
+		if tx.Statement.Table == "payable_provider_overrides" {
+			tx.AddError(errors.New("boom"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("test:pm-api-fail") })
+	reply = providerMappingCall(t, http.MethodPut, rules+allID, body(map[string]any{"provider_id": s1.Id}), allID, UpdateProviderMappingRule)
+	assert.False(t, reply.Success)
+	audits = newAudits()
+	require.Len(t, audits, 1)
+	assert.False(t, audits[0].Success)
+	assert.Equal(t, "database_error", audits[0].Params["failure_reason"])
+	assert.Equal(t, s2.Id, ruleRow(allRule.Id).ProviderId)
 }

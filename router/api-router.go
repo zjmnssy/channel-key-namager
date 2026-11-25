@@ -369,6 +369,17 @@ func SetApiRouter(router *gin.Engine) {
 			payableBillRoute.GET("/options", controller.GetPayableOptions)
 			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
 		}
+
+		providerMappingRuleRoute := apiRouter.Group("/provider_mapping_rule")
+		providerMappingRuleRoute.Use(middleware.RootAuth())
+		{
+			providerMappingRuleRoute.GET("/", controller.GetProviderMappingRules)
+			providerMappingRuleRoute.POST("/", controller.CreateProviderMappingRule)
+			providerMappingRuleRoute.PUT("/:id", controller.UpdateProviderMappingRule)
+			providerMappingRuleRoute.DELETE("/:id", controller.DeleteProviderMappingRule)
+			providerMappingRuleRoute.GET("/preview", controller.PreviewProviderMappingRule)
+			providerMappingRuleRoute.GET("/channels", controller.SearchProviderMappingChannels)
+		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
 		logRoute := apiRouter.Group("/log")

@@ -24,14 +24,19 @@ var (
 // PayableRuleApplyHook 只供测试：stage 为 "before_commit"（回改已更新、事务未提交）或 "after_commit"（事务已提交、补扫之前）。
 var PayableRuleApplyHook func(stage string)
 
-// PayableRuleApply 是回改的账单日期范围。
-type PayableRuleApply struct{ StartDate, EndDate int } // YYYYMMDD，含首尾；调用方已校验
+// PayableRuleApply 是回改的账单日期范围（YYYYMMDD，含首尾），由调用方校验。
+type PayableRuleApply struct {
+	StartDate int `json:"start_date"`
+	EndDate   int `json:"end_date"`
+}
 
-// PayableRuleInput 是新建规则的参数。类型与站点渠道的搭配由调用方校验：指定渠道的站点渠道 ID 大于 0，站点级规则为 0。
+// PayableRuleInput 是新建规则的参数，也是新建接口的请求体。类型与站点渠道的搭配由调用方校验：指定渠道的站点渠道 ID 大于 0，站点级规则为 0。
 type PayableRuleInput struct {
-	SiteID, RemoteChannelID, ProviderID int
-	RuleType                            string
-	Apply                               *PayableRuleApply // nil = 不回改
+	SiteID          int               `json:"site_id"`
+	RuleType        string            `json:"rule_type"`
+	RemoteChannelID int               `json:"remote_channel_id"`
+	ProviderID      int               `json:"provider_id"`
+	Apply           *PayableRuleApply `json:"apply"` // nil = 不回改
 }
 
 // payableRuleSources 是各类规则回改后明细的提供商来源，与拉取时按规则确定的来源相同。

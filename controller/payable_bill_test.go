@@ -1747,6 +1747,18 @@ func TestPayableBillExport(t *testing.T) {
 	assert.Equal(t, []string{"账单日期", "提供商", "金额(折前)($)", "折扣(应付)", "应付金额($)", "备注"}, rows[0])
 	assert.Equal(t, []string{"2026-11-22", "未知提供商", "0.12", "未设置", "", "部分行未设置折扣，未计入应付金额"}, rows[1])
 
+	// 站点级规则确定的行（rule_all、rule_unresolved），“提供商来源”都写“规则”
+	for channel, source := range map[int]string{11: model.PayableProviderRuleAll, 12: model.PayableProviderRuleUnresolved} {
+		usage := payableSeedUsage(t, db, pull, channel, 0, half, 11, d08)
+		require.NoError(t, db.Model(usage).Update("provider_source", source).Error)
+	}
+	_, rows = export(ExportPayableUsages, "/api/payable_bill/usages/export", "start_date=20261122&end_date=20261122&provider_ids=11", "en", "payable-channel-usages.xlsx")
+	require.Len(t, rows, 3)
+	assert.Equal(t, "Provider Source", rows[0][9])
+	for _, row := range rows[1:] {
+		assert.Equal(t, "Rule", row[9], row[4])
+	}
+
 	for _, handler := range []gin.HandlerFunc{ExportPayableUsages, ExportPayableProviderBills} {
 		reply := receivableReplyOf(t, receivableRequest(t, http.MethodGet, "/export?start_date=x&end_date=20261122", nil, nil, handler))
 		assert.False(t, reply.Success)

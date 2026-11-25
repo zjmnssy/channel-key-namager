@@ -242,3 +242,14 @@ func TestPayableBillRoutesRequireDashboardSession(t *testing.T) {
 		assert.Equal(t, "session", rule.Kind(), key)
 	}
 }
+
+func TestProviderMappingRuleRoutesRequireDashboardSession(t *testing.T) {
+	for _, key := range []string{
+		"GET /api/provider_mapping_rule/", "POST /api/provider_mapping_rule/", "PUT /api/provider_mapping_rule/:id",
+		"DELETE /api/provider_mapping_rule/:id", "GET /api/provider_mapping_rule/preview", "GET /api/provider_mapping_rule/channels",
+	} {
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "session", rule.Kind(), key)
+	}
+}

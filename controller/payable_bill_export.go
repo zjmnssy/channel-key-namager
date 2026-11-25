@@ -79,11 +79,14 @@ func ExportPayableUsages(c *gin.Context) {
 		model.PayableDeltaNewChannel: i18n.MsgPayableBillDeltaNewChannel,
 		model.PayableDeltaRollback:   i18n.MsgPayableBillDeltaRollback,
 	}
+	// The sources of both site-level rules read "Rule".
 	sourceKeys := map[string]string{
-		model.PayableProviderManual:    i18n.MsgPayableBillSourceManual,
-		model.PayableProviderParsed:    i18n.MsgPayableBillSourceParsed,
-		model.PayableProviderInherited: i18n.MsgPayableBillSourceInherited,
-		model.PayableProviderUnknown:   i18n.MsgPayableBillSourceUnknown,
+		model.PayableProviderManual:         i18n.MsgPayableBillSourceManual,
+		model.PayableProviderParsed:         i18n.MsgPayableBillSourceParsed,
+		model.PayableProviderInherited:      i18n.MsgPayableBillSourceInherited,
+		model.PayableProviderUnknown:        i18n.MsgPayableBillSourceUnknown,
+		model.PayableProviderRuleAll:        i18n.MsgPayableBillSourceRule,
+		model.PayableProviderRuleUnresolved: i18n.MsgPayableBillSourceRule,
 	}
 	rows := make([][]any, len(usages))
 	for i, usage := range usages {
