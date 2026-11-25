@@ -29,6 +29,7 @@ import {
   PlugZap,
   Radio,
   ReceiptText,
+  Route,
   Send,
   ServerCog,
   Settings,
@@ -147,6 +148,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Payable Bills'),
             url: '/payable-bills',
             icon: HandCoins,
+            requiredRole: ROLE.SUPER_ADMIN,
+          },
+          {
+            title: t('Provider Channel Mapping Rules'),
+            url: '/provider-mapping-rules',
+            icon: Route,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {
