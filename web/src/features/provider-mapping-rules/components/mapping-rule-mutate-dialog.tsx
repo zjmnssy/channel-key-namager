@@ -126,7 +126,8 @@ export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
     },
   })
 
-  // The preview belongs to saving: the dialog must not close under it.
+  // The preview belongs to saving. Until both end the dialog stays open and
+  // the fields stay locked, so the values previewed and saved are the ones shown.
   const busy = preview.isPending || save.isPending
   const previewRows = preview.data ?? 0
 
@@ -167,10 +168,10 @@ export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
           {props.currentRow ? (
             <MappingRuleSummary rule={props.currentRow} />
           ) : (
-            <MappingRuleTargetFields />
+            <MappingRuleTargetFields disabled={busy} />
           )}
-          <MappingRuleProviderField />
-          <MappingRuleApplyFields />
+          <MappingRuleProviderField disabled={busy} />
+          <MappingRuleApplyFields disabled={busy} />
         </form>
       </Form>
       <ConfirmDialog

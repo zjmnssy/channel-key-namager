@@ -37,8 +37,12 @@ import { beijingYesterday } from '@/features/receivable-bills/lib/bill-date'
 
 import type { RuleFormValues } from '../lib/rule-form'
 
+type MappingRuleApplyFieldsProps = {
+  disabled: boolean
+}
+
 /** Whether saving also changes the details already pulled, and on which bill dates. */
-export function MappingRuleApplyFields() {
+export function MappingRuleApplyFields(props: MappingRuleApplyFieldsProps) {
   const { t } = useTranslation()
   const datesLabelId = useId()
   const form = useFormContext<RuleFormValues>()
@@ -62,6 +66,7 @@ export function MappingRuleApplyFields() {
               <Checkbox
                 checked={field.value}
                 onCheckedChange={(checked) => field.onChange(checked === true)}
+                disabled={props.disabled}
               />
             </FormControl>
             <FormLabel className='font-normal'>
@@ -86,6 +91,7 @@ export function MappingRuleApplyFields() {
                   // Checked at once, so a range that is too long shows before saving.
                   form.setValue('applyStart', start, { shouldValidate: true })
                 }}
+                disabled={props.disabled}
               />
               <FormMessage />
             </FormItem>

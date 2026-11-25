@@ -43,6 +43,7 @@ import {
 } from '../../api'
 import type {
   ApiResponse,
+  ProviderMappingPreview,
   ProviderMappingRule,
   ProviderMappingSaveResult,
 } from '../../types'
@@ -70,6 +71,11 @@ const savedRule: ProviderMappingRule = {
 }
 
 const BACKFILL = 'Also apply to details already pulled'
+const RULE_TYPE_NAMES = [
+  'All site channels',
+  'Unresolved channels',
+  'Specified channel',
+]
 const NO_DISCOUNT_WARNING =
   'This provider has no payable discount, so the changed details will have no payable amount.'
 
@@ -585,6 +591,112 @@ describe('MappingRuleMutateDialog when creating', () => {
     expect(onOpenChange).not.toHaveBeenCalled()
     await act(async () => finish(saved(3)))
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+  })
+
+  it('locks the form while the preview runs and saves the previewed values', async () => {
+    let finishPreview: (
+      value: ApiResponse<ProviderMappingPreview>
+    ) => void = () => {}
+    vi.mocked(previewProviderMappingRule).mockReturnValue(
+      new Promise((resolve) => {
+        finishPreview = resolve
+      })
+    )
+    vi.mocked(createProviderMappingRule).mockResolvedValue(saved(3))
+    const { user, onOpenChange } = await renderDialog()
+    await fillAllChannelsRule(user)
+    await user.click(screen.getByRole('checkbox', { name: BACKFILL }))
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    const provider = screen.getByRole('combobox', { name: 'Provider' })
+    await waitFor(() => expect(provider).toBeDisabled())
+    expect(
+      screen.getByRole('combobox', { name: 'Third-party site' })
+    ).toBeDisabled()
+    for (const name of RULE_TYPE_NAMES) {
+      expect(screen.getByRole('radio', { name })).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      )
+    }
+    expect(screen.getByRole('checkbox', { name: BACKFILL })).toHaveAttribute(
+      'aria-disabled',
+      'true'
+    )
+    expect(
+      screen.getByRole('button', { name: /2026-11-01 ~ 2026-11-24/ })
+    ).toBeDisabled()
+    await user.click(provider)
+    expect(
+      screen.queryByRole('option', { name: 'bob' })
+    ).not.toBeInTheDocument()
+    expect(provider).toHaveValue('alice')
+
+    await act(async () => finishPreview({ success: true, data: { rows: 3 } }))
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Save',
+      })
+    )
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(previewProviderMappingRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ provider_id: 5 })
+    )
+    expect(createProviderMappingRule).toHaveBeenCalledExactlyOnceWith({
+      site_id: 3,
+      rule_type: 'all',
+      provider_id: 5,
+      apply: { start_date: 20261101, end_date: 20261124 },
+    })
+  })
+
+  it('locks the form while saving', async () => {
+    let finish: (
+      value: ApiResponse<ProviderMappingSaveResult>
+    ) => void = () => {}
+    vi.mocked(createProviderMappingRule).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve
+      })
+    )
+    const { user, onOpenChange } = await renderDialog()
+    await chooseSite(user, 'Alpha')
+    await user.click(screen.getByRole('radio', { name: 'Specified channel' }))
+    await user.click(screen.getByRole('combobox', { name: 'Site Channel' }))
+    await user.click(
+      await screen.findByRole('option', { name: '18704 az-gpt-eastus2-22536' })
+    )
+    await chooseProvider(user, 'alice')
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await screen.findByRole('button', { name: 'Saving...' })
+    for (const name of ['Third-party site', 'Site Channel', 'Provider']) {
+      expect(screen.getByRole('combobox', { name })).toBeDisabled()
+    }
+    expect(screen.getByRole('combobox', { name: 'Site Channel' })).toHaveValue(
+      '18704 az-gpt-eastus2-22536'
+    )
+    for (const name of RULE_TYPE_NAMES) {
+      expect(screen.getByRole('radio', { name })).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      )
+    }
+    expect(screen.getByRole('checkbox', { name: BACKFILL })).toHaveAttribute(
+      'aria-disabled',
+      'true'
+    )
+    await act(async () => finish(saved(0)))
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(createProviderMappingRule).toHaveBeenCalledExactlyOnceWith({
+      site_id: 3,
+      rule_type: 'channel',
+      remote_channel_id: 18704,
+      provider_id: 5,
+    })
   })
 })
 

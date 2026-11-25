@@ -50,8 +50,12 @@ import {
 import type { RuleFormValues } from '../lib/rule-form'
 import { ChannelSearchField } from './channel-search-field'
 
+type MappingRuleTargetFieldsProps = {
+  disabled: boolean
+}
+
 /** The site, rule type and site channel of a new rule. */
-export function MappingRuleTargetFields() {
+export function MappingRuleTargetFields(props: MappingRuleTargetFieldsProps) {
   const { t } = useTranslation()
   const id = useId()
   const form = useFormContext<RuleFormValues>()
@@ -104,6 +108,7 @@ export function MappingRuleTargetFields() {
                 form.setValue('channelId', '')
               }}
               items={siteItems}
+              disabled={props.disabled}
             >
               <FormControl>
                 <SelectTrigger className='w-full'>
@@ -135,6 +140,7 @@ export function MappingRuleTargetFields() {
                 if (type) field.onChange(type)
               }}
               aria-label={t('Rule Type')}
+              disabled={props.disabled}
               className='flex flex-wrap gap-x-5 gap-y-3'
             >
               {RULE_TYPES.map((type) => (
@@ -172,7 +178,7 @@ export function MappingRuleTargetFields() {
               <FormControl>
                 <ChannelSearchField
                   siteId={Number(siteId)}
-                  disabled={siteId === ''}
+                  disabled={props.disabled || siteId === ''}
                   value={field.value}
                   onValueChange={field.onChange}
                 />

@@ -32,8 +32,12 @@ import { usePayableBillOptions } from '@/features/payable-bills/hooks/use-payabl
 
 import type { RuleFormValues } from '../lib/rule-form'
 
+type MappingRuleProviderFieldProps = {
+  disabled: boolean
+}
+
 /** The channel supplier the rule assigns the channels to. */
-export function MappingRuleProviderField() {
+export function MappingRuleProviderField(props: MappingRuleProviderFieldProps) {
   const { t } = useTranslation()
   const form = useFormContext<RuleFormValues>()
   const options = usePayableBillOptions()
@@ -59,6 +63,7 @@ export function MappingRuleProviderField() {
                   : null
               }
               onValueChange={(value) => field.onChange(value ?? '')}
+              disabled={props.disabled}
               emptyText={t('No providers available')}
             />
           </FormControl>

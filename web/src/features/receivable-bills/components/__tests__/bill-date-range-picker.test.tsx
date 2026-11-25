@@ -24,7 +24,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { BillDateRangePicker } from '../bill-date-range-picker'
 
-async function renderPicker(onChange: (start: number, end: number) => void) {
+async function renderPicker(
+  onChange: (start: number, end: number) => void,
+  disabled?: boolean
+) {
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {}, initAsync: false })
   render(
@@ -34,6 +37,7 @@ async function renderPicker(onChange: (start: number, end: number) => void) {
         end={20261110}
         max={20261123}
         onChange={onChange}
+        disabled={disabled}
       />
     </I18nextProvider>
   )
@@ -76,5 +80,14 @@ describe('BillDateRangePicker', () => {
     await user.click(await day('November 15th, 2026'))
 
     expect(await day('November 24th, 2026')).toBeDisabled()
+  })
+
+  it('keeps the calendar closed while disabled', async () => {
+    await renderPicker(vi.fn(), true)
+
+    expect(screen.getByRole('button', { name: /2026-11-01/ })).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: /November 15th, 2026/ })
+    ).not.toBeInTheDocument()
   })
 })
