@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -104,4 +108,464 @@ func TestPayableRuleTypeOfOldRowsAndSetProvider(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.First(&loaded, old.Id).Error)
 	assert.Equal(t, model.PayableRuleChannel, loaded.RuleType)
+}
+
+func providerMappingSeedUsage(t *testing.T, db *gorm.DB, pull *model.PayablePullSite, channelID int, providerID int, source string, discount *float64) *model.PayableChannelUsage {
+	t.Helper()
+	usage := &model.PayableChannelUsage{TaskId: pull.TaskId, PullSiteId: pull.Id, BillDate: pull.BillDate, SiteId: pull.SiteId,
+		SiteName: "site-" + strconv.Itoa(pull.SiteId), RemoteChannelId: channelID, RemoteChannelName: "ch-" + strconv.Itoa(channelID),
+		UsedQuota: 10, DeltaQuota: payablePtr(int64(1)), ProviderId: providerID, ProviderName: "p" + strconv.Itoa(providerID),
+		ProviderSource: source, PayableDiscount: discount, SyncedAt: 5, CreatedTime: 5, UpdatedTime: 5}
+	require.NoError(t, db.Create(usage).Error)
+	return usage
+}
+
+// providerMappingUsages 按 id 读出全部明细，用于逐字段比较回改前后。
+func providerMappingUsages(t *testing.T, db *gorm.DB) map[int]model.PayableChannelUsage {
+	t.Helper()
+	var rows []model.PayableChannelUsage
+	require.NoError(t, db.Find(&rows).Error)
+	usages := make(map[int]model.PayableChannelUsage, len(rows))
+	for _, row := range rows {
+		usages[row.Id] = row
+	}
+	return usages
+}
+
+// providerMappingApplied 是一行明细被规则回改后应有的样子：只改提供商、名称快照、来源、折扣快照（取提供商此刻的折扣）与更新时间，
+// 用量、增量、站点与渠道名称快照、同步时间、创建时间都不变。
+func providerMappingApplied(row model.PayableChannelUsage, provider *model.User, source string, now int64) model.PayableChannelUsage {
+	row.ProviderId, row.ProviderName, row.ProviderSource = provider.Id, provider.Username, source
+	row.PayableDiscount, row.UpdatedTime = provider.PayableDiscount, now
+	return row
+}
+
+func TestProviderMappingApplyScope(t *testing.T) {
+	const now = 1000
+	scope := &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261102}
+	cases := []struct {
+		name               string
+		ruleType           string
+		channel            int    // 指定渠道规则的站点渠道
+		target             string // 规则的提供商：s1 或 s4
+		apply              bool
+		invalidateChannel7 bool  // 先把渠道 7 的指定渠道规则改为 s2，再把 s2 改成普通用户
+		changed            []int // 站点 A 在 20261101、20261102 两天被改的渠道
+		source             string
+	}{
+		{name: "all", ruleType: model.PayableRuleAll, target: "s4", apply: true, changed: []int{1, 2, 4, 5, 6}, source: model.PayableProviderRuleAll},
+		{name: "unresolved", ruleType: model.PayableRuleUnresolved, target: "s4", apply: true, changed: []int{1, 4}, source: model.PayableProviderRuleUnresolved},
+		{name: "channel", ruleType: model.PayableRuleChannel, channel: 3, target: "s4", apply: true, changed: []int{3}, source: model.PayableProviderManual},
+		{name: "invalid channel rule", ruleType: model.PayableRuleAll, target: "s4", apply: true, invalidateChannel7: true,
+			changed: []int{1, 2, 4, 5, 6, 7}, source: model.PayableProviderRuleAll},
+		{name: "provider without discount", ruleType: model.PayableRuleAll, target: "s1", apply: true, changed: []int{1, 4, 5, 8}, source: model.PayableProviderRuleAll},
+		{name: "no apply", ruleType: model.PayableRuleAll, target: "s4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupPayableBillTest(t)
+			s1 := channelPushSeedSupplier(t, db, "pm-scope-s1")
+			s2 := channelPushSeedSupplier(t, db, "pm-scope-s2")
+			s4 := channelPushSeedSupplier(t, db, "pm-scope-s4")
+			require.NoError(t, db.Model(s4).Update("payable_discount", 0.7).Error)
+			s4.PayableDiscount = payablePtr(0.7)
+			siteA := receivableSeedSite(t, db, "pm-scope-a", "https://pm-scope-a.example.com", 1)
+			siteB := receivableSeedSite(t, db, "pm-scope-b", "https://pm-scope-b.example.com", 1)
+			// 每个账单日期一个任务；站点 A 在 20261102 拉取失败：不计入账单的行也要回改
+			task1 := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+			task2 := payableSeedTask(t, db, 20261102, model.PayableTaskPartialFailed)
+			task3 := payableSeedTask(t, db, 20261103, model.PayableTaskSuccess)
+			pulls := []*model.PayablePullSite{
+				payableSeedPull(t, db, task1, siteA.Id, model.PayablePullSuccess),
+				payableSeedPull(t, db, task2, siteA.Id, model.PayablePullFailed),
+				payableSeedPull(t, db, task3, siteA.Id, model.PayablePullSuccess),
+				payableSeedPull(t, db, task1, siteB.Id, model.PayablePullSuccess),
+				payableSeedPull(t, db, task2, siteB.Id, model.PayablePullSuccess),
+			}
+			rows := []struct {
+				channel, provider int
+				source            string
+				discount          *float64
+			}{
+				{1, 0, model.PayableProviderUnknown, nil},
+				{2, s1.Id, model.PayableProviderParsed, nil},
+				{3, s2.Id, model.PayableProviderManual, nil},
+				{4, s2.Id, model.PayableProviderRuleUnresolved, nil},
+				{5, s2.Id, model.PayableProviderRuleAll, nil},
+				{6, s1.Id, model.PayableProviderInherited, nil},
+				{7, 0, model.PayableProviderUnknown, nil},                // 站点 A 有一条有效的指定渠道规则
+				{8, s4.Id, model.PayableProviderParsed, payablePtr(0.5)}, // 提供商已是目标
+			}
+			for _, pull := range pulls {
+				for _, row := range rows {
+					providerMappingSeedUsage(t, db, pull, row.channel, row.provider, row.source, row.discount)
+				}
+			}
+			channel7 := providerMappingSeedRule(t, db, siteA.Id, 7, s4.Id, model.PayableRuleChannel)
+			if tc.invalidateChannel7 {
+				require.NoError(t, db.Model(channel7).Update("provider_id", s2.Id).Error)
+				require.NoError(t, db.Model(s2).Update("role", common.RoleCommonUser).Error)
+			}
+			target := map[string]*model.User{"s1": s1, "s4": s4}[tc.target]
+			var want [][3]int // (账单日期, 站点, 渠道)
+			for _, billDate := range []int{20261101, 20261102} {
+				for _, channel := range tc.changed {
+					want = append(want, [3]int{billDate, siteA.Id, channel})
+				}
+			}
+			input := model.PayableRuleInput{SiteID: siteA.Id, RemoteChannelID: tc.channel, ProviderID: target.Id, RuleType: tc.ruleType}
+			if tc.apply {
+				input.Apply = scope
+				// 预览与回改共用条件：预览的行数就是随后实际修改的行数
+				count, err := model.CountPayableRuleApply(model.PayableProviderOverride{SiteId: siteA.Id, RemoteChannelId: tc.channel,
+					ProviderId: target.Id, RuleType: tc.ruleType}, *scope)
+				require.NoError(t, err)
+				assert.EqualValues(t, len(want), count)
+			}
+			before := providerMappingUsages(t, db)
+
+			_, applied, err := model.CreatePayableRule(input, now)
+			require.NoError(t, err)
+			assert.EqualValues(t, len(want), applied)
+			var changed [][3]int
+			for id, row := range providerMappingUsages(t, db) {
+				expected := before[id]
+				if !assert.ObjectsAreEqual(expected, row) {
+					changed = append(changed, [3]int{row.BillDate, row.SiteId, row.RemoteChannelId})
+					expected = providerMappingApplied(expected, target, tc.source, now)
+				}
+				assert.Equal(t, expected, row) // 改了的行只改提供商相关的五个字段，没改的行逐字段不变
+			}
+			assert.ElementsMatch(t, want, changed)
+		})
+	}
+}
+
+func TestProviderMappingCreateValidation(t *testing.T) {
+	db := setupPayableBillTest(t)
+	supplier := channelPushSeedSupplier(t, db, "pm-create-s")
+	plain := &model.User{Username: "pm-create-u", Role: common.RoleCommonUser, Status: 1, AffCode: "pm-create-u"}
+	require.NoError(t, db.Create(plain).Error)
+	site := receivableSeedSite(t, db, "pm-create-a", "https://pm-create-a.example.com", 1)
+	other := receivableSeedSite(t, db, "pm-create-b", "https://pm-create-b.example.com", 1)
+	deleted := receivableSeedSite(t, db, "pm-create-gone", "https://pm-create-gone.example.com", 1)
+	require.NoError(t, db.Delete(deleted).Error)
+	task := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+	pull := payableSeedPull(t, db, task, site.Id, model.PayablePullSuccess)
+	providerMappingSeedUsage(t, db, pull, 1, 0, model.PayableProviderUnknown, nil)
+	providerMappingSeedUsage(t, db, pull, 2, 0, model.PayableProviderUnknown, nil)
+	// 渠道 9 只在另一个站点拉取过
+	providerMappingSeedUsage(t, db, payableSeedPull(t, db, task, other.Id, model.PayablePullSuccess), 9, 0, model.PayableProviderUnknown, nil)
+
+	// 站点级规则可以和任意多条指定渠道规则并存
+	for _, input := range []model.PayableRuleInput{
+		{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id},
+		{SiteID: site.Id, RuleType: model.PayableRuleChannel, RemoteChannelID: 1, ProviderID: supplier.Id},
+		{SiteID: site.Id, RuleType: model.PayableRuleChannel, RemoteChannelID: 2, ProviderID: supplier.Id},
+	} {
+		rule, applied, err := model.CreatePayableRule(input, 100)
+		require.NoError(t, err)
+		assert.Equal(t, model.PayableProviderOverride{Id: rule.Id, SiteId: site.Id, RemoteChannelId: input.RemoteChannelID,
+			ProviderId: supplier.Id, RuleType: input.RuleType, CreatedTime: 100, UpdatedTime: 100}, rule)
+		assert.Zero(t, applied)
+	}
+
+	var rulesBefore, rulesAfter int64
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&rulesBefore).Error)
+	usages := providerMappingUsages(t, db)
+	scope := &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}
+	for _, tc := range []struct {
+		name  string
+		input model.PayableRuleInput
+		want  error
+	}{
+		{"missing site", model.PayableRuleInput{SiteID: deleted.Id + 1, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}, model.ErrThirdPartySiteNotFound},
+		{"deleted site", model.PayableRuleInput{SiteID: deleted.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}, model.ErrThirdPartySiteNotFound},
+		{"not a supplier", model.PayableRuleInput{SiteID: other.Id, RuleType: model.PayableRuleAll, ProviderID: plain.Id}, model.ErrPayableProviderInvalid},
+		{"channel pulled only at another site", model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleChannel,
+			RemoteChannelID: 9, ProviderID: supplier.Id}, model.ErrPayableChannelNotPulled},
+		{"unresolved beside all", model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleUnresolved, ProviderID: supplier.Id},
+			model.ErrPayableSiteRuleExists},
+		{"second all", model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}, model.ErrPayableSiteRuleExists},
+		{"second channel rule", model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleChannel, RemoteChannelID: 1,
+			ProviderID: supplier.Id}, model.ErrPayableChannelRuleExists},
+	} {
+		tc.input.Apply = scope
+		_, applied, err := model.CreatePayableRule(tc.input, 200)
+		assert.ErrorIs(t, err, tc.want, tc.name)
+		assert.Zero(t, applied, tc.name)
+	}
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&rulesAfter).Error)
+	assert.Equal(t, rulesBefore, rulesAfter)
+	assert.Equal(t, usages, providerMappingUsages(t, db)) // 被拒的新建不回改
+
+	// 预览同样要求提供商是渠道供应商
+	_, err := model.CountPayableRuleApply(model.PayableProviderOverride{SiteId: other.Id, RuleType: model.PayableRuleAll, ProviderId: plain.Id}, *scope)
+	assert.ErrorIs(t, err, model.ErrPayableProviderInvalid)
+}
+
+func TestProviderMappingUpdateAndDelete(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-edit-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-edit-s2")
+	require.NoError(t, db.Model(s2).Update("payable_discount", 0.6).Error)
+	s2.PayableDiscount = payablePtr(0.6)
+	plain := &model.User{Username: "pm-edit-u", Role: common.RoleCommonUser, Status: 1, AffCode: "pm-edit-u"}
+	require.NoError(t, db.Create(plain).Error)
+	site := receivableSeedSite(t, db, "pm-edit-a", "https://pm-edit-a.example.com", 1)
+	gone := receivableSeedSite(t, db, "pm-edit-gone", "https://pm-edit-gone.example.com", 1)
+	task1 := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+	task2 := payableSeedTask(t, db, 20261102, model.PayableTaskSuccess)
+	manualRow := providerMappingSeedUsage(t, db, payableSeedPull(t, db, task1, site.Id, model.PayablePullSuccess), 5, s1.Id, model.PayableProviderManual, nil)
+	unknownRow := providerMappingSeedUsage(t, db, payableSeedPull(t, db, task2, site.Id, model.PayablePullSuccess), 5, 0, model.PayableProviderUnknown, nil)
+	goneRow := providerMappingSeedUsage(t, db, payableSeedPull(t, db, task1, gone.Id, model.PayablePullSuccess), 5, 0, model.PayableProviderUnknown, nil)
+	// 升级前的指定渠道规则：rule_type 为 NULL
+	old := providerMappingSeedRule(t, db, site.Id, 5, s1.Id, "")
+	require.NoError(t, db.Model(old).Update("rule_type", nil).Error)
+	siteRule := providerMappingSeedRule(t, db, gone.Id, 0, s1.Id, model.PayableRuleAll)
+	require.NoError(t, db.Delete(gone).Error)
+	stored := func(id int) model.PayableProviderOverride {
+		var rule model.PayableProviderOverride
+		require.NoError(t, db.First(&rule, id).Error)
+		return rule
+	}
+
+	// 只改提供商：返回改前与改后，明细不变，旧行的类型仍是指定渠道
+	usages := providerMappingUsages(t, db)
+	before, after, applied, err := model.UpdatePayableRule(old.Id, s2.Id, nil, 200)
+	require.NoError(t, err)
+	assert.Equal(t, model.PayableProviderOverride{Id: old.Id, SiteId: site.Id, RemoteChannelId: 5, ProviderId: s1.Id, CreatedTime: 1, UpdatedTime: 1}, before)
+	assert.Equal(t, model.PayableProviderOverride{Id: old.Id, SiteId: site.Id, RemoteChannelId: 5, ProviderId: s2.Id, CreatedTime: 1, UpdatedTime: 200}, after)
+	assert.Equal(t, model.PayableRuleChannel, after.Type())
+	assert.Equal(t, after, stored(old.Id))
+	assert.Zero(t, applied)
+	assert.Equal(t, usages, providerMappingUsages(t, db))
+
+	// 提供商不变也能保存，只做一次回改：该渠道范围内的行都改为 manual，包括以前手动设置成别人的行
+	scope := &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261102}
+	_, after, applied, err = model.UpdatePayableRule(old.Id, s2.Id, scope, 300)
+	require.NoError(t, err)
+	assert.Equal(t, s2.Id, after.ProviderId)
+	assert.EqualValues(t, 2, applied)
+	usages = providerMappingUsages(t, db)
+	assert.Equal(t, providerMappingApplied(*manualRow, s2, model.PayableProviderManual, 300), usages[manualRow.Id])
+	assert.Equal(t, providerMappingApplied(*unknownRow, s2, model.PayableProviderManual, 300), usages[unknownRow.Id])
+	assert.Equal(t, *goneRow, usages[goneRow.Id])
+
+	// 规则不存在；提供商不是供应商时规则与明细都不变
+	_, _, _, err = model.UpdatePayableRule(siteRule.Id+1, s1.Id, nil, 400)
+	assert.ErrorIs(t, err, model.ErrPayableRuleNotFound)
+	_, _, _, err = model.UpdatePayableRule(old.Id, plain.Id, scope, 400)
+	assert.ErrorIs(t, err, model.ErrPayableProviderInvalid)
+	assert.Equal(t, after, stored(old.Id))
+	assert.Equal(t, usages, providerMappingUsages(t, db))
+
+	// 站点已删除的规则也能编辑（回改历史账单的归属）
+	_, after, applied, err = model.UpdatePayableRule(siteRule.Id, s2.Id, scope, 500)
+	require.NoError(t, err)
+	assert.Equal(t, s2.Id, after.ProviderId)
+	assert.EqualValues(t, 1, applied)
+	assert.Equal(t, providerMappingApplied(*goneRow, s2, model.PayableProviderRuleAll, 500), providerMappingUsages(t, db)[goneRow.Id])
+
+	// 删除（站点已删除的规则也能删）：返回被删的规则，明细不变；再删报不存在
+	usages = providerMappingUsages(t, db)
+	for _, rule := range []model.PayableProviderOverride{stored(old.Id), stored(siteRule.Id)} {
+		removed, err := model.DeletePayableRule(rule.Id)
+		require.NoError(t, err)
+		assert.Equal(t, rule, removed)
+		_, err = model.DeletePayableRule(rule.Id)
+		assert.ErrorIs(t, err, model.ErrPayableRuleNotFound)
+	}
+	assert.Equal(t, usages, providerMappingUsages(t, db))
+	var rules int64
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&rules).Error)
+	assert.Zero(t, rules)
+}
+
+func TestProviderMappingApplyInBatches(t *testing.T) {
+	db := setupPayableBillTest(t)
+	supplier := channelPushSeedSupplier(t, db, "pm-batch-s")
+	site := receivableSeedSite(t, db, "pm-batch-c", "https://pm-batch-c.example.com", 1)
+	pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+	rows := make([]*model.PayableChannelUsage, 2500) // 每批 1000 行，要更新 3 批
+	for i := range rows {
+		rows[i] = &model.PayableChannelUsage{TaskId: pull.TaskId, PullSiteId: pull.Id, BillDate: pull.BillDate, SiteId: site.Id,
+			RemoteChannelId: i + 1, UsedQuota: 10, ProviderSource: model.PayableProviderUnknown}
+	}
+	require.NoError(t, db.CreateInBatches(rows, 500).Error)
+
+	_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id,
+		Apply: &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}}, 100)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2500, applied)
+	var changed int64
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("provider_id = ? AND provider_source = ? AND updated_time = ?",
+		supplier.Id, model.PayableProviderRuleAll, 100).Count(&changed).Error)
+	assert.EqualValues(t, 2500, changed)
+}
+
+func TestProviderMappingApplyIsAtomic(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-atomic-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-atomic-s2")
+	site := receivableSeedSite(t, db, "pm-atomic", "https://pm-atomic.example.com", 1)
+	pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+	usage := providerMappingSeedUsage(t, db, pull, 1, 0, model.PayableProviderUnknown, nil)
+	scope := &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261101}
+	// 回改明细时数据库报错：规则与明细要么都改，要么都不改
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:pm-fail", func(tx *gorm.DB) {
+		if tx.Statement.Table == "payable_channel_usages" {
+			tx.AddError(errors.New("boom"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("test:pm-fail") })
+
+	_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll,
+		ProviderID: s1.Id, Apply: scope}, 100)
+	assert.ErrorContains(t, err, "boom")
+	assert.Zero(t, applied)
+	var rules int64
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&rules).Error)
+	assert.Zero(t, rules)
+
+	// 编辑同样：回改失败时规则的提供商不变
+	rule, _, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: s1.Id}, 100)
+	require.NoError(t, err)
+	_, _, applied, err = model.UpdatePayableRule(rule.Id, s2.Id, scope, 200)
+	assert.ErrorContains(t, err, "boom")
+	assert.Zero(t, applied)
+	var stored model.PayableProviderOverride
+	require.NoError(t, db.First(&stored, rule.Id).Error)
+	assert.Equal(t, rule, stored)
+	var after model.PayableChannelUsage
+	require.NoError(t, db.First(&after, usage.Id).Error)
+	assert.Equal(t, *usage, after)
+}
+
+func TestProviderMappingConcurrentCreate(t *testing.T) {
+	db := setupPayableBillTest(t)
+	supplier := channelPushSeedSupplier(t, db, "pm-race-s")
+	site := receivableSeedSite(t, db, "pm-race", "https://pm-race.example.com", 1)
+	// SQLite 的写事务本来就串行。MySQL、PostgreSQL 上两个事务真并发：都查过没有已有规则、都要插入时才一起放行，
+	// 后插入的一方必须被唯一约束挡下并得到同样的提示，而不是数据库错误或存成两条。
+	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		var arrived atomic.Int32
+		bothArrived := make(chan struct{})
+		require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:pm-race", func(tx *gorm.DB) {
+			if tx.Statement.Table != "payable_provider_overrides" {
+				return
+			}
+			if arrived.Add(1) == 2 {
+				close(bothArrived)
+			}
+			select {
+			case <-bothArrived:
+			case <-time.After(10 * time.Second): // 另一方没走到插入时不一直等，由下面的断言报错
+			}
+		}))
+		t.Cleanup(func() { _ = db.Callback().Create().Remove("test:pm-race") })
+	}
+
+	input := model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Go(func() {
+			<-start
+			_, _, err := model.CreatePayableRule(input, 100)
+			results <- err
+		})
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	var failures []error
+	for err := range results {
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	require.Len(t, failures, 1)
+	assert.ErrorIs(t, failures[0], model.ErrPayableSiteRuleExists)
+	var rules int64
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Count(&rules).Error)
+	assert.EqualValues(t, 1, rules)
+}
+
+func TestProviderMappingApplyAndPulls(t *testing.T) {
+	db := setupPayableBillTest(t)
+	target := channelPushSeedSupplier(t, db, "pm-pull-s")
+	other := channelPushSeedSupplier(t, db, "pm-pull-o")
+	siteA := receivableSeedSite(t, db, "pm-pull-a", "https://pm-pull-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pm-pull-b", "https://pm-pull-b.example.com", 1)
+	task := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+	later := payableSeedTask(t, db, 20261105, model.PayableTaskRunning)
+	pullA := payableSeedPull(t, db, task, siteA.Id, model.PayablePullSuccess)
+	pullB := payableSeedPull(t, db, task, siteB.Id, model.PayablePullSuccess)
+	pullLater := payableSeedPull(t, db, later, siteA.Id, model.PayablePullPending)
+	existing := providerMappingSeedUsage(t, db, pullA, 1, 0, model.PayableProviderUnknown, nil)
+	scope := &model.PayableRuleApply{StartDate: 20261101, EndDate: 20261102}
+	t.Cleanup(func() { model.PayableRuleApplyHook = nil })
+
+	// 补扫：事务提交之后、补扫之前写入的行里，只有站点 A 在范围内的旧结果被补改；
+	// 开始前已有的行（id 不大于开始时的最大 id）不归补扫管
+	var late []*model.PayableChannelUsage
+	model.PayableRuleApplyHook = func(stage string) {
+		if stage != "after_commit" {
+			return
+		}
+		late = []*model.PayableChannelUsage{
+			providerMappingSeedUsage(t, db, pullA, 2, 0, model.PayableProviderUnknown, nil),
+			providerMappingSeedUsage(t, db, pullA, 3, other.Id, model.PayableProviderManual, nil),
+			providerMappingSeedUsage(t, db, pullB, 2, 0, model.PayableProviderUnknown, nil),
+			providerMappingSeedUsage(t, db, pullLater, 2, 0, model.PayableProviderUnknown, nil),
+		}
+		require.NoError(t, db.Save(existing).Error) // 事务里已改过的行再写回旧结果
+	}
+	_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: siteA.Id, RuleType: model.PayableRuleAll,
+		ProviderID: target.Id, Apply: scope}, 100)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, applied) // 事务里改的 1 行 + 补扫改的 1 行
+	usages := providerMappingUsages(t, db)
+	require.Len(t, late, 4)
+	assert.Equal(t, providerMappingApplied(*late[0], target, model.PayableProviderRuleAll, 100), usages[late[0].Id])
+	for _, row := range []*model.PayableChannelUsage{late[1], late[2], late[3], existing} {
+		assert.Equal(t, *row, usages[row.Id])
+	}
+
+	// 锁：回改未提交时，其他站点的拉取照常写入（按主键分批更新，不像一条范围 UPDATE 那样在 MySQL 上留下间隙锁）
+	t.Run("other sites write while the backfill is uncommitted", func(t *testing.T) {
+		if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+			t.Skip("SQLite 同时只有一个写事务，回改提交前其他连接的写入本来就要等")
+		}
+		timeout := "SET SESSION innodb_lock_wait_timeout = 3"
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+			timeout = "SET lock_timeout = '3s'"
+		}
+		siteC := receivableSeedSite(t, db, "pm-pull-c", "https://pm-pull-c.example.com", 1)
+		providerMappingSeedUsage(t, db, payableSeedPull(t, db, task, siteC.Id, model.PayablePullSuccess), 1, 0, model.PayableProviderUnknown, nil)
+		model.PayableRuleApplyHook = func(stage string) {
+			if stage != "before_commit" {
+				return
+			}
+			// 回改事务占着自己的连接，Connection 从连接池另取一条；被锁住时 3 秒后报错，而不是一直等
+			err := model.DB.Connection(func(conn *gorm.DB) error {
+				if err := conn.Exec(timeout).Error; err != nil {
+					return err
+				}
+				return conn.Create(&model.PayableChannelUsage{TaskId: task.Id, PullSiteId: pullB.Id, BillDate: task.BillDate,
+					SiteId: siteB.Id, RemoteChannelId: 9, UsedQuota: 10, ProviderSource: model.PayableProviderUnknown}).Error
+			})
+			assert.NoError(t, err)
+		}
+		_, applied, err := model.CreatePayableRule(model.PayableRuleInput{SiteID: siteC.Id, RuleType: model.PayableRuleAll,
+			ProviderID: target.Id, Apply: scope}, 200)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, applied)
+		var written int64
+		require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("pull_site_id = ? AND remote_channel_id = ?", pullB.Id, 9).
+			Count(&written).Error)
+		assert.EqualValues(t, 1, written)
+	})
 }
