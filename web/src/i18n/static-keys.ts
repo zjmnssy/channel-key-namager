@@ -1015,4 +1015,9 @@ export const STATIC_I18N_KEYS = [
   // Payable bill errors of setting the provider of a channel usage.
   'Channel usage does not exist',
   'The selected user is not a channel supplier',
+  // Provider mapping rule form validation.
+  'Provider is required',
+  'Site channel is required',
+  'Start date must not be after end date',
+  'Date range cannot exceed 92 days',
 ] as const

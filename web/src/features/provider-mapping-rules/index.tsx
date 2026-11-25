@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
 
+import { MappingRulesDialogs } from './components/mapping-rules-dialogs'
 import { MappingRulesPrimaryButtons } from './components/mapping-rules-primary-buttons'
 import { MappingRulesProvider } from './components/mapping-rules-provider'
 import { MappingRulesTable } from './components/mapping-rules-table'
@@ -39,6 +40,8 @@ export function ProviderMappingRules() {
           <MappingRulesTable />
         </SectionPageLayout.Content>
       </SectionPageLayout>
+
+      <MappingRulesDialogs />
     </MappingRulesProvider>
   )
 }

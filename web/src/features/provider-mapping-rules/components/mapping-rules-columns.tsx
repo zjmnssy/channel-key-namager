@@ -26,17 +26,15 @@ import { TruncatedText } from '@/components/truncated-text'
 import { formatTimestampToDate } from '@/lib/format'
 
 import { RULE_TYPE_LABEL_KEYS } from '../constants'
+import { siteChannelLabel } from '../lib/site-channel'
 import type { ProviderMappingRule } from '../types'
 import { MappingRuleRowActions } from './mapping-rule-row-actions'
 
 const EMPTY = '—'
 
-/** "<channel id> <name>"; the name is left out when the channel has none. */
 function channelText(rule: ProviderMappingRule): string {
   if (rule.rule_type !== 'channel') return EMPTY
-  return rule.remote_channel_name
-    ? `${rule.remote_channel_id} ${rule.remote_channel_name}`
-    : String(rule.remote_channel_id)
+  return siteChannelLabel(rule.remote_channel_id, rule.remote_channel_name)
 }
 
 export function useMappingRulesColumns(): ColumnDef<ProviderMappingRule>[] {

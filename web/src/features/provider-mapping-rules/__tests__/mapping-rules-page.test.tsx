@@ -251,6 +251,49 @@ describe('ProviderMappingRules page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeInTheDocument()
   })
 
+  it('opens the create dialog from the Create button', async () => {
+    await renderPage()
+    const user = userEvent.setup()
+    await screen.findByText('18704 az-gpt-eastus2-22536')
+
+    await user.click(screen.getByRole('button', { name: 'Create' }))
+
+    expect(
+      await screen.findByRole('dialog', { name: 'Create Mapping Rule' })
+    ).toBeInTheDocument()
+  })
+
+  it('opens the edit dialog of the row chosen in its menu', async () => {
+    await renderPage()
+    const user = userEvent.setup()
+    const row = (await screen.findByText('18704 az-gpt-eastus2-22536')).closest(
+      'tr'
+    ) as HTMLElement
+
+    await user.click(within(row).getByRole('button', { name: 'Open menu' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Edit Mapping Rule',
+    })
+    expect(dialog).toHaveTextContent('18704 az-gpt-eastus2-22536')
+  })
+
+  it('opens the delete confirmation of the row chosen in its menu', async () => {
+    await renderPage()
+    const user = userEvent.setup()
+    const row = (await screen.findByText('18704 az-gpt-eastus2-22536')).closest(
+      'tr'
+    ) as HTMLElement
+
+    await user.click(within(row).getByRole('button', { name: 'Open menu' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    expect(
+      await screen.findByRole('alertdialog', { name: 'Delete Mapping Rule' })
+    ).toHaveTextContent('Delete the mapping rule of Alpha?')
+  })
+
   it('reports a load failure with the server reason', async () => {
     vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
       if (url === OPTIONS_URL) {
