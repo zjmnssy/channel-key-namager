@@ -25,6 +25,7 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import { Label } from '@/components/ui/label'
+import { PROVIDER_MAPPING_QUERY_KEYS } from '@/features/provider-mapping-rules/constants'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -62,6 +63,10 @@ export function SetProviderDialog(props: SetProviderDialogProps) {
     onSuccess: (_response, nextProviderId) => {
       void queryClient.invalidateQueries({
         queryKey: PAYABLE_BILL_QUERY_KEYS.all,
+      })
+      // The rules page caches for a while, so mark it stale too.
+      void queryClient.invalidateQueries({
+        queryKey: PROVIDER_MAPPING_QUERY_KEYS.all,
       })
       toast.success(
         nextProviderId === CLEAR_PROVIDER_ID

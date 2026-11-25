@@ -130,6 +130,9 @@ describe('SetProviderDialog', () => {
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
     expect(billApi.setPayableUsageProvider).toHaveBeenCalledWith(101, 5)
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['payable-bills'] })
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ['provider-mapping-rules'],
+    })
     expect(toast.success).toHaveBeenCalledWith('Provider updated successfully')
   })
 

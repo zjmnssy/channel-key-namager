@@ -292,6 +292,47 @@ describe('ChannelUsagesTable', () => {
     ).toBeInTheDocument()
   })
 
+  it('marks rows decided by site-level rules as Rule and keeps manual and unknown marks', async () => {
+    await renderUsages([
+      {
+        ...baseUsage,
+        id: 107,
+        remote_channel_name: 'rule-all',
+        provider_source: 'rule_all',
+      },
+      {
+        ...baseUsage,
+        id: 108,
+        remote_channel_name: 'rule-unresolved',
+        provider_source: 'rule_unresolved',
+      },
+      {
+        ...baseUsage,
+        id: 104,
+        remote_channel_name: 'manual-source',
+        provider_source: 'manual',
+        manual: true,
+      },
+      {
+        ...baseUsage,
+        id: 106,
+        remote_channel_name: 'no-provider',
+        provider_id: 0,
+        provider_name: '',
+        provider_source: 'unknown',
+      },
+    ])
+    await screen.findByText('rule-all')
+
+    expect(screen.getAllByText('Rule')).toHaveLength(2)
+    expect(within(usageRow('rule-all')).getByText('Rule')).toBeInTheDocument()
+    expect(
+      within(usageRow('rule-unresolved')).getByText('Rule')
+    ).toBeInTheDocument()
+    expect(screen.getAllByText('Manual')).toHaveLength(1)
+    expect(screen.getAllByText('Unknown')).toHaveLength(1)
+  })
+
   it('sends provider_ids=0 when the unknown provider filter is chosen', async () => {
     await renderUsages()
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })

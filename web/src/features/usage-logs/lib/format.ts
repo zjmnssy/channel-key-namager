@@ -552,6 +552,10 @@ const AUDIT_TEMPLATES: Record<string, string> = {
     'Set the provider of channel usage #{{usage_id}}',
   'payable_bill.clear_provider':
     'Cleared the manual provider of channel usage #{{usage_id}}',
+  // Provider mapping rules
+  'provider_mapping.create': 'Created provider mapping rule #{{rule_id}}',
+  'provider_mapping.update': 'Updated provider mapping rule #{{rule_id}}',
+  'provider_mapping.delete': 'Deleted provider mapping rule #{{rule_id}}',
   // Prefill groups
   'prefill_group.create': 'Created a prefill group',
   'prefill_group.update': 'Updated a prefill group',
@@ -651,6 +655,12 @@ export function renderAuditContent(
     other?.audit_info?.success === false
   ) {
     return t('Failed to set the provider of channel usage')
+  }
+  if (
+    op.action.startsWith('provider_mapping.') &&
+    other?.audit_info?.success === false
+  ) {
+    return t('Failed to change the provider mapping rule')
   }
   const template = AUDIT_TEMPLATES[op.action]
   if (!template) return null

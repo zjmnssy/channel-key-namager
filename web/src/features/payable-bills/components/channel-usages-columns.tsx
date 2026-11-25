@@ -166,6 +166,15 @@ export function useChannelUsagesColumns(
                   copyable={false}
                 />
               )}
+              {/* Decided by a site-level mapping rule, not by the channel. */}
+              {(usage.provider_source === 'rule_all' ||
+                usage.provider_source === 'rule_unresolved') && (
+                <StatusBadge
+                  label={t('Rule')}
+                  variant='neutral'
+                  copyable={false}
+                />
+              )}
             </div>
           )
         },

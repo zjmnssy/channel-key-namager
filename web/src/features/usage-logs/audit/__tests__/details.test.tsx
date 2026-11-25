@@ -1309,3 +1309,124 @@ it('does not load scope labels for other records', async () => {
   await openDetails()
   expect(get).not.toHaveBeenCalled()
 })
+
+const mappingRuleParams = {
+  rule_id: 9,
+  site_id: 3,
+  site_name: 'Site A',
+  rule_type: 'channel',
+  remote_channel_id: 17,
+  remote_channel_name: 'gpt-dcmark-3-17',
+  provider_id: 7,
+  provider_name: 'bob',
+}
+
+async function buildMappingDetail(
+  action: string,
+  params: Record<string, unknown>,
+  success = true
+) {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  return buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success,
+      other: {
+        ...(success ? {} : { audit_info: { success: false } }),
+        op: { action, params },
+      },
+    },
+    i18n.t
+  )
+}
+
+it('renders a created provider mapping rule with the type label and the back-filled bill dates', async () => {
+  const detail = await buildMappingDetail('provider_mapping.create', {
+    ...mappingRuleParams,
+    apply_start_date: 20261101,
+    apply_end_date: 20261124,
+    applied_rows: 12,
+  })
+  expect(detail.summary).toBe('Created provider mapping rule #9')
+  expect(detail.fields).toEqual([
+    { label: 'Rule ID', value: 9 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Rule Type', value: 'Specified channel' },
+    { label: 'Site Channel ID', value: 17 },
+    { label: 'Channel Name', value: 'gpt-dcmark-3-17' },
+    { label: 'Provider ID', value: 7 },
+    { label: 'Provider Name', value: 'bob' },
+    { label: 'Applied Bill Dates', value: '2026-11-01 ~ 2026-11-24' },
+    { label: 'Details Changed', value: 12 },
+  ])
+})
+
+it('renders an updated site-level rule without a meaningless site channel', async () => {
+  const detail = await buildMappingDetail('provider_mapping.update', {
+    ...mappingRuleParams,
+    rule_type: 'unresolved',
+    remote_channel_id: 0,
+    remote_channel_name: '',
+    previous_provider_id: 5,
+    previous_provider_name: 'alice',
+  })
+  expect(detail.summary).toBe('Updated provider mapping rule #9')
+  expect(detail.fields).toEqual([
+    { label: 'Rule ID', value: 9 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Rule Type', value: 'Unresolved channels' },
+    { label: 'Provider ID', value: 7 },
+    { label: 'Provider Name', value: 'bob' },
+    { label: 'Previous Provider ID', value: 5 },
+    { label: 'Previous Provider', value: 'alice' },
+  ])
+})
+
+it('renders a deleted rule with only the previous provider', async () => {
+  const detail = await buildMappingDetail('provider_mapping.delete', {
+    rule_id: 9,
+    site_id: 3,
+    site_name: 'Site A',
+    rule_type: 'all',
+    remote_channel_id: 0,
+    remote_channel_name: '',
+    previous_provider_id: 5,
+    previous_provider_name: 'alice',
+  })
+  expect(detail.summary).toBe('Deleted provider mapping rule #9')
+  expect(detail.fields).toEqual([
+    { label: 'Rule ID', value: 9 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Rule Type', value: 'All site channels' },
+    { label: 'Previous Provider ID', value: 5 },
+    { label: 'Previous Provider', value: 'alice' },
+  ])
+})
+
+it.each([
+  ['site_not_found', 'Site does not exist'],
+  ['invalid_provider', 'The selected user is not a channel supplier'],
+  ['rule_not_found', 'Mapping rule does not exist'],
+  ['site_rule_exists', 'This site already has a site-level mapping rule'],
+  ['channel_rule_exists', 'This site channel already has a mapping rule'],
+  ['channel_not_pulled', 'This site channel has not been pulled yet'],
+  ['database_error', 'Database error, please contact the administrator'],
+])(
+  'explains the failed provider mapping rule reason %s',
+  async (reason, text) => {
+    const detail = await buildMappingDetail(
+      'provider_mapping.create',
+      { ...mappingRuleParams, failure_reason: reason },
+      false
+    )
+    expect(detail.summary).toBe('Failed to change the provider mapping rule')
+    expect(detail.fields).toEqual(
+      expect.arrayContaining([{ label: 'Failure reason', value: text }])
+    )
+  }
+)

@@ -82,6 +82,8 @@ export type PayableDeltaFlag =
 
 export type PayableProviderSource =
   | 'manual'
+  | 'rule_all'
+  | 'rule_unresolved'
   | 'parsed'
   | 'inherited'
   | 'unknown'
