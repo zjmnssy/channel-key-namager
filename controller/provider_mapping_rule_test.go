@@ -446,9 +446,18 @@ func TestProviderMappingConcurrentCreate(t *testing.T) {
 	db := setupPayableBillTest(t)
 	supplier := channelPushSeedSupplier(t, db, "pm-race-s")
 	site := receivableSeedSite(t, db, "pm-race", "https://pm-race.example.com", 1)
-	// SQLite 的写事务本来就串行。MySQL、PostgreSQL 上两个事务真并发：都查过没有已有规则、都要插入时才一起放行，
-	// 后插入的一方必须被唯一约束挡下并得到同样的提示，而不是数据库错误或存成两条。
-	if !common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+	input := model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}
+	results := make(chan error, 2)
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		// 夹具的 SQLite 连接不带 _txlock=immediate 与 busy_timeout：两个写事务重叠时，后升级写锁的一方直接得到 SQLITE_BUSY，
+		// 不会排队等待。所以这里先后新建两次，第二次由插入前的查重挡下。
+		for range 2 {
+			_, _, err := model.CreatePayableRule(input, 100)
+			results <- err
+		}
+	} else {
+		// MySQL、PostgreSQL 上两个事务真并发：都查过没有已有规则、都要插入时才一起放行，
+		// 后插入的一方必须被唯一约束挡下并得到同样的提示，而不是数据库错误或存成两条。
 		var arrived atomic.Int32
 		bothArrived := make(chan struct{})
 		require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:pm-race", func(tx *gorm.DB) {
@@ -464,21 +473,18 @@ func TestProviderMappingConcurrentCreate(t *testing.T) {
 			}
 		}))
 		t.Cleanup(func() { _ = db.Callback().Create().Remove("test:pm-race") })
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		for range 2 {
+			workers.Go(func() {
+				<-start
+				_, _, err := model.CreatePayableRule(input, 100)
+				results <- err
+			})
+		}
+		close(start)
+		workers.Wait()
 	}
-
-	input := model.PayableRuleInput{SiteID: site.Id, RuleType: model.PayableRuleAll, ProviderID: supplier.Id}
-	start := make(chan struct{})
-	results := make(chan error, 2)
-	var workers sync.WaitGroup
-	for range 2 {
-		workers.Go(func() {
-			<-start
-			_, _, err := model.CreatePayableRule(input, 100)
-			results <- err
-		})
-	}
-	close(start)
-	workers.Wait()
 	close(results)
 	var failures []error
 	for err := range results {
