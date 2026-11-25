@@ -22,10 +22,12 @@ import { StatusBadge } from '@/components/status-badge'
 
 import { RULE_TYPE_LABEL_KEYS } from '../constants'
 import { siteChannelLabel } from '../lib/site-channel'
-import type { ProviderMappingRule } from '../types'
+import type { ProviderMappingRuleSummary } from '../types'
 
 type MappingRuleSummaryProps = {
-  rule: ProviderMappingRule
+  rule: ProviderMappingRuleSummary
+  // Confirmations name the provider too, so they tell which rule they act on.
+  showProvider?: boolean
 }
 
 /** The parts of a saved rule that cannot change; another target needs a new rule. */
@@ -33,7 +35,7 @@ export function MappingRuleSummary(props: MappingRuleSummaryProps) {
   const { t } = useTranslation()
 
   return (
-    <dl className='grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm'>
+    <dl className='text-foreground grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm'>
       <dt className='text-muted-foreground'>{t('Third-party site')}</dt>
       <dd className='flex flex-wrap items-center gap-2 break-all'>
         {props.rule.site_name}
@@ -54,6 +56,21 @@ export function MappingRuleSummary(props: MappingRuleSummaryProps) {
             {siteChannelLabel(
               props.rule.remote_channel_id,
               props.rule.remote_channel_name
+            )}
+          </dd>
+        </>
+      )}
+      {props.showProvider && (
+        <>
+          <dt className='text-muted-foreground'>{t('Provider')}</dt>
+          <dd className='flex flex-wrap items-center gap-2 break-all'>
+            {props.rule.provider_name}
+            {!props.rule.provider_valid && (
+              <StatusBadge
+                label={t('No longer valid')}
+                variant='warning'
+                copyable={false}
+              />
             )}
           </dd>
         </>

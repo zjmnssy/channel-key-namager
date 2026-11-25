@@ -51,7 +51,9 @@ import { MappingRuleMutateDialog } from '../mapping-rule-mutate-dialog'
 
 vi.mock('../../api')
 vi.mock('@/features/payable-bills/api')
-vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}))
 
 type User = ReturnType<typeof userEvent.setup>
 
@@ -78,6 +80,8 @@ const RULE_TYPE_NAMES = [
 ]
 const NO_DISCOUNT_WARNING =
   'This provider has no payable discount, so the changed details will have no payable amount.'
+const SWEEP_FAILED_WARNING =
+  'Some details pulled while saving may not have been changed. Edit the rule and apply it to pulled details again.'
 
 const clients: QueryClient[] = []
 
@@ -121,11 +125,27 @@ async function fillAllChannelsRule(user: User) {
   await chooseProvider(user, 'alice')
 }
 
-function saved(appliedRows: number): ApiResponse<ProviderMappingSaveResult> {
+function saved(
+  appliedRows: number,
+  sweepFailed = false
+): ApiResponse<ProviderMappingSaveResult> {
   return {
     success: true,
-    data: { rule: savedRule, applied_rows: appliedRows },
+    data: {
+      rule: savedRule,
+      applied_rows: appliedRows,
+      sweep_failed: sweepFailed,
+    },
   }
+}
+
+// Label and text of each entry the confirmation lists about the rule.
+function ruleSummaryOf(dialog: HTMLElement) {
+  return Object.fromEntries(
+    within(dialog)
+      .getAllByRole('term')
+      .map((term) => [term.textContent, term.nextElementSibling?.textContent])
+  )
 }
 
 const day = (label: string) =>
@@ -355,6 +375,11 @@ describe('MappingRuleMutateDialog when creating', () => {
     expect(confirm).toHaveTextContent(
       'This will change 3 details, and provider bills will change accordingly. This cannot be undone.'
     )
+    expect(ruleSummaryOf(confirm)).toEqual({
+      'Third-party site': 'Alpha',
+      'Rule Type': 'All site channels',
+      Provider: 'alice',
+    })
     expect(previewProviderMappingRule).toHaveBeenCalledExactlyOnceWith({
       site_id: 3,
       rule_type: 'all',
@@ -390,6 +415,55 @@ describe('MappingRuleMutateDialog when creating', () => {
       'Mapping rule saved, 3 details changed'
     )
   })
+
+  it('names the chosen site channel in the backfill confirmation of a specified-channel rule', async () => {
+    const { user } = await renderDialog()
+    await chooseSite(user, 'Alpha')
+    await user.click(screen.getByRole('radio', { name: 'Specified channel' }))
+    await user.click(screen.getByRole('combobox', { name: 'Site Channel' }))
+    await user.click(
+      await screen.findByRole('option', { name: '18704 az-gpt-eastus2-22536' })
+    )
+    await chooseProvider(user, 'bob')
+    await user.click(screen.getByRole('checkbox', { name: BACKFILL }))
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(ruleSummaryOf(await screen.findByRole('alertdialog'))).toEqual({
+      'Third-party site': 'Alpha',
+      'Rule Type': 'Specified channel',
+      'Site Channel': '18704 az-gpt-eastus2-22536',
+      Provider: 'bob',
+    })
+  })
+
+  it.each([
+    { sweepFailed: true, warnings: [[SWEEP_FAILED_WARNING]] },
+    { sweepFailed: false, warnings: [] },
+  ])(
+    'warns about details pulled while saving only when their changes failed (sweep_failed $sweepFailed)',
+    async ({ sweepFailed, warnings }) => {
+      vi.mocked(createProviderMappingRule).mockResolvedValue(
+        saved(3, sweepFailed)
+      )
+      const { user, onOpenChange } = await renderDialog()
+      await fillAllChannelsRule(user)
+      await user.click(screen.getByRole('checkbox', { name: BACKFILL }))
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+
+      await user.click(
+        within(await screen.findByRole('alertdialog')).getByRole('button', {
+          name: 'Save',
+        })
+      )
+
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+      expect(toast.success).toHaveBeenCalledExactlyOnceWith(
+        'Mapping rule saved, 3 details changed'
+      )
+      expect(vi.mocked(toast.warning).mock.calls).toEqual(warnings)
+    }
+  )
 
   it('returns to the form without saving when the confirmation is dismissed with Escape', async () => {
     const { user, onOpenChange } = await renderDialog()
@@ -748,11 +822,15 @@ describe('MappingRuleMutateDialog when editing', () => {
     await user.click(screen.getByRole('checkbox', { name: BACKFILL }))
 
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    await user.click(
-      within(await screen.findByRole('alertdialog')).getByRole('button', {
-        name: 'Save',
-      })
-    )
+    const confirm = await screen.findByRole('alertdialog')
+    // The edited rule with the provider being saved, not the old one.
+    expect(ruleSummaryOf(confirm)).toEqual({
+      'Third-party site': 'Alpha',
+      'Rule Type': 'Specified channel',
+      'Site Channel': '18704 az-gpt-eastus2-22536',
+      Provider: 'alice',
+    })
+    await user.click(within(confirm).getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
     expect(previewProviderMappingRule).toHaveBeenCalledExactlyOnceWith({

@@ -37,6 +37,18 @@ export type ProviderMappingRule = {
   updated_time: number
 }
 
+/** What a confirmation tells about a rule to identify it. */
+export type ProviderMappingRuleSummary = Pick<
+  ProviderMappingRule,
+  | 'site_name'
+  | 'site_deleted'
+  | 'rule_type'
+  | 'remote_channel_id'
+  | 'remote_channel_name'
+  | 'provider_name'
+  | 'provider_valid'
+>
+
 export type ProviderMappingChannelOption = {
   remote_channel_id: number
   remote_channel_name: string
@@ -49,6 +61,8 @@ export type ProviderMappingApply = { start_date: number; end_date: number }
 export type ProviderMappingSaveResult = {
   rule: ProviderMappingRule
   applied_rows: number
+  // Details pulled while saving may still have the old provider.
+  sweep_failed: boolean
 }
 
 export type ProviderMappingPreview = { rows: number }

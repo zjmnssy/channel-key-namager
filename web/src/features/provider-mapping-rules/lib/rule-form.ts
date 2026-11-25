@@ -18,16 +18,19 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { PayableProviderOption } from '@/features/payable-bills/types'
 import {
   beijingYesterday,
   billDateToLocalDate,
   monthStart,
 } from '@/features/receivable-bills/lib/bill-date'
+import type { ReceivableBillSite } from '@/features/receivable-bills/types'
 
 import type {
   ProviderMappingCreateBody,
   ProviderMappingPreviewQuery,
   ProviderMappingRule,
+  ProviderMappingRuleSummary,
   ProviderMappingRuleType,
   ProviderMappingUpdateBody,
 } from '../types'
@@ -36,6 +39,7 @@ export type RuleFormValues = {
   siteId: string
   ruleType: ProviderMappingRuleType
   channelId: string // remote channel ID; only a specified-channel rule has one
+  channelName: string // shown in the confirmation only, never sent
   providerId: string
   applyEnabled: boolean // also change the details already pulled
   applyStart: number // YYYYMMDD
@@ -63,6 +67,7 @@ export function createRuleFormDefaults(): RuleFormValues {
     siteId: '',
     ruleType: 'all',
     channelId: '',
+    channelName: '',
     providerId: '',
     applyEnabled: false,
     applyStart: monthStart(yesterday),
@@ -78,6 +83,7 @@ export function ruleToFormValues(rule: ProviderMappingRule): RuleFormValues {
     ruleType: rule.rule_type,
     channelId:
       rule.rule_type === 'channel' ? String(rule.remote_channel_id) : '',
+    channelName: rule.rule_type === 'channel' ? rule.remote_channel_name : '',
     providerId: rule.provider_valid ? String(rule.provider_id) : '',
   }
 }
@@ -88,6 +94,7 @@ export const ruleFormSchema: z.ZodType<RuleFormValues, RuleFormValues> = z
     siteId: z.string().min(1, 'Site is required'),
     ruleType: z.enum(['all', 'unresolved', 'channel']),
     channelId: z.string(),
+    channelName: z.string(),
     providerId: z.string().min(1, 'Provider is required'),
     applyEnabled: z.boolean(),
     applyStart: z.number(),
@@ -147,6 +154,35 @@ export function toRuleCreatePayload(
     body.remote_channel_id = Number(values.channelId)
   }
   return body
+}
+
+/**
+ * The rule that saving these values creates or keeps, for the confirmation.
+ * A rule being edited keeps its site; a new one takes the chosen site.
+ */
+export function toRuleSummary(
+  values: RuleFormValues,
+  options: {
+    rule?: ProviderMappingRule
+    sites: ReceivableBillSite[]
+    providers: PayableProviderOption[]
+  }
+): ProviderMappingRuleSummary {
+  const site = options.sites.find((item) => String(item.id) === values.siteId)
+  const provider = options.providers.find(
+    (item) => String(item.id) === values.providerId
+  )
+  const channel = values.ruleType === 'channel'
+  return {
+    site_name: options.rule?.site_name ?? site?.name ?? values.siteId,
+    site_deleted: options.rule?.site_deleted ?? site?.deleted ?? false,
+    rule_type: values.ruleType,
+    remote_channel_id: channel ? Number(values.channelId) : 0,
+    remote_channel_name: channel ? values.channelName : '',
+    provider_name: provider?.username ?? values.providerId,
+    // The server refuses a provider that is no longer a channel supplier.
+    provider_valid: true,
+  }
 }
 
 /** Counts the details that saving the same values would change. */

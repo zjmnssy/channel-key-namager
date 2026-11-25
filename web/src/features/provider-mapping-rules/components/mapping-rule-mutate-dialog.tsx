@@ -28,6 +28,7 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Form } from '@/components/ui/form'
 import { PAYABLE_BILL_QUERY_KEYS } from '@/features/payable-bills/constants'
+import { usePayableBillOptions } from '@/features/payable-bills/hooks/use-payable-bill-options'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -43,6 +44,7 @@ import {
   ruleToFormValues,
   toRuleCreatePayload,
   toRulePreviewQuery,
+  toRuleSummary,
   toRuleUpdatePayload,
   type RuleFormValues,
 } from '../lib/rule-form'
@@ -63,6 +65,7 @@ const FORM_ID = 'provider-mapping-rule-form'
 export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const options = usePayableBillOptions()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   const form = useForm<RuleFormValues>({
@@ -108,6 +111,15 @@ export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
             })
           : t('Mapping rule saved')
       )
+      // The rule and backfill are saved, but details pulled meanwhile may
+      // still have the old provider; another backfill changes them.
+      if (res.data?.sweep_failed) {
+        toast.warning(
+          t(
+            'Some details pulled while saving may not have been changed. Edit the rule and apply it to pulled details again.'
+          )
+        )
+      }
       setConfirmOpen(false)
       props.onOpenChange(false)
     },
@@ -130,6 +142,14 @@ export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
   // the fields stay locked, so the values previewed and saved are the ones shown.
   const busy = preview.isPending || save.isPending
   const previewRows = preview.data ?? 0
+  // A site can have many rules, so the confirmation names the one saved.
+  const previewRule =
+    preview.variables &&
+    toRuleSummary(preview.variables, {
+      rule: props.currentRow,
+      sites: options.sites,
+      providers: options.providers,
+    })
 
   return (
     <Dialog
@@ -182,14 +202,21 @@ export function MappingRuleMutateDialog(props: MappingRuleMutateDialogProps) {
         }}
         title={t('Apply to details already pulled?')}
         desc={
-          previewRows > 0
-            ? t(
-                'This will change {{count}} details, and provider bills will change accordingly. This cannot be undone.',
-                { count: previewRows }
-              )
-            : t(
-                'No details in the selected dates need to change. Only the rule will be saved.'
-              )
+          <div className='space-y-3'>
+            {previewRule && (
+              <MappingRuleSummary rule={previewRule} showProvider />
+            )}
+            <p>
+              {previewRows > 0
+                ? t(
+                    'This will change {{count}} details, and provider bills will change accordingly. This cannot be undone.',
+                    { count: previewRows }
+                  )
+                : t(
+                    'No details in the selected dates need to change. Only the rule will be saved.'
+                  )}
+            </p>
+          </div>
         }
         confirmText={save.isPending ? t('Saving...') : t('Save')}
         isLoading={save.isPending}

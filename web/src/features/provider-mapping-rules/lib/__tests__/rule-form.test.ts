@@ -30,6 +30,7 @@ const valid: RuleFormValues = {
   siteId: '3',
   ruleType: 'all',
   channelId: '',
+  channelName: '',
   providerId: '5',
   applyEnabled: false,
   applyStart: 20261101,

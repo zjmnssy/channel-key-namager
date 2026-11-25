@@ -232,8 +232,12 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Rule Type')
     case 'applied_bill_dates':
       return t('Applied Bill Dates')
+    case 'requested_bill_dates':
+      return t('Requested Bill Dates')
     case 'applied_rows':
       return t('Details Changed')
+    case 'sweep_result':
+      return t('Changes to details pulled while saving')
     default:
       return key
   }
@@ -715,10 +719,18 @@ export function buildAuditDetails(
       delete params.apply_start_date
       delete params.apply_end_date
       delete params.applied_rows
-      params.applied_bill_dates = `${formatBillDate(start)} ~ ${formatBillDate(end)}`
+      // A failed save changed nothing: its dates were only asked for.
+      const datesKey = entry.success
+        ? 'applied_bill_dates'
+        : 'requested_bill_dates'
+      params[datesKey] = `${formatBillDate(start)} ~ ${formatBillDate(end)}`
       // Keep the dates before the number of details changed in them.
       if (appliedRows !== undefined) params.applied_rows = appliedRows
     }
+    // Only a failed change of the details pulled while saving is recorded.
+    const sweepFailed = params.sweep_failed === true
+    delete params.sweep_failed
+    if (sweepFailed) params.sweep_result = t('Failed')
   }
   if (
     action === 'channel.status_update_batch' &&

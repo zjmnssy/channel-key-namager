@@ -28,6 +28,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import { deleteProviderMappingRule } from '../api'
 import { PROVIDER_MAPPING_QUERY_KEYS } from '../constants'
 import type { ProviderMappingRule } from '../types'
+import { MappingRuleSummary } from './mapping-rule-summary'
 
 type MappingRuleDeleteDialogProps = {
   open: boolean
@@ -68,18 +69,20 @@ export function MappingRuleDeleteDialog(props: MappingRuleDeleteDialogProps) {
       }}
       title={t('Delete Mapping Rule')}
       desc={
-        <>
+        <div className='space-y-3'>
           <p>
             {t('Delete the mapping rule of {{site}}?', {
               site: props.rule.site_name,
             })}
           </p>
+          {/* A site can have many rules; name the one about to go. */}
+          <MappingRuleSummary rule={props.rule} showProvider />
           <p>
             {t(
               'The rule is no longer used from the next pull. Details already pulled stay unchanged.'
             )}
           </p>
-        </>
+        </div>
       }
       confirmText={mutation.isPending ? t('Deleting...') : t('Delete')}
       isLoading={mutation.isPending}

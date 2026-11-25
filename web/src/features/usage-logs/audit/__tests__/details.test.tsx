@@ -1364,6 +1364,54 @@ it('renders a created provider mapping rule with the type label and the back-fil
   ])
 })
 
+it('marks a saved rule whose details pulled while saving could not all be changed', async () => {
+  const detail = await buildMappingDetail('provider_mapping.update', {
+    ...mappingRuleParams,
+    previous_provider_id: 5,
+    previous_provider_name: 'alice',
+    apply_start_date: 20261101,
+    apply_end_date: 20261124,
+    applied_rows: 12,
+    sweep_failed: true,
+  })
+  expect(detail.fields).toEqual([
+    { label: 'Rule ID', value: 9 },
+    { label: 'Site ID', value: 3 },
+    { label: 'Site Name', value: 'Site A' },
+    { label: 'Rule Type', value: 'Specified channel' },
+    { label: 'Site Channel ID', value: 17 },
+    { label: 'Channel Name', value: 'gpt-dcmark-3-17' },
+    { label: 'Provider ID', value: 7 },
+    { label: 'Provider Name', value: 'bob' },
+    { label: 'Previous Provider ID', value: 5 },
+    { label: 'Previous Provider', value: 'alice' },
+    { label: 'Applied Bill Dates', value: '2026-11-01 ~ 2026-11-24' },
+    { label: 'Details Changed', value: 12 },
+    { label: 'Changes to details pulled while saving', value: 'Failed' },
+  ])
+})
+
+it('labels the bill dates of a failed save as requested, not applied', async () => {
+  const detail = await buildMappingDetail(
+    'provider_mapping.create',
+    {
+      ...mappingRuleParams,
+      apply_start_date: 20261101,
+      apply_end_date: 20261124,
+      failure_reason: 'site_rule_exists',
+    },
+    false
+  )
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: 'Requested Bill Dates', value: '2026-11-01 ~ 2026-11-24' },
+    ])
+  )
+  expect(detail.fields.map((field) => field.label)).not.toContain(
+    'Applied Bill Dates'
+  )
+})
+
 it('renders an updated site-level rule without a meaningless site channel', async () => {
   const detail = await buildMappingDetail('provider_mapping.update', {
     ...mappingRuleParams,

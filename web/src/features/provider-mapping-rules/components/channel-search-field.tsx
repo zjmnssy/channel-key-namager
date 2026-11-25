@@ -34,7 +34,11 @@ const SEARCH_DEBOUNCE_MS = 300
 type ChannelSearchFieldProps = {
   siteId: number
   value: string // remote channel ID, '' for none
-  onValueChange: (value: string) => void
+  // The chosen channel comes along so its name can be shown elsewhere.
+  onValueChange: (
+    value: string,
+    channel: ProviderMappingChannelOption | null
+  ) => void
   disabled?: boolean
   id?: string
   'aria-describedby'?: string
@@ -88,12 +92,11 @@ export function ChannelSearchField(props: ChannelSearchFieldProps) {
       options={options}
       value={props.value || null}
       onValueChange={(value) => {
-        setChosen(
-          channels.find(
-            (channel) => String(channel.remote_channel_id) === value
-          ) ?? null
-        )
-        props.onValueChange(value ?? '')
+        const channel =
+          channels.find((item) => String(item.remote_channel_id) === value) ??
+          null
+        setChosen(channel)
+        props.onValueChange(value ?? '', channel)
       }}
       onSearchChange={setTerm}
       filterOptions={false}

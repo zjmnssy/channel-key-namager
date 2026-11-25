@@ -106,6 +106,7 @@ export function MappingRuleTargetFields(props: MappingRuleTargetFieldsProps) {
                 field.onChange(next)
                 // A channel belongs to the site it was chosen from.
                 form.setValue('channelId', '')
+                form.setValue('channelName', '')
               }}
               items={siteItems}
               disabled={props.disabled}
@@ -180,7 +181,13 @@ export function MappingRuleTargetFields(props: MappingRuleTargetFieldsProps) {
                   siteId={Number(siteId)}
                   disabled={props.disabled || siteId === ''}
                   value={field.value}
-                  onValueChange={field.onChange}
+                  onValueChange={(value, channel) => {
+                    field.onChange(value)
+                    form.setValue(
+                      'channelName',
+                      channel?.remote_channel_name ?? ''
+                    )
+                  }}
                 />
               </FormControl>
               <FormDescription>

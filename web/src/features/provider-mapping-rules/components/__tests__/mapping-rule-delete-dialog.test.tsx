@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
@@ -48,7 +54,16 @@ const rule: ProviderMappingRule = {
 
 const clients: QueryClient[] = []
 
-async function renderDialog() {
+// Label and text of each entry the confirmation lists about the rule.
+function ruleSummaryOf(dialog: HTMLElement) {
+  return Object.fromEntries(
+    within(dialog)
+      .getAllByRole('term')
+      .map((term) => [term.textContent, term.nextElementSibling?.textContent])
+  )
+}
+
+async function renderDialog(currentRule: ProviderMappingRule = rule) {
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {}, initAsync: false })
   const client = new QueryClient({
@@ -60,7 +75,11 @@ async function renderDialog() {
   render(
     <I18nextProvider i18n={i18n}>
       <QueryClientProvider client={client}>
-        <MappingRuleDeleteDialog open onOpenChange={onOpenChange} rule={rule} />
+        <MappingRuleDeleteDialog
+          open
+          onOpenChange={onOpenChange}
+          rule={currentRule}
+        />
       </QueryClientProvider>
     </I18nextProvider>
   )
@@ -85,6 +104,43 @@ describe('MappingRuleDeleteDialog', () => {
     expect(dialog).toHaveTextContent(
       'The rule is no longer used from the next pull. Details already pulled stay unchanged.'
     )
+  })
+
+  it('names the site, type, channel and provider of a specified-channel rule', async () => {
+    await renderDialog()
+
+    const dialog = screen.getByRole('alertdialog', {
+      name: 'Delete Mapping Rule',
+    })
+    expect(ruleSummaryOf(dialog)).toEqual({
+      'Third-party site': 'Alpha',
+      'Rule Type': 'Specified channel',
+      'Site Channel': '18704 az-gpt-eastus2-22536',
+      Provider: 'alice',
+    })
+  })
+
+  it('names a site-level rule without a site channel and marks a provider that is no longer valid', async () => {
+    await renderDialog({
+      ...rule,
+      rule_type: 'all',
+      remote_channel_id: 0,
+      remote_channel_name: '',
+      provider_valid: false,
+    })
+
+    const dialog = screen.getByRole('alertdialog', {
+      name: 'Delete Mapping Rule',
+    })
+    expect(Object.keys(ruleSummaryOf(dialog))).toEqual([
+      'Third-party site',
+      'Rule Type',
+      'Provider',
+    ])
+    expect(ruleSummaryOf(dialog)['Rule Type']).toBe('All site channels')
+    const provider = within(dialog).getByText('Provider').nextElementSibling
+    expect(provider).toHaveTextContent('alice')
+    expect(provider).toHaveTextContent('No longer valid')
   })
 
   it('deletes the rule after confirming, then refreshes the lists and closes', async () => {
