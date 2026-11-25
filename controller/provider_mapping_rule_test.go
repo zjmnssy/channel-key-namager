@@ -575,3 +575,176 @@ func TestProviderMappingApplyAndPulls(t *testing.T) {
 		assert.EqualValues(t, 1, written)
 	})
 }
+
+// providerMappingSeedNamedUsage 写一行指定渠道名的明细。
+func providerMappingSeedNamedUsage(t *testing.T, db *gorm.DB, pull *model.PayablePullSite, channelID int, name string) {
+	t.Helper()
+	usage := providerMappingSeedUsage(t, db, pull, channelID, 0, model.PayableProviderUnknown, nil)
+	require.NoError(t, db.Model(usage).Update("remote_channel_name", name).Error)
+}
+
+func providerMappingRuleIDs(rows []model.PayableRuleRow) []int {
+	ids := make([]int, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.Id)
+	}
+	return ids
+}
+
+func TestProviderMappingRuleList(t *testing.T) {
+	db := setupPayableBillTest(t)
+	s1 := channelPushSeedSupplier(t, db, "pm-list-s1")
+	s2 := channelPushSeedSupplier(t, db, "pm-list-s2")
+	s3 := channelPushSeedSupplier(t, db, "pm-list-s3")
+	s4 := channelPushSeedSupplier(t, db, "pm-list-s4 用户名")
+	s5 := channelPushSeedSupplier(t, db, "pm-list-s5")
+	siteA := receivableSeedSite(t, db, "pm-list-a", "https://pm-list-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pm-list-b", "https://pm-list-b.example.com", 1)
+	require.NoError(t, db.Delete(siteB).Error)
+
+	rule1 := providerMappingSeedRule(t, db, siteA.Id, 5, s1.Id, "") // 旧行：rule_type 为空
+	rule2 := providerMappingSeedRule(t, db, siteA.Id, 0, s2.Id, model.PayableRuleUnresolved)
+	rule3 := providerMappingSeedRule(t, db, siteB.Id, 0, s3.Id, model.PayableRuleAll)
+	rule4 := providerMappingSeedRule(t, db, siteA.Id, 6, s4.Id, model.PayableRuleChannel)
+	rule5 := providerMappingSeedRule(t, db, siteA.Id, 7, s5.Id, model.PayableRuleChannel)
+	require.NoError(t, db.Model(s3).Update("role", common.RoleCommonUser).Error)
+	require.NoError(t, db.Delete(s4).Error)
+	require.NoError(t, db.Unscoped().Delete(s5).Error)
+
+	// 渠道 5 前后两天名称不同，渠道 6、7 没有明细
+	older := payableSeedPull(t, db, payableSeedTask(t, db, 20261030, model.PayableTaskSuccess), siteA.Id, model.PayablePullSuccess)
+	newer := payableSeedPull(t, db, payableSeedTask(t, db, 20261101, model.PayableTaskSuccess), siteA.Id, model.PayablePullSuccess)
+	providerMappingSeedNamedUsage(t, db, older, 5, "ch5-old")
+	providerMappingSeedNamedUsage(t, db, newer, 5, "ch5-new")
+
+	rows, total, err := model.ListPayableRules(model.PayableRuleFilter{}, 0, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 5, total)
+	assert.Equal(t, []int{rule5.Id, rule4.Id, rule3.Id, rule2.Id, rule1.Id}, providerMappingRuleIDs(rows))
+	byID := map[int]model.PayableRuleRow{}
+	for _, row := range rows {
+		byID[row.Id] = row
+	}
+	assert.Equal(t, model.PayableRuleRow{Id: rule1.Id, SiteId: siteA.Id, SiteName: siteA.Name, RuleType: model.PayableRuleChannel,
+		RemoteChannelId: 5, RemoteChannelName: "ch5-new", ProviderId: s1.Id, ProviderName: s1.Username, ProviderValid: true,
+		CreatedTime: 1, UpdatedTime: 1}, byID[rule1.Id])
+	assert.Equal(t, model.PayableRuleUnresolved, byID[rule2.Id].RuleType)
+	assert.True(t, byID[rule2.Id].ProviderValid)
+	assert.Equal(t, model.PayableRuleAll, byID[rule3.Id].RuleType)
+	assert.True(t, byID[rule3.Id].SiteDeleted)
+	assert.Equal(t, siteB.Name, byID[rule3.Id].SiteName)
+	assert.False(t, byID[rule3.Id].ProviderValid)
+	assert.Equal(t, s3.Username, byID[rule3.Id].ProviderName)
+	assert.False(t, byID[rule4.Id].SiteDeleted)
+	assert.False(t, byID[rule4.Id].ProviderValid)
+	assert.Equal(t, "pm-list-s4 用户名", byID[rule4.Id].ProviderName)
+	assert.Empty(t, byID[rule4.Id].RemoteChannelName)
+	assert.False(t, byID[rule5.Id].ProviderValid)
+	assert.Equal(t, "#"+strconv.Itoa(s5.Id), byID[rule5.Id].ProviderName)
+
+	// 筛选
+	for _, tc := range []struct {
+		name   string
+		filter model.PayableRuleFilter
+		ids    []int
+	}{
+		{"site", model.PayableRuleFilter{SiteIDs: []int{siteB.Id}}, []int{rule3.Id}},
+		{"provider", model.PayableRuleFilter{ProviderIDs: []int{s1.Id, s2.Id}}, []int{rule2.Id, rule1.Id}},
+		{"channel", model.PayableRuleFilter{Types: []string{model.PayableRuleChannel}}, []int{rule5.Id, rule4.Id, rule1.Id}},
+		{"all", model.PayableRuleFilter{Types: []string{model.PayableRuleAll}}, []int{rule3.Id}},
+		{"unresolved and all", model.PayableRuleFilter{Types: []string{model.PayableRuleUnresolved, model.PayableRuleAll}}, []int{rule3.Id, rule2.Id}},
+		{"combined", model.PayableRuleFilter{SiteIDs: []int{siteA.Id}, Types: []string{model.PayableRuleChannel}, ProviderIDs: []int{s4.Id}}, []int{rule4.Id}},
+	} {
+		rows, total, err := model.ListPayableRules(tc.filter, 0, 0)
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.ids, providerMappingRuleIDs(rows), tc.name)
+		assert.EqualValues(t, len(tc.ids), total, tc.name)
+	}
+
+	// 分页：总数不受分页影响
+	rows, total, err = model.ListPayableRules(model.PayableRuleFilter{}, 1, 2)
+	require.NoError(t, err)
+	assert.EqualValues(t, 5, total)
+	assert.Equal(t, []int{rule4.Id, rule3.Id}, providerMappingRuleIDs(rows))
+
+	// 单条读取
+	row, err := model.GetPayableRuleRow(rule1.Id)
+	require.NoError(t, err)
+	assert.Equal(t, byID[rule1.Id], row)
+	_, err = model.GetPayableRuleRow(rule5.Id + 100)
+	assert.ErrorIs(t, err, model.ErrPayableRuleNotFound)
+}
+
+func TestProviderMappingChannelSearch(t *testing.T) {
+	db := setupPayableBillTest(t)
+	supplier := channelPushSeedSupplier(t, db, "pm-search-s")
+	siteA := receivableSeedSite(t, db, "pm-search-a", "https://pm-search-a.example.com", 1)
+	siteB := receivableSeedSite(t, db, "pm-search-b", "https://pm-search-b.example.com", 1)
+	siteC := receivableSeedSite(t, db, "pm-search-c", "https://pm-search-c.example.com", 1)
+	siteD := receivableSeedSite(t, db, "pm-search-d", "https://pm-search-d.example.com", 1)
+	task1030 := payableSeedTask(t, db, 20261030, model.PayableTaskSuccess)
+	task1101 := payableSeedTask(t, db, 20261101, model.PayableTaskSuccess)
+	task1102 := payableSeedTask(t, db, 20261102, model.PayableTaskSuccess)
+	providerMappingSeedNamedUsage(t, db, payableSeedPull(t, db, task1030, siteA.Id, model.PayablePullSuccess), 99, "az-old")
+	pull := payableSeedPull(t, db, task1101, siteA.Id, model.PayablePullSuccess)
+	providerMappingSeedNamedUsage(t, db, pull, 10, "Az-GPT 甲")
+	providerMappingSeedNamedUsage(t, db, pull, 11, "az_gpt%1")
+	providerMappingSeedNamedUsage(t, db, pull, 12, "plain")
+	providerMappingSeedNamedUsage(t, db, payableSeedPull(t, db, task1102, siteA.Id, model.PayablePullFailed), 13, "az-only-failed")
+	providerMappingSeedNamedUsage(t, db, payableSeedPull(t, db, task1101, siteB.Id, model.PayablePullSuccess), 10, "other")
+	// 站点 D 只有失败的拉取；站点 C 从未拉取
+	providerMappingSeedNamedUsage(t, db, payableSeedPull(t, db, task1101, siteD.Id, model.PayablePullFailed), 30, "only-failed")
+	providerMappingSeedRule(t, db, siteA.Id, 10, supplier.Id, model.PayableRuleChannel)
+	providerMappingSeedRule(t, db, siteA.Id, 0, supplier.Id, model.PayableRuleAll)
+	providerMappingSeedRule(t, db, siteB.Id, 12, supplier.Id, model.PayableRuleChannel)
+
+	search := func(siteID int, keyword string, limit int) []int {
+		options, err := model.SearchPayableChannels(siteID, keyword, limit)
+		require.NoError(t, err, keyword)
+		ids := make([]int, 0, len(options))
+		for _, option := range options {
+			ids = append(ids, option.RemoteChannelId)
+		}
+		return ids
+	}
+	for _, tc := range []struct {
+		keyword string
+		ids     []int
+	}{
+		{"AZ-gpt", []int{10}},
+		{"az", []int{10, 11, 13}},
+		{"99", []int{99}},
+		{"10", []int{10}},
+		{"%", []int{11}},
+		{"_", []int{11}},
+		{"'", nil},
+		{"\"", nil},
+		{";--", nil},
+		{"甲", []int{10}},
+		{"  az  ", []int{10, 11, 13}},
+		{"", []int{10, 11, 12, 13}},
+	} {
+		assert.Equal(t, append([]int{}, tc.ids...), search(siteA.Id, tc.keyword, 20), "keyword %q", tc.keyword)
+	}
+	assert.Equal(t, []int{10, 11}, search(siteA.Id, "", 2))
+	assert.Equal(t, []int{10}, search(siteB.Id, "", 20))
+	assert.Equal(t, []int{30}, search(siteD.Id, "only", 20))
+	assert.Empty(t, search(siteC.Id, "", 20))
+	assert.Empty(t, search(siteC.Id, "az", 20))
+
+	// 渠道 ID 精确命中排最前，再接名称匹配；精确命中的名称取最近一天
+	providerMappingSeedNamedUsage(t, db, pull, 20, "has 12 inside")
+	assert.Equal(t, []int{12, 20}, search(siteA.Id, "12", 20))
+	options, err := model.SearchPayableChannels(siteA.Id, "99", 20)
+	require.NoError(t, err)
+	assert.Equal(t, []model.PayableChannelOption{{RemoteChannelId: 99, RemoteChannelName: "az-old"}}, options)
+
+	// HasRule：指定渠道规则才算，站点级规则与其他站点的规则不影响
+	options, err = model.SearchPayableChannels(siteA.Id, "", 20)
+	require.NoError(t, err)
+	hasRule := map[int]bool{}
+	for _, option := range options {
+		hasRule[option.RemoteChannelId] = option.HasRule
+	}
+	assert.Equal(t, map[int]bool{10: true, 11: false, 12: false, 13: false, 20: false}, hasRule)
+}

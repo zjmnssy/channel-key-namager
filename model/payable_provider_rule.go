@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -254,4 +256,247 @@ func applyPayableRule(tx *gorm.DB, rule PayableProviderOverride, supplier User, 
 		applied += result.RowsAffected
 	}
 	return applied, nil
+}
+
+// PayableRuleFilter 是规则列表的筛选条件，字段为空表示不筛选；Types 取 PayableRuleAll / PayableRuleUnresolved / PayableRuleChannel。
+type PayableRuleFilter struct {
+	SiteIDs, ProviderIDs []int
+	Types                []string
+}
+
+// PayableRuleRow 是规则列表的一行，附带站点、提供商与渠道名称。
+type PayableRuleRow struct {
+	Id                int    `json:"id"`
+	SiteId            int    `json:"site_id"`
+	SiteName          string `json:"site_name"`
+	SiteDeleted       bool   `json:"site_deleted"`
+	RuleType          string `json:"rule_type"`
+	RemoteChannelId   int    `json:"remote_channel_id"` // 0 = 站点级
+	RemoteChannelName string `json:"remote_channel_name"`
+	ProviderId        int    `json:"provider_id"`
+	ProviderName      string `json:"provider_name"` // 已硬删除的用户显示 "#<ID>"
+	ProviderValid     bool   `json:"provider_valid"`
+	CreatedTime       int64  `json:"created_time"`
+	UpdatedTime       int64  `json:"updated_time"`
+}
+
+// ListPayableRules 按 id 倒序返回满足 filter 的规则；total 不受分页影响，limit <= 0 时返回 offset 之后的全部。
+func ListPayableRules(filter PayableRuleFilter, offset, limit int) ([]PayableRuleRow, int64, error) {
+	query := DB.Model(&PayableProviderOverride{})
+	if len(filter.SiteIDs) > 0 {
+		query = query.Where("site_id IN ?", filter.SiteIDs)
+	}
+	if len(filter.ProviderIDs) > 0 {
+		query = query.Where("provider_id IN ?", filter.ProviderIDs)
+	}
+	if len(filter.Types) > 0 {
+		conditions := make([]string, 0, len(filter.Types))
+		args := make([]any, 0, len(filter.Types))
+		for _, ruleType := range filter.Types {
+			switch ruleType {
+			case PayableRuleChannel:
+				conditions = append(conditions, "remote_channel_id > 0")
+			case PayableRuleAll, PayableRuleUnresolved:
+				conditions = append(conditions, "(remote_channel_id = 0 AND rule_type = ?)")
+				args = append(args, ruleType)
+			}
+		}
+		if len(conditions) == 0 {
+			conditions = append(conditions, "1 = 0") // 全是未知类型：不匹配任何规则
+		}
+		query = query.Where("("+strings.Join(conditions, " OR ")+")", args...)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page := query.Order("id DESC")
+	if limit > 0 {
+		page = page.Limit(limit)
+	}
+	if offset > 0 {
+		page = page.Offset(offset)
+	}
+	var rules []PayableProviderOverride
+	if err := page.Find(&rules).Error; err != nil {
+		return nil, 0, err
+	}
+	rows, err := payableRuleRows(rules)
+	return rows, total, err
+}
+
+// GetPayableRuleRow 返回一条规则的列表行，规则不存在时返回 ErrPayableRuleNotFound。
+func GetPayableRuleRow(id int) (PayableRuleRow, error) {
+	var rule PayableProviderOverride
+	if err := DB.Where("id = ?", id).First(&rule).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return PayableRuleRow{}, ErrPayableRuleNotFound
+		}
+		return PayableRuleRow{}, err
+	}
+	rows, err := payableRuleRows([]PayableProviderOverride{rule})
+	if err != nil {
+		return PayableRuleRow{}, err
+	}
+	return rows[0], nil
+}
+
+// payableRuleRows 补全规则的站点、提供商与渠道名称，各用一次批量查询。站点、用户都包含已删除的：
+// 软删除的仍显示名称，站点不存在或用户已被硬删除时显示 "#<ID>"。
+func payableRuleRows(rules []PayableProviderOverride) ([]PayableRuleRow, error) {
+	rows := make([]PayableRuleRow, 0, len(rules))
+	if len(rules) == 0 {
+		return rows, nil
+	}
+	var siteIDs, providerIDs, channelIDs []int
+	for _, rule := range rules {
+		siteIDs = append(siteIDs, rule.SiteId)
+		providerIDs = append(providerIDs, rule.ProviderId)
+		if rule.RemoteChannelId > 0 {
+			channelIDs = append(channelIDs, rule.RemoteChannelId)
+		}
+	}
+	var sites []ThirdPartySite
+	if err := DB.Unscoped().Select("id", "name", "deleted_at").Where("id IN ?", siteIDs).Find(&sites).Error; err != nil {
+		return nil, err
+	}
+	siteByID := make(map[int]ThirdPartySite, len(sites))
+	for _, site := range sites {
+		siteByID[site.Id] = site
+	}
+	var users []User
+	if err := DB.Unscoped().Select("id", "username", "role", "deleted_at").Where("id IN ?", providerIDs).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	userByID := make(map[int]User, len(users))
+	for _, user := range users {
+		userByID[user.Id] = user
+	}
+	channelNames, err := latestPayableChannelNames(siteIDs, channelIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, rule := range rules {
+		row := PayableRuleRow{Id: rule.Id, SiteId: rule.SiteId, SiteName: "#" + strconv.Itoa(rule.SiteId), SiteDeleted: true,
+			RuleType: rule.Type(), RemoteChannelId: rule.RemoteChannelId, ProviderId: rule.ProviderId,
+			ProviderName: "#" + strconv.Itoa(rule.ProviderId), CreatedTime: rule.CreatedTime, UpdatedTime: rule.UpdatedTime}
+		if site, ok := siteByID[rule.SiteId]; ok {
+			row.SiteName, row.SiteDeleted = site.Name, site.DeletedAt.Valid
+		}
+		if user, ok := userByID[rule.ProviderId]; ok {
+			row.ProviderName = user.Username
+			row.ProviderValid = user.Role == common.RoleChannelSupplierUser && !user.DeletedAt.Valid
+		}
+		row.RemoteChannelName = channelNames[[2]int{rule.SiteId, rule.RemoteChannelId}]
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// latestPayableChannelNames 返回各 (站点, 站点渠道) 在最近一天明细里的渠道名称（同一天有多行时取 id 最大的），没有明细的键不在结果里。
+// 用派生表按 (站点, 渠道) 求出最近一天再连回明细，写法与 ResolvePayableProviders 的历史查询相同。
+func latestPayableChannelNames(siteIDs, channelIDs []int) (map[[2]int]string, error) {
+	names := map[[2]int]string{}
+	if len(siteIDs) == 0 || len(channelIDs) == 0 {
+		return names, nil
+	}
+	latestDays := DB.Model(&PayableChannelUsage{}).Select("site_id, remote_channel_id, MAX(bill_date) AS bill_date").
+		Where("site_id IN ? AND remote_channel_id IN ?", siteIDs, channelIDs).Group("site_id, remote_channel_id")
+	var usages []PayableChannelUsage
+	err := DB.Table("payable_channel_usages AS u").Select("u.id, u.site_id, u.remote_channel_id, u.remote_channel_name").
+		Joins("JOIN (?) AS latest ON latest.site_id = u.site_id AND latest.remote_channel_id = u.remote_channel_id AND latest.bill_date = u.bill_date", latestDays).
+		Where("u.site_id IN ? AND u.remote_channel_id IN ?", siteIDs, channelIDs).Order("u.id DESC").Scan(&usages).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, usage := range usages {
+		key := [2]int{usage.SiteId, usage.RemoteChannelId}
+		if _, ok := names[key]; !ok {
+			names[key] = usage.RemoteChannelName
+		}
+	}
+	return names, nil
+}
+
+// PayableChannelOption 是新建规则时可选的一个站点渠道。
+type PayableChannelOption struct {
+	RemoteChannelId   int    `json:"remote_channel_id"`
+	RemoteChannelName string `json:"remote_channel_name"`
+	HasRule           bool   `json:"has_rule"`
+}
+
+// payableChannelLikeEscaper 把关键字里的 LIKE 通配符转义，配合 ESCAPE '!'。
+var payableChannelLikeEscaper = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
+
+// SearchPayableChannels 在站点最近拉取过的渠道里按名称（不区分大小写的子串）搜索，按站点渠道 ID 升序最多返回 limit 个（<= 0 不限）。
+// “最近”指从该站点最近一次成功拉取的账单日起的全部进度（没有成功的拉取时从最近一次失败的起）；站点从未拉取过时返回空。
+// 关键字是正整数时，该渠道在站点的全部历史明细里按 ID 精确命中，排在最前（已被站点删除的渠道仍可建规则）。
+func SearchPayableChannels(siteID int, keyword string, limit int) ([]PayableChannelOption, error) {
+	options := []PayableChannelOption{}
+	keyword = strings.TrimSpace(keyword)
+	var since int
+	err := DB.Model(&PayablePullSite{}).Select("COALESCE(MAX(bill_date), 0)").
+		Where("site_id = ? AND status = ?", siteID, PayablePullSuccess).Scan(&since).Error
+	if err == nil && since == 0 {
+		err = DB.Model(&PayablePullSite{}).Select("COALESCE(MAX(bill_date), 0)").Where("site_id = ?", siteID).Scan(&since).Error
+	}
+	if err != nil {
+		return nil, err
+	}
+	if since == 0 {
+		return options, nil
+	}
+
+	var channelIDs []int
+	if exactID, parseErr := strconv.Atoi(keyword); parseErr == nil && exactID > 0 {
+		var pulled int64
+		if err := DB.Model(&PayableChannelUsage{}).Where("site_id = ? AND remote_channel_id = ?", siteID, exactID).Count(&pulled).Error; err != nil {
+			return nil, err
+		}
+		if pulled > 0 {
+			channelIDs = append(channelIDs, exactID)
+		}
+	}
+	pulls := DB.Model(&PayablePullSite{}).Select("id").Where("site_id = ? AND bill_date >= ?", siteID, since)
+	query := DB.Model(&PayableChannelUsage{}).Where("pull_site_id IN (?)", pulls)
+	if keyword != "" {
+		// 两边都转小写：MySQL 默认不区分大小写，PostgreSQL 的 LIKE 区分大小写
+		pattern := "%" + strings.ToLower(payableChannelLikeEscaper.Replace(keyword)) + "%"
+		query = query.Where("LOWER(remote_channel_name) LIKE ? ESCAPE '!'", pattern)
+	}
+	query = query.Group("remote_channel_id").Order("remote_channel_id")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var matched []int
+	if err := query.Pluck("remote_channel_id", &matched).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range matched {
+		if !slices.Contains(channelIDs, id) {
+			channelIDs = append(channelIDs, id)
+		}
+	}
+	if limit > 0 && len(channelIDs) > limit {
+		channelIDs = channelIDs[:limit]
+	}
+	if len(channelIDs) == 0 {
+		return options, nil
+	}
+
+	names, err := latestPayableChannelNames([]int{siteID}, channelIDs)
+	if err != nil {
+		return nil, err
+	}
+	var ruled []int
+	err = DB.Model(&PayableProviderOverride{}).Where("site_id = ? AND remote_channel_id IN ?", siteID, channelIDs).
+		Pluck("remote_channel_id", &ruled).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range channelIDs {
+		options = append(options, PayableChannelOption{RemoteChannelId: id, RemoteChannelName: names[[2]int{siteID, id}],
+			HasRule: slices.Contains(ruled, id)})
+	}
+	return options, nil
 }
