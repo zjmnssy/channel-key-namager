@@ -17,14 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import {
-  Activity,
   Box,
   ClipboardList,
   FileText,
   Globe,
   HandCoins,
-  Key,
-  LayoutDashboard,
   ListTodo,
   PlugZap,
   Radio,
@@ -36,7 +33,6 @@ import {
   ShieldCheck,
   User,
   Users,
-  Wallet,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -49,8 +45,9 @@ import { ROLE } from '@/lib/roles'
  * These are shown when the URL does not match any nested sidebar view
  * registered in `layout/lib/sidebar-view-registry.ts`.
  *
- * Playground, Chat, Redemption Codes, Subscriptions and Request processing
- * are intentionally left out of the menu for every role.
+ * Playground, Chat, Overview, Dashboard, API Keys, Wallet, Redemption Codes,
+ * Subscriptions and Request processing are intentionally left out of the menu
+ * for every role.
  */
 export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
   const { t } = useTranslation()
@@ -61,21 +58,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         id: 'general',
         title: t('General'),
         items: [
-          {
-            title: t('Overview'),
-            url: '/dashboard/overview',
-            icon: Activity,
-          },
-          {
-            title: t('Dashboard'),
-            url: '/dashboard/models',
-            icon: LayoutDashboard,
-          },
-          {
-            title: t('API Keys'),
-            url: '/keys',
-            icon: Key,
-          },
           {
             title: t('Usage Logs'),
             url: '/usage-logs/common',
@@ -99,11 +81,6 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         id: 'personal',
         title: t('Personal'),
         items: [
-          {
-            title: t('Wallet'),
-            url: '/wallet',
-            icon: Wallet,
-          },
           {
             title: t('Profile'),
             url: '/profile',

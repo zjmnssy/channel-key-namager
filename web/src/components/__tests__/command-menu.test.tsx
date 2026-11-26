@@ -44,6 +44,10 @@ const removedEntries = new Set([
   'Redemption Codes',
   'Subscriptions',
   'Request processing',
+  'Overview',
+  'Dashboard',
+  'API Keys',
+  'Wallet',
 ])
 
 // jsdom lacks the Web Animations API the menu's scroll area waits on.
@@ -110,9 +114,7 @@ async function searchEntriesFor(role: number, sidebarModulesAdmin = '') {
 test('regular users only find their own console pages in search', async () => {
   const entries = await searchEntriesFor(ROLE.USER)
 
-  expect(entries).toEqual(
-    expect.arrayContaining(['API Keys', 'Usage Logs', 'Wallet', 'Profile'])
-  )
+  expect(entries).toEqual(expect.arrayContaining(['Usage Logs', 'Profile']))
   for (const entry of [...adminEntries, ...superAdminEntries]) {
     expect(entries).not.toContain(entry)
   }
@@ -137,9 +139,9 @@ test('super admins find super admin pages but none of the removed menu entries',
 test('pages hidden in the sidebar settings stay out of search', async () => {
   const entries = await searchEntriesFor(
     ROLE.USER,
-    JSON.stringify({ personal: { enabled: true, topup: false } })
+    JSON.stringify({ console: { enabled: true, log: false } })
   )
 
-  expect(entries).not.toContain('Wallet')
+  expect(entries).not.toContain('Usage Logs')
   expect(entries).toContain('Profile')
 })
