@@ -1035,4 +1035,7 @@ export const STATIC_I18N_KEYS = [
   // Payable bill settlement method labels.
   'Channel details settlement',
   'Usage details settlement',
+  // Payable bill settlement method audit template and audit failure.
+  'Set the settlement method of provider #{{provider_id}}',
+  'Failed to set the settlement method',
 ] as const

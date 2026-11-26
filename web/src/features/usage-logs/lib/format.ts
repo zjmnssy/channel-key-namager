@@ -552,6 +552,8 @@ const AUDIT_TEMPLATES: Record<string, string> = {
     'Set the provider of channel usage #{{usage_id}}',
   'payable_bill.clear_provider':
     'Cleared the manual provider of channel usage #{{usage_id}}',
+  'payable_bill.set_settlement_method':
+    'Set the settlement method of provider #{{provider_id}}',
   // Provider mapping rules
   'provider_mapping.create': 'Created provider mapping rule #{{rule_id}}',
   'provider_mapping.update': 'Updated provider mapping rule #{{rule_id}}',
@@ -655,6 +657,12 @@ export function renderAuditContent(
     other?.audit_info?.success === false
   ) {
     return t('Failed to set the provider of channel usage')
+  }
+  if (
+    op.action === 'payable_bill.set_settlement_method' &&
+    other?.audit_info?.success === false
+  ) {
+    return t('Failed to set the settlement method')
   }
   if (
     op.action.startsWith('provider_mapping.') &&

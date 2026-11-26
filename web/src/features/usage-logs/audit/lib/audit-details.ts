@@ -18,6 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
 
+import {
+  SETTLEMENT_METHOD_LABEL_KEYS,
+  SETTLEMENT_METHODS,
+} from '@/features/payable-bills/constants'
 import { RULE_TYPE_LABEL_KEYS } from '@/features/provider-mapping-rules/constants'
 import type { ProviderMappingRuleType } from '@/features/provider-mapping-rules/types'
 import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
@@ -226,6 +230,10 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Previous Provider')
     case 'previous_discount':
       return t('Previous Payable Discount')
+    case 'settlement_method':
+      return t('Settlement Method')
+    case 'previous_settlement_method':
+      return t('Previous Settlement Method')
     case 'rule_id':
       return t('Rule ID')
     case 'rule_type':
@@ -641,6 +649,7 @@ export function buildAuditDetails(
       const reasons: Record<string, string> = {
         not_found: t('Channel usage does not exist'),
         invalid_provider: t('The selected user is not a channel supplier'),
+        invalid_method: t('Invalid parameters'),
         database_error: t('Database error, please contact the administrator'),
       }
       params.failure_reason =
@@ -649,10 +658,13 @@ export function buildAuditDetails(
     const clearing = action === 'payable_bill.clear_provider'
     // Clearing sends provider 0 to remove the site channel's manual setting.
     if (clearing) delete params.provider_id
+    // Only these actions change the provider of a channel usage row; setting
+    // a settlement method records a provider name too.
+    const changingProvider = clearing || action === 'payable_bill.set_provider'
     // The row's provider and discount are recorded once the change is saved.
     // An empty provider name is the unknown provider; a null discount was
     // never set.
-    if (typeof params.provider_name === 'string') {
+    if (changingProvider && typeof params.provider_name === 'string') {
       let change: string
       if (clearing) {
         // The row keeps its provider, so there is no previous and new one.
@@ -685,6 +697,14 @@ export function buildAuditDetails(
     }
     if (params.previous_discount === null) {
       params.previous_discount = t('Not set')
+    }
+    if (action === 'payable_bill.set_settlement_method') {
+      // A rejected request may carry a method that does not exist; it is
+      // shown as recorded.
+      for (const key of ['settlement_method', 'previous_settlement_method']) {
+        const method = SETTLEMENT_METHODS.find((item) => item === params[key])
+        if (method) params[key] = t(SETTLEMENT_METHOD_LABEL_KEYS[method])
+      }
     }
   }
   if (action.startsWith('provider_mapping.')) {

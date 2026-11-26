@@ -231,19 +231,33 @@ export function useChannelUsagesColumns(
               />
             )
           }
+          // A day settled by the site's daily bill is not counted however
+          // its pull went, so only that reason is shown.
+          let notCounted: ReactNode = null
+          if (usage.usage_settled) {
+            notCounted = (
+              <StatusBadge
+                label={t('Settled by usage details, not counted')}
+                variant='neutral'
+                copyable={false}
+              />
+            )
+          } else if (!usage.counted) {
+            notCounted = (
+              <StatusBadge
+                label={t('Site pull incomplete, not counted in the bill')}
+                variant='danger'
+                copyable={false}
+              />
+            )
+          }
           return (
             <div className='flex flex-wrap items-center gap-1.5'>
               <span className='tabular-nums'>
                 {usage.delta_amount ?? EMPTY}
               </span>
               {flag}
-              {!usage.counted && (
-                <StatusBadge
-                  label={t('Site pull incomplete, not counted in the bill')}
-                  variant='danger'
-                  copyable={false}
-                />
-              )}
+              {notCounted}
             </div>
           )
         },

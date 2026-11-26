@@ -41,7 +41,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { payableBillsSearchSchema } from '@/routes/_authenticated/payable-bills/index'
 
 import * as billApi from '../../api'
-import type { PayableProviderBill } from '../../types'
+import type {
+  ApiResponse,
+  PayableProviderBill,
+  PayableProviderBillPage,
+} from '../../types'
 import { ProviderBillsTable } from '../provider-bills-table'
 
 vi.mock('../../api')
@@ -50,6 +54,7 @@ const baseBill: PayableProviderBill = {
   bill_date: 20261123,
   provider_id: 5,
   provider_name: 'alice',
+  settlement_method: 'channel',
   amount: '123.456789',
   discount: 0.8,
   discount_mixed: false,
@@ -57,12 +62,49 @@ const baseBill: PayableProviderBill = {
   payable_amount: '98.765431',
 }
 
+// One provider-day settled both ways has a row for each settlement method.
+const usageBill: PayableProviderBill = {
+  ...baseBill,
+  settlement_method: 'usage',
+  amount: '207.779237',
+  payable_amount: '166.223390',
+}
+const channelBill: PayableProviderBill = {
+  ...baseBill,
+  amount: '12.345678',
+  payable_amount: '9.876542',
+}
+
 const INCOMPLETE_NOTICE =
   'In the selected dates, {{count}} site syncs did not succeed, so the bill may be incomplete'
 const MISMATCH_NOTICE =
   '{{count}} site(s) reported more channels than were pulled in the selected dates; the bills may be incomplete'
+const UNSYNCED_NOTICE =
+  'In the selected dates, {{count}} sites have daily bills that have not synced successfully; they are settled by channel details for now'
 
 const clients: QueryClient[] = []
+
+function providerBillPage(
+  bills: PayableProviderBill[],
+  counts: {
+    incompleteSiteCount?: number
+    mismatchSiteCount?: number
+    unsyncedUsageSiteCount?: number
+  } = {}
+): ApiResponse<PayableProviderBillPage> {
+  return {
+    success: true,
+    data: {
+      items: bills,
+      total: bills.length,
+      page: 1,
+      page_size: 10,
+      incomplete_site_count: counts.incompleteSiteCount ?? 0,
+      mismatch_site_count: counts.mismatchSiteCount ?? 0,
+      unsynced_usage_site_count: counts.unsyncedUsageSiteCount ?? 0,
+    },
+  }
+}
 
 async function renderBills(
   bills: PayableProviderBill[] = [baseBill],
@@ -70,19 +112,12 @@ async function renderBills(
     initialUrl?: string
     incompleteSiteCount?: number
     mismatchSiteCount?: number
+    unsyncedUsageSiteCount?: number
   } = {}
 ) {
-  vi.mocked(billApi.listPayableProviderBills).mockResolvedValue({
-    success: true,
-    data: {
-      items: bills,
-      total: bills.length,
-      page: 1,
-      page_size: 10,
-      incomplete_site_count: options.incompleteSiteCount ?? 0,
-      mismatch_site_count: options.mismatchSiteCount ?? 0,
-    },
-  })
+  vi.mocked(billApi.listPayableProviderBills).mockResolvedValue(
+    providerBillPage(bills, options)
+  )
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
     success: true,
     data: {
@@ -273,6 +308,56 @@ describe('ProviderBillsTable', () => {
     expect(await screen.findByText('Unknown provider')).toBeInTheDocument()
   })
 
+  it('shows the settlement method of each bill', async () => {
+    await renderBills([usageBill, channelBill])
+    await screen.findByText('207.779237')
+
+    expect(
+      screen.getAllByRole('columnheader').map((header) => header.textContent)
+    ).toEqual([
+      'Bill Date',
+      'Provider',
+      'Settlement Method',
+      'Amount Before Discount ($)',
+      'Discount (Payable)',
+      'Payable Amount ($)',
+    ])
+    expect(
+      within(screen.getByRole('row', { name: /207\.779237/ })).getByText(
+        'Usage details settlement'
+      )
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('row', { name: /12\.345678/ })).getByText(
+        'Channel details settlement'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('keeps exactly the two bills of a provider-day settled both ways when the list changes', async () => {
+    await renderBills([
+      { ...baseBill, provider_id: 4, provider_name: 'carol' },
+      usageBill,
+      channelBill,
+    ])
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    await screen.findByText('carol')
+    vi.mocked(billApi.listPayableProviderBills).mockResolvedValue(
+      providerBillPage([usageBill, channelBill])
+    )
+
+    await user.click(screen.getByRole('button', { name: /^Provider/ }))
+    await user.click(await screen.findByRole('option', { name: /alice/ }))
+    await waitFor(() =>
+      expect(screen.queryByText('carol')).not.toBeInTheDocument()
+    )
+
+    // The header row and the two bills, with no row left over from before.
+    expect(screen.getAllByRole('row')).toHaveLength(3)
+    expect(screen.getAllByText('Usage details settlement')).toHaveLength(1)
+    expect(screen.getAllByText('Channel details settlement')).toHaveLength(1)
+  })
+
   it('shows the incomplete-sites notice when some pulls did not finish', async () => {
     await renderBills([baseBill], { incompleteSiteCount: 2 })
 
@@ -300,6 +385,7 @@ describe('ProviderBillsTable', () => {
     await renderBills([baseBill], {
       incompleteSiteCount: 2,
       mismatchSiteCount: 1,
+      unsyncedUsageSiteCount: 0,
     })
     await screen.findByText('alice')
 
@@ -311,6 +397,13 @@ describe('ProviderBillsTable', () => {
     expect(notices[1]).toHaveTextContent(
       MISMATCH_NOTICE.replace('{{count}}', '1')
     )
+  })
+
+  it('shows the unsynced daily bills notice when whole sites are settled by channel details for now', async () => {
+    await renderBills([baseBill], { unsyncedUsageSiteCount: 2 })
+
+    const notice = await screen.findByRole('alert')
+    expect(notice).toHaveTextContent(UNSYNCED_NOTICE.replace('{{count}}', '2'))
   })
 
   it('shows an em dash for the discount of a bill without consumption', async () => {

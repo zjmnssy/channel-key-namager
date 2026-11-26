@@ -60,6 +60,7 @@ const usage: PayableUsage = {
   updated_time: 1763914205,
   counted: true,
   manual: false,
+  usage_settled: false,
   delta_amount: null,
   used_amount: '10.000000',
 }

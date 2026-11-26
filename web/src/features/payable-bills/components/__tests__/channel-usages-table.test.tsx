@@ -72,6 +72,7 @@ const baseUsage: PayableUsage = {
   updated_time: 1763914205,
   counted: true,
   manual: false,
+  usage_settled: false,
   delta_amount: '12.345678',
   used_amount: '456.789000',
 }
@@ -340,6 +341,36 @@ describe('ChannelUsagesTable', () => {
         'Site pull incomplete, not counted in the bill'
       )
     ).toBeInTheDocument()
+  })
+
+  it('marks a row settled by usage details as not counted', async () => {
+    await renderUsages([{ ...baseUsage, usage_settled: true, counted: true }])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    const row = usageRow('gpt-dcmark-3-17')
+    const delta = cellUnder(row, 'Daily Amount Before Discount ($)')
+    expect(within(delta).getByText('12.345678')).toBeInTheDocument()
+    expect(
+      within(delta).getByText('Settled by usage details, not counted')
+    ).toBeInTheDocument()
+    expect(
+      within(row).queryByText('Site pull incomplete, not counted in the bill')
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows only the usage settlement mark when the pull was also incomplete', async () => {
+    await renderUsages([{ ...baseUsage, usage_settled: true, counted: false }])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    const row = usageRow('gpt-dcmark-3-17')
+    expect(
+      within(cellUnder(row, 'Daily Amount Before Discount ($)')).getByText(
+        'Settled by usage details, not counted'
+      )
+    ).toBeInTheDocument()
+    expect(
+      within(row).queryByText('Site pull incomplete, not counted in the bill')
+    ).not.toBeInTheDocument()
   })
 
   it('labels the amount of a new channel', async () => {
