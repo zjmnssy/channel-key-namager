@@ -53,6 +53,10 @@ type LegacyComboboxProps = {
   popupClassName?: string
   id?: string
   openOnFocus?: boolean
+  // Called with the typed text while searching, and with '' once the popup closes.
+  onSearchChange?: (term: string) => void
+  // When false, options are shown as given (for remote search by the caller).
+  filterOptions?: boolean
   disabled?: boolean
   name?: string
   onBlur?: React.FocusEventHandler<HTMLInputElement>
@@ -114,16 +118,20 @@ function OptionCombobox(props: LegacyComboboxProps) {
       open={open && !props.disabled}
       inputValue={open ? search : displayedValue}
       onInputValueChange={(value, details) => {
-        if (details.reason === 'input-change') setSearch(value)
+        if (details.reason !== 'input-change') return
+        setSearch(value)
+        props.onSearchChange?.(value)
       }}
       onOpenChange={(nextOpen, details) => {
         setOpen(nextOpen)
         if (details.reason !== 'input-change') setSearch('')
+        if (!nextOpen) props.onSearchChange?.('')
       }}
       onValueChange={(option) => {
         if (option) props.onValueChange?.(option.value)
       }}
       filter={(option, query) => {
+        if (props.filterOptions === false) return true
         const term = query.trim().toLowerCase()
         return (
           option.label.toLowerCase().includes(term) ||

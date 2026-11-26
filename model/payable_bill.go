@@ -33,6 +33,14 @@ const (
 	PayableProviderParsed    = "parsed"
 	PayableProviderInherited = "inherited"
 	PayableProviderUnknown   = "unknown"
+	// 站点级规则确定的提供商，不参与历史沿用
+	PayableProviderRuleAll        = "rule_all"
+	PayableProviderRuleUnresolved = "rule_unresolved"
+
+	// 映射规则类型（payable_provider_overrides.rule_type）
+	PayableRuleAll        = "all"
+	PayableRuleUnresolved = "unresolved"
+	PayableRuleChannel    = "channel"
 
 	PayablePullLeaseSeconds int64 = 300
 )
@@ -107,14 +115,24 @@ type PayableChannelUsage struct {
 	UpdatedTime       int64    `json:"updated_time"`
 }
 
-// PayableProviderOverride 是手动指定的 (站点, 远端渠道) 到提供商的对应。
+// PayableProviderOverride 是一条提供商映射规则：一行一条规则。
+// remote_channel_id = 0 表示站点级规则（rule_type 为 all 或 unresolved），大于 0 表示指定渠道。
 type PayableProviderOverride struct {
-	Id              int   `json:"id" gorm:"primaryKey"`
-	SiteId          int   `json:"site_id" gorm:"not null;uniqueIndex:idx_payable_overrides_site_channel,priority:1"`
-	RemoteChannelId int   `json:"remote_channel_id" gorm:"not null;uniqueIndex:idx_payable_overrides_site_channel,priority:2"`
-	ProviderId      int   `json:"provider_id" gorm:"not null"`
-	CreatedTime     int64 `json:"created_time"`
-	UpdatedTime     int64 `json:"updated_time"`
+	Id              int    `json:"id" gorm:"primaryKey"`
+	SiteId          int    `json:"site_id" gorm:"not null;uniqueIndex:idx_payable_overrides_site_channel,priority:1"`
+	RemoteChannelId int    `json:"remote_channel_id" gorm:"not null;uniqueIndex:idx_payable_overrides_site_channel,priority:2"`
+	ProviderId      int    `json:"provider_id" gorm:"not null"`
+	RuleType        string `json:"rule_type" gorm:"size:16"`
+	CreatedTime     int64  `json:"created_time"`
+	UpdatedTime     int64  `json:"updated_time"`
+}
+
+// Type 返回规则类型。升级前的行 rule_type 为空，按渠道 ID 判断：渠道 ID 大于 0 的是指定渠道规则。
+func (o PayableProviderOverride) Type() string {
+	if o.RemoteChannelId > 0 {
+		return PayableRuleChannel
+	}
+	return o.RuleType
 }
 
 // CreatePayablePullTask 在一个事务里创建 billDate 的拉取任务和各站点进度，

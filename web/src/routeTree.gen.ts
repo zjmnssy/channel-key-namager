@@ -46,6 +46,7 @@ import { Route as AuthenticatedModelsSectionRouteImport } from './routes/_authen
 import { Route as AuthenticatedPayableBillsIndexRouteImport } from './routes/_authenticated/payable-bills/index'
 import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
 import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
+import { Route as AuthenticatedProviderMappingRulesIndexRouteImport } from './routes/_authenticated/provider-mapping-rules/index'
 import { Route as AuthenticatedReceivableBillsIndexRouteImport } from './routes/_authenticated/receivable-bills/index'
 import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
 import { Route as AuthenticatedRequestProcessingIndexRouteImport } from './routes/_authenticated/request-processing/index'
@@ -271,6 +272,12 @@ const AuthenticatedProfileIndexRoute =
   AuthenticatedProfileIndexRouteImport.update({
     id: '/profile/',
     path: '/profile/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedProviderMappingRulesIndexRoute =
+  AuthenticatedProviderMappingRulesIndexRouteImport.update({
+    id: '/provider-mapping-rules/',
+    path: '/provider-mapping-rules/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedReceivableBillsIndexRoute =
@@ -502,6 +509,7 @@ export interface FileRoutesByFullPath {
   '/payable-bills/': typeof AuthenticatedPayableBillsIndexRoute
   '/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/profile/': typeof AuthenticatedProfileIndexRoute
+  '/provider-mapping-rules/': typeof AuthenticatedProviderMappingRulesIndexRoute
   '/receivable-bills/': typeof AuthenticatedReceivableBillsIndexRoute
   '/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
   '/request-processing/': typeof AuthenticatedRequestProcessingIndexRoute
@@ -570,6 +578,7 @@ export interface FileRoutesByTo {
   '/payable-bills': typeof AuthenticatedPayableBillsIndexRoute
   '/playground': typeof AuthenticatedPlaygroundIndexRoute
   '/profile': typeof AuthenticatedProfileIndexRoute
+  '/provider-mapping-rules': typeof AuthenticatedProviderMappingRulesIndexRoute
   '/receivable-bills': typeof AuthenticatedReceivableBillsIndexRoute
   '/redemption-codes': typeof AuthenticatedRedemptionCodesIndexRoute
   '/request-processing': typeof AuthenticatedRequestProcessingIndexRoute
@@ -642,6 +651,7 @@ export interface FileRoutesById {
   '/_authenticated/payable-bills/': typeof AuthenticatedPayableBillsIndexRoute
   '/_authenticated/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
+  '/_authenticated/provider-mapping-rules/': typeof AuthenticatedProviderMappingRulesIndexRoute
   '/_authenticated/receivable-bills/': typeof AuthenticatedReceivableBillsIndexRoute
   '/_authenticated/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
   '/_authenticated/request-processing/': typeof AuthenticatedRequestProcessingIndexRoute
@@ -713,6 +723,7 @@ export interface FileRouteTypes {
     | '/payable-bills/'
     | '/playground/'
     | '/profile/'
+    | '/provider-mapping-rules/'
     | '/receivable-bills/'
     | '/redemption-codes/'
     | '/request-processing/'
@@ -781,6 +792,7 @@ export interface FileRouteTypes {
     | '/payable-bills'
     | '/playground'
     | '/profile'
+    | '/provider-mapping-rules'
     | '/receivable-bills'
     | '/redemption-codes'
     | '/request-processing'
@@ -852,6 +864,7 @@ export interface FileRouteTypes {
     | '/_authenticated/payable-bills/'
     | '/_authenticated/playground/'
     | '/_authenticated/profile/'
+    | '/_authenticated/provider-mapping-rules/'
     | '/_authenticated/receivable-bills/'
     | '/_authenticated/redemption-codes/'
     | '/_authenticated/request-processing/'
@@ -1162,6 +1175,13 @@ declare module '@tanstack/react-router' {
       path: '/profile'
       fullPath: '/profile/'
       preLoaderRoute: typeof AuthenticatedProfileIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/provider-mapping-rules/': {
+      id: '/_authenticated/provider-mapping-rules/'
+      path: '/provider-mapping-rules'
+      fullPath: '/provider-mapping-rules/'
+      preLoaderRoute: typeof AuthenticatedProviderMappingRulesIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/receivable-bills/': {
@@ -1497,6 +1517,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedPayableBillsIndexRoute: typeof AuthenticatedPayableBillsIndexRoute
   AuthenticatedPlaygroundIndexRoute: typeof AuthenticatedPlaygroundIndexRoute
   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
+  AuthenticatedProviderMappingRulesIndexRoute: typeof AuthenticatedProviderMappingRulesIndexRoute
   AuthenticatedReceivableBillsIndexRoute: typeof AuthenticatedReceivableBillsIndexRoute
   AuthenticatedRedemptionCodesIndexRoute: typeof AuthenticatedRedemptionCodesIndexRoute
   AuthenticatedRequestProcessingIndexRoute: typeof AuthenticatedRequestProcessingIndexRoute
@@ -1529,6 +1550,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedPayableBillsIndexRoute: AuthenticatedPayableBillsIndexRoute,
   AuthenticatedPlaygroundIndexRoute: AuthenticatedPlaygroundIndexRoute,
   AuthenticatedProfileIndexRoute: AuthenticatedProfileIndexRoute,
+  AuthenticatedProviderMappingRulesIndexRoute:
+    AuthenticatedProviderMappingRulesIndexRoute,
   AuthenticatedReceivableBillsIndexRoute:
     AuthenticatedReceivableBillsIndexRoute,
   AuthenticatedRedemptionCodesIndexRoute:

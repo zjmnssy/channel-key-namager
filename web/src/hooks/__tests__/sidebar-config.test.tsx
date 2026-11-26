@@ -433,6 +433,7 @@ describe('Admin group visibility by role', () => {
       'Channel Push',
       'Receivable Bills',
       'Payable Bills',
+      'Provider Channel Mapping Rules',
       'Models',
       'Users',
       'System Info',

@@ -18,6 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
 
+import { RULE_TYPE_LABEL_KEYS } from '@/features/provider-mapping-rules/constants'
+import type { ProviderMappingRuleType } from '@/features/provider-mapping-rules/types'
+import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
 import { loginMethodLabel } from '@/features/security/components/login-session-utils'
 import type { PermissionResourceDef } from '@/lib/admin-permissions'
 import dayjs from '@/lib/dayjs'
@@ -217,10 +220,24 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Channel Name')
     case 'previous_provider_id':
       return t('Previous Provider ID')
+    case 'provider_name':
+      return t('Provider Name')
     case 'previous_provider_name':
       return t('Previous Provider')
     case 'previous_discount':
       return t('Previous Payable Discount')
+    case 'rule_id':
+      return t('Rule ID')
+    case 'rule_type':
+      return t('Rule Type')
+    case 'applied_bill_dates':
+      return t('Applied Bill Dates')
+    case 'requested_bill_dates':
+      return t('Requested Bill Dates')
+    case 'applied_rows':
+      return t('Details Changed')
+    case 'sweep_result':
+      return t('Changes to details pulled while saving')
     default:
       return key
   }
@@ -669,6 +686,51 @@ export function buildAuditDetails(
     if (params.previous_discount === null) {
       params.previous_discount = t('Not set')
     }
+  }
+  if (action.startsWith('provider_mapping.')) {
+    if (typeof params.failure_reason === 'string') {
+      const reasons: Record<string, string> = {
+        site_not_found: t('Site does not exist'),
+        invalid_provider: t('The selected user is not a channel supplier'),
+        rule_not_found: t('Mapping rule does not exist'),
+        site_rule_exists: t('This site already has a site-level mapping rule'),
+        channel_rule_exists: t('This site channel already has a mapping rule'),
+        channel_not_pulled: t('This site channel has not been pulled yet'),
+        database_error: t('Database error, please contact the administrator'),
+      }
+      params.failure_reason =
+        reasons[params.failure_reason] ?? params.failure_reason
+    }
+    const ruleType = params.rule_type
+    if (typeof ruleType === 'string' && ruleType in RULE_TYPE_LABEL_KEYS) {
+      params.rule_type = t(
+        RULE_TYPE_LABEL_KEYS[ruleType as ProviderMappingRuleType]
+      )
+    }
+    // Site-level rules carry no site channel, so it has nothing to show.
+    if (ruleType !== 'channel') {
+      delete params.remote_channel_id
+      delete params.remote_channel_name
+    }
+    const start = params.apply_start_date
+    const end = params.apply_end_date
+    if (typeof start === 'number' && typeof end === 'number') {
+      const appliedRows = params.applied_rows
+      delete params.apply_start_date
+      delete params.apply_end_date
+      delete params.applied_rows
+      // A failed save changed nothing: its dates were only asked for.
+      const datesKey = entry.success
+        ? 'applied_bill_dates'
+        : 'requested_bill_dates'
+      params[datesKey] = `${formatBillDate(start)} ~ ${formatBillDate(end)}`
+      // Keep the dates before the number of details changed in them.
+      if (appliedRows !== undefined) params.applied_rows = appliedRows
+    }
+    // Only a failed change of the details pulled while saving is recorded.
+    const sweepFailed = params.sweep_failed === true
+    delete params.sweep_failed
+    if (sweepFailed) params.sweep_result = t('Failed')
   }
   if (
     action === 'channel.status_update_batch' &&

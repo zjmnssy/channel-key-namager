@@ -1015,4 +1015,21 @@ export const STATIC_I18N_KEYS = [
   // Payable bill errors of setting the provider of a channel usage.
   'Channel usage does not exist',
   'The selected user is not a channel supplier',
+  // Provider mapping rule types, audit templates, audit failures and errors.
+  'All site channels',
+  'Unresolved channels',
+  'Specified channel',
+  'Created provider mapping rule #{{rule_id}}',
+  'Updated provider mapping rule #{{rule_id}}',
+  'Deleted provider mapping rule #{{rule_id}}',
+  'Failed to change the provider mapping rule',
+  'Mapping rule does not exist',
+  'This site already has a site-level mapping rule',
+  'This site channel already has a mapping rule',
+  'This site channel has not been pulled yet',
+  // Provider mapping rule form validation.
+  'Provider is required',
+  'Site channel is required',
+  'Start date must not be after end date',
+  'Date range cannot exceed 92 days',
 ] as const

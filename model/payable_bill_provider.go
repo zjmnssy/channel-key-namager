@@ -49,8 +49,12 @@ func payableSuppliersIn(db *gorm.DB, userIDs []int) (map[int]User, error) {
 	return suppliers, nil
 }
 
-// ResolvePayableProviders 按手动指定、渠道名标记、历史明细的顺序确定站点渠道的提供商，结果以站点渠道 ID 为键，
-// 没有确定出的渠道为未知（ID 0）。每一步都批量查询。手动指定、标记、历史里的用户都必须仍是供应商。
+// payableNonInheritableSources 是不沿用的来源：手动设置和站点级规则确定的行都不能成为下一天沿用的依据。
+var payableNonInheritableSources = []string{PayableProviderManual, PayableProviderRuleAll, PayableProviderRuleUnresolved}
+
+// ResolvePayableProviders 按指定渠道规则、站点级“全部渠道”规则、渠道名标记、历史明细、站点级“不能解析”规则的顺序
+// 确定站点渠道的提供商，结果以站点渠道 ID 为键，没有确定出的渠道为未知（ID 0）。每一步都批量查询。
+// 各级里的用户都必须仍是供应商；规则的提供商不再是供应商时跳过该规则，往下一级走。
 func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChannel) (map[int]PayableProvider, error) {
 	remoteIDs := make([]int, 0, len(channels))
 	for _, channel := range channels {
@@ -60,16 +64,22 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 		return map[int]PayableProvider{}, nil
 	}
 
+	// 指定渠道规则与站点级规则（remote_channel_id = 0）一次查出
 	var overrides []PayableProviderOverride
-	if err := DB.Select("remote_channel_id", "provider_id").
-		Where("site_id = ? AND remote_channel_id IN ?", siteID, remoteIDs).Find(&overrides).Error; err != nil {
+	if err := DB.Select("remote_channel_id", "provider_id", "rule_type").
+		Where("site_id = ? AND remote_channel_id IN ?", siteID, append([]int{0}, remoteIDs...)).Find(&overrides).Error; err != nil {
 		return nil, err
 	}
 	manual := make(map[int]int, len(overrides))
+	siteRuleType, siteRuleProvider := "", 0
 	candidates := map[int]bool{}
 	for _, override := range overrides {
-		manual[override.RemoteChannelId] = override.ProviderId
 		candidates[override.ProviderId] = true
+		if override.RemoteChannelId == 0 {
+			siteRuleType, siteRuleProvider = override.Type(), override.ProviderId
+			continue
+		}
+		manual[override.RemoteChannelId] = override.ProviderId
 	}
 
 	localIDs := make([]int, 0, len(channels))
@@ -99,12 +109,18 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 		return nil, err
 	}
 
-	// 历史只查前两步没确定的渠道，且每个渠道只取 bill_date 更早、provider_id > 0、来源不是手动的最近一天的行
+	ruleAll := siteRuleType == PayableRuleAll && hasSupplier(suppliers, siteRuleProvider)
+	ruleUnresolved := siteRuleType == PayableRuleUnresolved && hasSupplier(suppliers, siteRuleProvider)
+
+	// 历史只查前几级没确定的渠道，且每个渠道只取 bill_date 更早、provider_id > 0、来源不是手动或规则的最近一天的行
 	// （同一天有多行时取 id 最大的）；该用户已不是供应商时结果为未知，不再往更早找。
-	// 手动设置的行不沿用：清除手动设置后，下一次同步要按标记与历史重新确定，不能又从手动设置留下的行沿用回来。
+	// 手动设置与规则的行不沿用：清除手动设置或规则后，下一次同步要按标记与历史重新确定，不能又从它们留下的行沿用回来。
 	// 用派生表按渠道求出那一天再连回明细，不用逐行的关联子查询，数据多时 MySQL 也能走 (site_id, remote_channel_id, bill_date) 索引。
 	unresolved := make([]int, 0, len(channels))
 	for _, channel := range channels {
+		if ruleAll {
+			break // 站点有有效的“全部渠道”规则：没有指定渠道规则的渠道都归规则，不查历史
+		}
 		if id, ok := manual[channel.ID]; ok && hasSupplier(suppliers, id) {
 			continue
 		}
@@ -117,12 +133,12 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 	if len(unresolved) > 0 {
 		var history []PayableChannelUsage
 		latestDays := DB.Model(&PayableChannelUsage{}).Select("remote_channel_id, MAX(bill_date) AS bill_date").
-			Where("site_id = ? AND remote_channel_id IN ? AND bill_date < ? AND provider_id > 0 AND provider_source <> ?",
-				siteID, unresolved, billDate, PayableProviderManual).
+			Where("site_id = ? AND remote_channel_id IN ? AND bill_date < ? AND provider_id > 0 AND provider_source NOT IN ?",
+				siteID, unresolved, billDate, payableNonInheritableSources).
 			Group("remote_channel_id")
 		err := DB.Table("payable_channel_usages AS u").Select("u.id, u.remote_channel_id, u.provider_id").
 			Joins("JOIN (?) AS latest ON latest.remote_channel_id = u.remote_channel_id AND latest.bill_date = u.bill_date", latestDays).
-			Where("u.site_id = ? AND u.provider_id > 0 AND u.provider_source <> ?", siteID, PayableProviderManual).
+			Where("u.site_id = ? AND u.provider_id > 0 AND u.provider_source NOT IN ?", siteID, payableNonInheritableSources).
 			Order("u.id DESC").Scan(&history).Error
 		if err != nil {
 			return nil, err
@@ -148,10 +164,14 @@ func ResolvePayableProviders(siteID, billDate int, channels []PayableRemoteChann
 		provider := PayableProvider{Source: PayableProviderUnknown}
 		if id, ok := manual[channel.ID]; ok && hasSupplier(suppliers, id) {
 			provider = payableProviderOf(suppliers[id], PayableProviderManual)
+		} else if ruleAll {
+			provider = payableProviderOf(suppliers[siteRuleProvider], PayableProviderRuleAll)
 		} else if id, ok := creators[channel.LocalChannelID]; ok && channel.LocalChannelID > 0 && hasSupplier(suppliers, id) {
 			provider = payableProviderOf(suppliers[id], PayableProviderParsed)
 		} else if id, ok := inherited[channel.ID]; ok && hasSupplier(suppliers, id) {
 			provider = payableProviderOf(suppliers[id], PayableProviderInherited)
+		} else if ruleUnresolved {
+			provider = payableProviderOf(suppliers[siteRuleProvider], PayableProviderRuleUnresolved)
 		}
 		resolved[channel.ID] = provider
 	}
@@ -193,10 +213,10 @@ func SetPayableUsageProvider(usageID, providerID int, now int64) (before Payable
 			return ErrPayableProviderInvalid
 		}
 		override := PayableProviderOverride{SiteId: before.SiteId, RemoteChannelId: before.RemoteChannelId,
-			ProviderId: providerID, CreatedTime: now, UpdatedTime: now}
+			ProviderId: providerID, RuleType: PayableRuleChannel, CreatedTime: now, UpdatedTime: now}
 		err = tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "site_id"}, {Name: "remote_channel_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"provider_id", "updated_time"}),
+			DoUpdates: clause.AssignmentColumns([]string{"provider_id", "rule_type", "updated_time"}),
 		}).Create(&override).Error
 		if err != nil {
 			return err

@@ -189,6 +189,12 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/payable_bill/providers/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/options", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/payable_bill/usages/1/provider", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/provider_mapping_rule/", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPost, path: "/api/provider_mapping_rule/", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPut, path: "/api/provider_mapping_rule/1", supplierStatus: http.StatusForbidden},
+		{method: http.MethodDelete, path: "/api/provider_mapping_rule/1", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/provider_mapping_rule/preview", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/provider_mapping_rule/channels", supplierStatus: http.StatusForbidden},
 	}
 	for _, route := range channelPermissionRoutes {
 		if route.adminOnly {
@@ -219,7 +225,9 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/push/channel/sites/site/groups": true,
 		"GET /api/push/channel/options":           true,
 	}
-	// Receivable and payable bills are for root users only: an administrator is refused too.
+	// Receivable and payable bills and provider mapping rules are for root users
+	// only: an administrator is refused too. The rule writes send no body, or a
+	// rule that does not exist, so the handlers refuse them and change no data.
 	rootRoutes := map[string]bool{
 		"GET /api/receivable_bill/daily?start_date=20261101&end_date=20261123":         true,
 		"GET /api/receivable_bill/daily/export?start_date=20261101&end_date=20261123":  true,
@@ -234,6 +242,12 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/payable_bill/providers/export?start_date=20261101&end_date=20261123": true,
 		"GET /api/payable_bill/options":                                                true,
 		"PUT /api/payable_bill/usages/1/provider":                                      true,
+		"GET /api/provider_mapping_rule/":                                              true,
+		"POST /api/provider_mapping_rule/":                                             true,
+		"PUT /api/provider_mapping_rule/1":                                             true,
+		"DELETE /api/provider_mapping_rule/1":                                          true,
+		"GET /api/provider_mapping_rule/preview":                                       true,
+		"GET /api/provider_mapping_rule/channels":                                      true,
 	}
 	for _, test := range tests {
 		key := test.method + " " + test.path
@@ -279,6 +293,15 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 	actions = nil
 	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "receivable_bill.%").Order("id").Pluck("action", &actions).Error)
 	assert.Equal(t, []string{"receivable_bill.sync"}, actions)
+	// The handler audits the root user's delete of a missing rule once; the
+	// rule writes refused for their parameters are left to the fallback audit.
+	actions = nil
+	require.NoError(t, db.Model(&model.AuditLog{}).Where("action LIKE ?", "provider_mapping.%").Order("id").Pluck("action", &actions).Error)
+	assert.Equal(t, []string{"provider_mapping.delete"}, actions)
+	var routes []string
+	require.NoError(t, db.Model(&model.AuditLog{}).Where("action = ? AND route LIKE ?", "generic", "/api/provider_mapping_rule/%").
+		Order("id").Pluck("route", &routes).Error)
+	assert.Equal(t, []string{"/api/provider_mapping_rule/", "/api/provider_mapping_rule/:id"}, routes)
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {

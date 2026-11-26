@@ -270,6 +270,14 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/payable_bill/options":             accessTokenSessionRule,
 	"PUT /api/payable_bill/usages/:id/provider": accessTokenSessionRule,
 
+	// router/api-router.go: /api/provider_mapping_rule
+	"GET /api/provider_mapping_rule/":         accessTokenSessionRule,
+	"POST /api/provider_mapping_rule/":        accessTokenSessionRule,
+	"PUT /api/provider_mapping_rule/:id":      accessTokenSessionRule,
+	"DELETE /api/provider_mapping_rule/:id":   accessTokenSessionRule,
+	"GET /api/provider_mapping_rule/preview":  accessTokenSessionRule,
+	"GET /api/provider_mapping_rule/channels": accessTokenSessionRule,
+
 	// router/api-router.go: /api/audit, /api/log, /api/data
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),
 	"GET /api/log/":                             accessTokenScopeRule("log:read"),

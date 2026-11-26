@@ -41,6 +41,7 @@ type BillDateRangePickerProps = {
   end: number
   max: number // latest selectable date
   onChange: (start: number, end: number) => void
+  disabled?: boolean
 }
 
 export function BillDateRangePicker(props: BillDateRangePickerProps) {
@@ -65,6 +66,7 @@ export function BillDateRangePicker(props: BillDateRangePickerProps) {
   return (
     <Popover onOpenChange={(open) => !open && setDraft(undefined)}>
       <PopoverTrigger
+        disabled={props.disabled}
         render={
           <Button
             variant='outline'

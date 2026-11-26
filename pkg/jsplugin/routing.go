@@ -486,6 +486,7 @@ var reservedRouteNamespaces = []string{
 	"/payable-bills",
 	"/playground",
 	"/profile",
+	"/provider-mapping-rules",
 	"/receivable-bills",
 	"/redemption-codes",
 	"/request-processing",
