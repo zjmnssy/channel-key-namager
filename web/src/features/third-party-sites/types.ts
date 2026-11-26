@@ -25,6 +25,8 @@ export interface ThirdPartySite {
   base_url: string
   remote_user_id: number
   receivable_discount: number
+  /** Beijing date (YYYYMMDD) the site's daily bills start on */
+  bill_start_date: number
   created_time: number
   updated_time: number
 }
@@ -35,6 +37,7 @@ export interface ThirdPartySitePayload {
   base_url: string
   remote_user_id: number
   receivable_discount: number
+  bill_start_date: number
   api_key?: string
 }
 

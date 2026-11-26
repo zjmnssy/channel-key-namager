@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xuri/excelize/v2"
@@ -425,6 +426,94 @@ func TestReceivableBillScanFillsGapsAfterDowntime(t *testing.T) {
 	require.NoError(t, db.Model(&model.ReceivableBillHour{}).Where("site_id = ? AND status = ?", site.Id, model.ReceivableBillStatusSuccess).Count(&hourCount).Error)
 	assert.Equal(t, int64(5), dayCount)
 	assert.Equal(t, int64(73), hourCount)
+}
+
+// receivableDailyWindows keeps the daily bills' windows and drops the hours'.
+func receivableDailyWindows(windows [][2]int64) [][2]int64 {
+	return lo.Filter(windows, func(window [2]int64, _ int) bool { return window[1]-window[0] == 86400 })
+}
+
+func TestReceivableBillScanBackfillsFromBillStartDate(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	fake := newFakeStatSite(t)
+	site := receivableSeedSite(t, db, "rb-start-earlier", fake.server.URL, 1793462400) // 北京 2026-11-01 0 点
+	require.NoError(t, db.Create(&model.ReceivableBill{SiteId: site.Id, BillDate: 20261120, Quota: 123, QuotaPerUnit: 500000,
+		Status: model.ReceivableBillStatusSuccess, Attempts: 1}).Error)
+	require.NoError(t, db.Create(&model.ReceivableBill{SiteId: site.Id, BillDate: 20261121,
+		Status: model.ReceivableBillStatusFailed, Attempts: 1}).Error)
+	require.NoError(t, db.Model(site).Update("bill_start_date", 20261118).Error)
+
+	// 北京 11-23 01:30：从开始日期 11-18 补到昨天 11-22，只请求还没有账单的 18、19、22 三天
+	assert.Equal(t, [][2]int64{{1794931200, 1795017600}, {1795017600, 1795104000}, {1795276800, 1795363200}},
+		receivableDailyWindows(receivableScan(fake, 1795368600)))
+
+	// 已有的账单不覆盖：成功的额度不变，失败的仍是失败
+	assert.Equal(t, int64(123), receivableBillOf(t, db, site.Id, 20261120).Quota)
+	assert.Equal(t, model.ReceivableBillStatusFailed, receivableBillOf(t, db, site.Id, 20261121).Status)
+	for _, date := range []int{20261118, 20261119, 20261122} {
+		bill := receivableBillOf(t, db, site.Id, date)
+		assert.Equal(t, model.ReceivableBillStatusSuccess, bill.Status, date)
+		assert.Equal(t, int64(500000), bill.Quota, date)
+	}
+}
+
+func TestReceivableBillScanSkipsDaysBeforeBillStartDate(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	fake := newFakeStatSite(t)
+	site := receivableSeedSite(t, db, "rb-start-later", fake.server.URL, 1793462400)
+	for _, date := range []int{20261118, 20261119, 20261122} {
+		require.NoError(t, db.Create(&model.ReceivableBill{SiteId: site.Id, BillDate: date, Quota: 123, QuotaPerUnit: 500000,
+			Status: model.ReceivableBillStatusSuccess, Attempts: 1}).Error)
+	}
+	require.NoError(t, db.Model(site).Update("bill_start_date", 20261121).Error)
+
+	// 北京 11-24 01:30：开始日期往后改到 11-21，只补 21 到昨天 23 之间缺的 21、23。
+	// 站点正好 3 张账单，与 21 到 23 的天数相同，仍要按日期查出缺口
+	assert.Equal(t, [][2]int64{{1795190400, 1795276800}, {1795363200, 1795449600}},
+		receivableDailyWindows(receivableScan(fake, 1795455000)))
+
+	// 开始日期之前已有的账单保留
+	var dates []int
+	require.NoError(t, db.Model(&model.ReceivableBill{}).Where("site_id = ?", site.Id).Order("bill_date").Pluck("bill_date", &dates).Error)
+	assert.Equal(t, []int{20261118, 20261119, 20261121, 20261122, 20261123}, dates)
+}
+
+func TestReceivableBillStartDateUpgrade(t *testing.T) {
+	db := setupReceivableBillTest(t)
+	seed := func(name string, created int64, startDate int, billDates ...int) *model.ThirdPartySite {
+		site := channelPushSeedSite(t, db, name)
+		require.NoError(t, db.Model(site).Updates(map[string]any{"created_time": created, "bill_start_date": startDate}).Error)
+		for _, date := range billDates {
+			require.NoError(t, db.Create(&model.ReceivableBill{SiteId: site.Id, BillDate: date, Status: model.ReceivableBillStatusSuccess}).Error)
+		}
+		return site
+	}
+	startOf := func(site *model.ThirdPartySite) int {
+		var stored model.ThirdPartySite
+		require.NoError(t, db.Unscoped().First(&stored, site.Id).Error)
+		return stored.BillStartDate
+	}
+	withBills := seed("up-bills", 1793462400, 0, 20261120, 20261118) // 北京 11-01 建，11-18 起有账单
+	fresh := seed("up-fresh", 1795460400, 0)                         // 北京 11-24 03:00（UTC 11-23 19:00）建，还没有账单
+	unknown := seed("up-unknown", 0, 0)
+	deleted := seed("up-deleted", 1793462400, 0, 20261119)
+	require.NoError(t, db.Delete(deleted).Error)
+	alreadySet := seed("up-set", 1793462400, 20261010, 20261118)
+	const now = int64(1795658400) // 北京 11-26 10:00
+
+	// 有账单的取最早一张账单的日期；没有的与扫描的旧规则一样，取北京时间创建日与最新应出账日（昨天 11-25）中较晚的，
+	// 创建时间缺失按今天创建算；已删除的站点也补；已有开始日期的不动
+	require.NoError(t, model.InitializeThirdPartySiteBillStartDates(time.Unix(now, 0).UTC()))
+	assert.Equal(t, 20261118, startOf(withBills))
+	assert.Equal(t, 20261125, startOf(fresh))
+	assert.Equal(t, 20261126, startOf(unknown))
+	assert.Equal(t, 20261119, startOf(deleted))
+	assert.Equal(t, 20261010, startOf(alreadySet))
+
+	// 再跑一次只看开始日期为 0 的站点：之后多出更早的账单也不改
+	require.NoError(t, db.Create(&model.ReceivableBill{SiteId: withBills.Id, BillDate: 20261105, Status: model.ReceivableBillStatusSuccess}).Error)
+	require.NoError(t, model.InitializeThirdPartySiteBillStartDates(time.Unix(now, 0).UTC()))
+	assert.Equal(t, 20261118, startOf(withBills))
 }
 
 func TestReceivableBillRetryBackoff(t *testing.T) {

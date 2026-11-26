@@ -53,6 +53,7 @@ const site: ThirdPartySite = {
   base_url: 'https://alpha.example.com',
   remote_user_id: 7,
   receivable_discount: 0.85,
+  bill_start_date: 20261101,
   created_time: 1,
   updated_time: 1,
 }
@@ -137,6 +138,7 @@ describe('ThirdPartySitesTable', () => {
       'Type',
       'Site Base URL',
       'Receivable Discount',
+      'Bill Start Date',
       'Remote User ID',
       'Actions',
     ]) {
@@ -145,6 +147,7 @@ describe('ThirdPartySitesTable', () => {
     expect(screen.getByText('Native NewAPI')).toBeInTheDocument()
     expect(screen.getByText('https://alpha.example.com')).toBeInTheDocument()
     expect(screen.getByText('0.85')).toBeInTheDocument()
+    expect(screen.getByText('2026-11-01')).toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/api/third_party_site/?p=1&page_size=10')
   })
