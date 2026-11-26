@@ -133,7 +133,8 @@ func ClaimDueReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok 
 
 // FinishReceivableRow 在仍持有租约时写入 updates 并释放租约，返回是否写入。
 // 日账单写成成功时同一事务结算（settlePayableUsageDay）：租约已失效、什么都没写时不结算；结算失败时这次写入一起回滚，
-// 日账单保持原状，租约到期后由原有的重试逻辑处理。
+// 日账单保持原状、租约不释放：重试中的行在租约到期后由原有的重试逻辑接着处理；手动重新同步原本成功或失败的行时，
+// 接口直接报错，约 5 分钟后租约过期，可以再手动同步。
 func FinishReceivableRow[T ReceivableRow](id int, lease int64, updates map[string]any) (bool, error) {
 	now := common.GetTimestamp()
 	values := make(map[string]any, len(updates)+2)

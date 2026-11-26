@@ -216,7 +216,25 @@ func TestPayableSettlementFollowsDailyBillWrites(t *testing.T) {
 	require.True(t, found)
 	assert.Nil(t, record.PayableDiscount)
 
-	// 9. 小时数据不结算
+	// 9. 重新同步前“全部渠道”规则改归另一个按使用明细结算的提供商：覆盖同一条记录，提供商 ID、名称快照、折扣都换成新提供商的，
+	// 不能留着旧提供商、却换上新提供商的折扣和这次的额度（付错人）
+	nextOwner := channelPushSeedSupplier(t, db, "ps-follow-next")
+	require.NoError(t, db.Model(nextOwner).Update("payable_discount", 0.5).Error)
+	payableSettlementSetMethod(t, db, nextOwner.Id, model.PayableSettlementUsage)
+	require.NoError(t, db.Model(&model.PayableProviderOverride{}).Where("site_id = ? AND remote_channel_id = 0", site.Id).
+		Update("provider_id", nextOwner.Id).Error)
+	finished, err = model.FinishReceivableRow[model.ReceivableBill](next.Id, payableSettlementClaim(t, next.Id), payableSettlementSuccessUpdates(1000000))
+	require.NoError(t, err)
+	assert.True(t, finished)
+	moved, found := payableSettlementOf(t, db, site.Id, 20261126)
+	require.True(t, found)
+	assert.Equal(t, record.Id, moved.Id)
+	assert.Equal(t, nextOwner.Id, moved.ProviderId)
+	assert.Equal(t, "ps-follow-next", moved.ProviderName)
+	require.NotNil(t, moved.PayableDiscount)
+	assert.Equal(t, 0.5, *moved.PayableDiscount)
+
+	// 10. 小时数据不结算
 	require.NoError(t, model.InsertReceivableRow(&model.ReceivableBillHour{SiteId: site.Id, BillHour: 1795622400, Quota: 1, QuotaPerUnit: 500000,
 		Status: model.ReceivableBillStatusSuccess}))
 	var records int64

@@ -1,6 +1,8 @@
 package model
 
 import (
+	"slices"
+
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
 )
@@ -88,6 +90,9 @@ func payableWholeSites(db *gorm.DB, siteIDs []int) ([]payableWholeSite, error) {
 	for _, rule := range channelRules {
 		providerIDs = append(providerIDs, rule.ProviderId)
 	}
+	// 去重后再绑定：每条规则都追加一次提供商，绑定参数个数不随规则数增长。
+	slices.Sort(providerIDs)
+	providerIDs = slices.Compact(providerIDs)
 	suppliers, err := payableSuppliersIn(db, providerIDs)
 	if err != nil {
 		return nil, err
@@ -131,6 +136,8 @@ func payableSettlementMethods(db *gorm.DB, providerIDs []int) (map[int]string, e
 // 否则删除这一天已有的记录（若有），这一天按渠道明细结算。
 // 先普通查询出已有记录，再按主键更新或删除、没有时新建；不按 (site_id, bill_date) 直接 DELETE 或 upsert：MySQL 可重复读下，
 // 前者对不存在的键留下间隙锁，后者对已存在的键留下临键锁，事务提交前会挡住键落在这个间隙里的其他站点同一天的结算。
+// 例外：同一站点同一天“删了马上又插”（上一次结算删除了记录，这一次又新建），而 InnoDB 还没清理旧的删除标记时，插入前的
+// 重复检查会对相邻间隙加共享临键锁，键落在这段间隙里的其他站点插入要等本事务提交（单向、毫秒级、不成环），所以“绝不等锁”不是不变量。
 func settlePayableUsageDay(tx *gorm.DB, siteID, billDate int, quota, quotaPerUnit, now int64) error {
 	wholeSites, err := payableWholeSites(tx, []int{siteID})
 	if err != nil {
