@@ -18,13 +18,31 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
-import { DASHBOARD_DEFAULT_SECTION } from '@/features/dashboard/section-registry'
+import { USAGE_LOGS_DEFAULT_SECTION } from '@/features/usage-logs/section-registry'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
+import { useAuthStore } from '@/stores/auth-store'
 
+// Every sign-in and every "Console" link opens /dashboard. Overview and
+// Dashboard are hidden from the menus, so users who may read channels land on
+// Channels and everyone else lands on Usage Logs. Administrators are judged by
+// the grant too: the channel list rejects one whose read grant was revoked.
 export const Route = createFileRoute('/_authenticated/dashboard/')({
   beforeLoad: () => {
+    const canReadChannels = hasPermission(
+      useAuthStore.getState().auth.user,
+      ADMIN_PERMISSION_RESOURCES.CHANNEL,
+      ADMIN_PERMISSION_ACTIONS.READ
+    )
+    if (canReadChannels) {
+      throw redirect({ to: '/channels' })
+    }
     throw redirect({
-      to: '/dashboard/$section',
-      params: { section: DASHBOARD_DEFAULT_SECTION },
+      to: '/usage-logs/$section',
+      params: { section: USAGE_LOGS_DEFAULT_SECTION },
     })
   },
 })

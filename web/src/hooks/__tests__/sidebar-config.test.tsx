@@ -34,7 +34,9 @@ import {
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { SidebarViewHeader } from '@/components/layout/components/sidebar-view-header'
 import { checkIsActive } from '@/components/layout/lib/url-utils'
+import { SidebarProvider } from '@/components/ui/sidebar'
 import { invalidateModelPricing } from '@/features/model-pricing/api'
 import {
   parseSidebarModulesAdmin,
@@ -95,7 +97,7 @@ function sidebarFor(admin?: object, user?: object, canConfigure = true) {
 }
 
 describe('security sidebar visibility', () => {
-  it('old configurations show Security & Access immediately after Profile and keep API Keys', () => {
+  it('old configurations show Security & Access immediately after Profile and keep Usage Logs', () => {
     const { result } = sidebarFor(
       { personal: { enabled: true, personal: true, topup: true } },
       { personal: { enabled: true, personal: true } }
@@ -104,11 +106,11 @@ describe('security sidebar visibility', () => {
       result.current
         .find((group) => group.id === 'personal')
         ?.items.map((item) => item.title)
-    ).toEqual(['Wallet', 'Profile', 'Security & Access'])
+    ).toEqual(['Profile', 'Security & Access'])
     expect(
       result.current
         .flatMap((group) => group.items)
-        .some((item) => item.title === 'API Keys')
+        .some((item) => item.title === 'Usage Logs')
     ).toBe(true)
   })
   it.each([
@@ -142,10 +144,12 @@ describe('security sidebar visibility', () => {
 })
 
 describe('removed menu entries', () => {
-  it('the menu never lists Playground, Chat, Redemption Codes, Subscriptions or Request processing, even when every module is enabled', () => {
+  it('the menu never lists the removed entries, even when every module is enabled', () => {
     // sidebarFor skips role filtering, so this covers the entries every role could see.
     const { result } = sidebarFor({
       chat: { enabled: true, playground: true, chat: true },
+      console: { enabled: true, detail: true, token: true },
+      personal: { enabled: true, topup: true },
       admin: { enabled: true, redemption: true, subscription: true },
     })
     const entries = result.current.flatMap((group) => group.items)
@@ -157,9 +161,54 @@ describe('removed menu entries', () => {
       'Redemption Codes',
       'Subscriptions',
       'Request processing',
+      'Overview',
+      'Dashboard',
+      'API Keys',
+      'Wallet',
     ])
     expect(entries.filter((item) => removed.has(item.title))).toEqual([])
     expect(entries.some((item) => item.type === 'chat-presets')).toBe(false)
+  })
+})
+
+describe('System Settings back link', () => {
+  function SystemSettingsHeader() {
+    const { view } = useSidebarView()
+    return (
+      <SidebarProvider>
+        {view && <SidebarViewHeader view={view} />}
+      </SidebarProvider>
+    )
+  }
+
+  it('leads to the console entry instead of the hidden Overview', async () => {
+    // The super administrator's sidebar also loads the model pricing issues.
+    vi.spyOn(api, 'get').mockImplementation(async () => ({
+      data: { success: true, data: [] },
+    }))
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    client.setQueryData(['status'], { SidebarModulesAdmin: '' })
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'root', role: ROLE.SUPER_ADMIN })
+    const router = createRouter({
+      routeTree: createRootRoute({ component: SystemSettingsHeader }),
+      history: createMemoryHistory({
+        initialEntries: ['/system-settings/site'],
+      }),
+    })
+    await router.load()
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    )
+
+    expect(
+      await screen.findByRole('link', { name: 'Back to Dashboard' })
+    ).toHaveAttribute('href', '/dashboard')
   })
 })
 

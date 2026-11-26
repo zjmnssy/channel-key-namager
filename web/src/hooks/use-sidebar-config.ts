@@ -317,7 +317,7 @@ export function useSidebarConfig(navGroups: NavGroup[]): NavGroup[] {
 /**
  * Check whether a single route is visible under the current sidebar_modules
  * config. Used by entries living outside the sidebar (e.g. the profile
- * dropdown's wallet link) so they honour the same "wallet display" toggle.
+ * dropdown's Security & Access link) so they honour the same toggle.
  */
 export function useIsSidebarModuleVisible(url: string): boolean {
   const { status } = useStatus()

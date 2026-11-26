@@ -114,7 +114,8 @@ export const SYSTEM_SETTINGS_VIEW: SidebarView = {
   id: 'system-settings',
   pathPattern: /^\/system-settings(\/|$)/,
   parent: {
-    to: '/dashboard/overview',
+    // /dashboard picks the landing page; Overview is hidden from the menus.
+    to: '/dashboard',
     label: 'Back to Dashboard',
   },
   getNavGroups: getSystemSettingsNavGroups,
