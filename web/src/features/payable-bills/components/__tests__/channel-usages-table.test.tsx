@@ -55,6 +55,10 @@ const baseUsage: PayableUsage = {
   site_base_url: 'https://a.example.com',
   remote_channel_id: 17,
   remote_channel_name: 'gpt-dcmark-3-17',
+  remote_channel_status: 1,
+  remote_channel_group: 'default',
+  local_channel_id: 17,
+  local_channel_name: 'gpt-platform',
   used_quota: 228394500,
   delta_quota: 6172839,
   delta_flag: 'normal',
@@ -126,6 +130,14 @@ function usageRow(channelName: string) {
   return screen.getByRole('row', { name: new RegExp(channelName) })
 }
 
+/** The cell of a row under the column with this header. */
+function cellUnder(row: HTMLElement, header: string) {
+  const headers = screen
+    .getAllByRole('columnheader')
+    .map((columnHeader) => columnHeader.textContent)
+  return within(row).getAllByRole('cell')[headers.indexOf(header)]
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] })
   // 00:30 on 2026-11-24 in Beijing, so the latest bill date is 2026-11-23.
@@ -161,7 +173,7 @@ describe('ChannelUsagesTable', () => {
     )
   })
 
-  it('lists the channel usages without a site URL column', async () => {
+  it('lists the platform and site channel columns without a site URL column', async () => {
     await renderUsages()
     await screen.findByText('gpt-dcmark-3-17')
 
@@ -172,7 +184,13 @@ describe('ChannelUsagesTable', () => {
       'Bill Date',
       'Site ID',
       'Site Name',
-      'Channel Name',
+      'Platform Channel ID',
+      'Platform Channel Name',
+      'Third-Party Site Channel ID',
+      'Third-Party Site Channel Name',
+      'Third-Party Site Channel Status',
+      'Third-Party Site Channel Status Type',
+      'Third-Party Site Channel Group',
       'Daily Amount Before Discount ($)',
       'Cumulative Amount ($)',
       'Provider Name',
@@ -180,6 +198,88 @@ describe('ChannelUsagesTable', () => {
       'Actions',
     ])
     expect(screen.queryByText('https://a.example.com')).not.toBeInTheDocument()
+  })
+
+  it('shows the platform channel, site channel ID and groups of a pushed channel', async () => {
+    await renderUsages([
+      {
+        ...baseUsage,
+        remote_channel_id: 42,
+        remote_channel_group: 'vip,default',
+      },
+    ])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    const row = usageRow('gpt-dcmark-3-17')
+    expect(cellUnder(row, 'Platform Channel ID')).toHaveTextContent(/^17$/)
+    expect(cellUnder(row, 'Platform Channel Name')).toHaveTextContent(
+      /^gpt-platform$/
+    )
+    expect(cellUnder(row, 'Third-Party Site Channel ID')).toHaveTextContent(
+      /^42$/
+    )
+    const groups = cellUnder(row, 'Third-Party Site Channel Group')
+    expect(within(groups).getByText('default')).toBeInTheDocument()
+    expect(within(groups).getByText('vip')).toBeInTheDocument()
+  })
+
+  it.each([
+    { status: 1, label: 'Enabled', type: '—' },
+    { status: 2, label: 'Disabled', type: 'Manually disabled' },
+    { status: 3, label: 'Disabled', type: 'Auto disabled' },
+    { status: 0, label: 'Unknown', type: '—' },
+  ])(
+    'shows site channel status $status as $label with status type $type',
+    async ({ status, label, type }) => {
+      await renderUsages([{ ...baseUsage, remote_channel_status: status }])
+      await screen.findByText('gpt-dcmark-3-17')
+
+      const row = usageRow('gpt-dcmark-3-17')
+      expect(
+        cellUnder(row, 'Third-Party Site Channel Status')
+      ).toHaveTextContent(new RegExp(`^${label}$`))
+      expect(
+        cellUnder(row, 'Third-Party Site Channel Status Type')
+      ).toHaveTextContent(new RegExp(`^${type}$`))
+    }
+  )
+
+  it('shows dashes when the row has no platform channel and no recorded site channel state', async () => {
+    await renderUsages([
+      {
+        ...baseUsage,
+        remote_channel_name: 'manual-channel',
+        remote_channel_status: null,
+        remote_channel_group: '',
+        local_channel_id: 0,
+        local_channel_name: null,
+      },
+    ])
+    await screen.findByText('manual-channel')
+
+    const row = usageRow('manual-channel')
+    for (const header of [
+      'Platform Channel ID',
+      'Platform Channel Name',
+      'Third-Party Site Channel Status',
+      'Third-Party Site Channel Status Type',
+      'Third-Party Site Channel Group',
+    ]) {
+      expect(cellUnder(row, header)).toHaveTextContent(/^—$/)
+    }
+  })
+
+  it('says the platform channel does not exist when no channel has the marked ID', async () => {
+    await renderUsages([
+      { ...baseUsage, local_channel_id: 9, local_channel_name: null },
+    ])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    const row = usageRow('gpt-dcmark-3-17')
+    expect(cellUnder(row, 'Platform Channel ID')).toHaveTextContent(/^9$/)
+    expect(cellUnder(row, 'Platform Channel Name')).toHaveTextContent(
+      /^Channel does not exist$/
+    )
   })
 
   it('renders an em dash with the first-sync label when the delta is null', async () => {
@@ -194,9 +294,14 @@ describe('ChannelUsagesTable', () => {
     ])
     await screen.findByText('manual-channel')
 
-    const row = usageRow('manual-channel')
-    expect(within(row).getByText('—')).toBeInTheDocument()
-    expect(within(row).getByText('First sync, no baseline')).toBeInTheDocument()
+    const delta = cellUnder(
+      usageRow('manual-channel'),
+      'Daily Amount Before Discount ($)'
+    )
+    expect(within(delta).getByText('—')).toBeInTheDocument()
+    expect(
+      within(delta).getByText('First sync, no baseline')
+    ).toBeInTheDocument()
   })
 
   it('marks a rollback row and an uncounted row', async () => {

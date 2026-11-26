@@ -67,10 +67,18 @@ func ExportPayableUsages(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// The platform channel comes from the same views as the list, so the page and the file agree.
+	views, err := newPayableUsageViews(usages)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	headerKeys := []string{
 		i18n.MsgPayableBillExportTaskID, i18n.MsgPayableBillExportBillDate, i18n.MsgPayableBillExportSiteID,
-		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportChannelName, i18n.MsgPayableBillExportDeltaAmount,
+		i18n.MsgPayableBillExportSiteName, i18n.MsgPayableBillExportLocalChannelID, i18n.MsgPayableBillExportLocalChannelName,
+		i18n.MsgPayableBillExportRemoteChannelID, i18n.MsgPayableBillExportRemoteChannelName, i18n.MsgPayableBillExportRemoteChannelStatus,
+		i18n.MsgPayableBillExportRemoteChannelStatusType, i18n.MsgPayableBillExportRemoteChannelGroup, i18n.MsgPayableBillExportDeltaAmount,
 		i18n.MsgPayableBillExportUsedAmount, i18n.MsgPayableBillExportDeltaNote, i18n.MsgPayableBillExportProvider,
 		i18n.MsgPayableBillExportProviderSource, i18n.MsgPayableBillExportSyncedAt, i18n.MsgPayableBillExportCounted,
 	}
@@ -88,39 +96,61 @@ func ExportPayableUsages(c *gin.Context) {
 		model.PayableProviderRuleAll:        i18n.MsgPayableBillSourceRule,
 		model.PayableProviderRuleUnresolved: i18n.MsgPayableBillSourceRule,
 	}
-	rows := make([][]any, len(usages))
-	for i, usage := range usages {
+	rows := make([][]any, len(views))
+	for i, usage := range views {
 		cells := make([]any, len(headerKeys))
 		date, _ := model.ReceivableBillDayStart(usage.BillDate)
 		cells[0], cells[1] = usage.TaskId, date.Format("2006-01-02")
-		cells[2], cells[3], cells[4] = usage.SiteId, usage.SiteName, usage.RemoteChannelName
-		if usage.DeltaQuota != nil {
-			cells[5] = model.ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
+		cells[2], cells[3] = usage.SiteId, usage.SiteName
+		// Cells the page shows as a dash stay empty.
+		if usage.LocalChannelId > 0 {
+			cells[4] = usage.LocalChannelId
+			cells[5] = i18n.T(c, i18n.MsgPayableBillLocalChannelMissing)
+			if usage.LocalChannelName != nil {
+				cells[5] = *usage.LocalChannelName
+			}
 		}
-		cells[6] = model.ReceivableAmount(usage.UsedQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
+		cells[6], cells[7] = usage.RemoteChannelId, usage.RemoteChannelName
+		if usage.RemoteChannelStatus != nil {
+			switch *usage.RemoteChannelStatus {
+			case common.ChannelStatusEnabled:
+				cells[8] = i18n.T(c, i18n.MsgPayableBillChannelEnabled)
+			case common.ChannelStatusManuallyDisabled:
+				cells[8], cells[9] = i18n.T(c, i18n.MsgPayableBillChannelDisabled), i18n.T(c, i18n.MsgPayableBillChannelManuallyDisabled)
+			case common.ChannelStatusAutoDisabled:
+				cells[8], cells[9] = i18n.T(c, i18n.MsgPayableBillChannelDisabled), i18n.T(c, i18n.MsgPayableBillChannelAutoDisabled)
+			default:
+				cells[8] = i18n.T(c, i18n.MsgPayableBillChannelStatusUnknown)
+			}
+		}
+		cells[10] = usage.RemoteChannelGroup
+		if usage.DeltaQuota != nil {
+			cells[11] = model.ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
+		}
+		cells[12] = model.ReceivableAmount(usage.UsedQuota, usage.QuotaPerUnit).Round(6).InexactFloat64()
 		if key, ok := deltaKeys[usage.DeltaFlag]; ok {
-			cells[7] = i18n.T(c, key)
+			cells[13] = i18n.T(c, key)
 		}
 		if usage.ProviderId == 0 {
-			cells[8] = i18n.T(c, i18n.MsgPayableBillProviderUnknown)
+			cells[14] = i18n.T(c, i18n.MsgPayableBillProviderUnknown)
 		} else {
-			cells[8] = usage.ProviderName
+			cells[14] = usage.ProviderName
 		}
 		sourceKey, ok := sourceKeys[usage.ProviderSource]
 		if !ok {
 			sourceKey = i18n.MsgPayableBillSourceUnknown
 		}
-		cells[9] = i18n.T(c, sourceKey)
+		cells[15] = i18n.T(c, sourceKey)
 		if usage.SyncedAt != 0 {
-			cells[10] = time.Unix(usage.SyncedAt, 0).In(model.ReceivableBillLocation).Format("2006-01-02 15:04:05")
+			cells[16] = time.Unix(usage.SyncedAt, 0).In(model.ReceivableBillLocation).Format("2006-01-02 15:04:05")
 		}
-		cells[11] = i18n.T(c, i18n.MsgPayableBillCountedNo)
+		cells[17] = i18n.T(c, i18n.MsgPayableBillCountedNo)
 		if usage.Counted {
-			cells[11] = i18n.T(c, i18n.MsgPayableBillCountedYes)
+			cells[17] = i18n.T(c, i18n.MsgPayableBillCountedYes)
 		}
 		rows[i] = cells
 	}
-	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{6, 7})
+	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{12, 13})
 }
 
 // ExportPayableProviderBills writes the provider bills that match the list filter into an xlsx file.

@@ -146,7 +146,6 @@ const (
 	MsgPayableBillExportBillDate       = "payable_bill.export.bill_date"
 	MsgPayableBillExportSiteID         = "payable_bill.export.site_id"
 	MsgPayableBillExportSiteName       = "payable_bill.export.site_name"
-	MsgPayableBillExportChannelName    = "payable_bill.export.channel_name"
 	MsgPayableBillExportDeltaAmount    = "payable_bill.export.delta_amount"
 	MsgPayableBillExportUsedAmount     = "payable_bill.export.used_amount"
 	MsgPayableBillExportDeltaNote      = "payable_bill.export.delta_note"
@@ -172,4 +171,19 @@ const (
 	MsgPayableBillProviderUnknown      = "payable_bill.provider.unknown"
 	MsgPayableBillCountedYes           = "payable_bill.counted.yes"
 	MsgPayableBillCountedNo            = "payable_bill.counted.no"
+
+	// Channel usage export: the platform channel in the site channel's push marker, and the site channel as pulled
+	MsgPayableBillExportLocalChannelID          = "payable_bill.export.local_channel_id"
+	MsgPayableBillExportLocalChannelName        = "payable_bill.export.local_channel_name"
+	MsgPayableBillExportRemoteChannelID         = "payable_bill.export.remote_channel_id"
+	MsgPayableBillExportRemoteChannelName       = "payable_bill.export.remote_channel_name"
+	MsgPayableBillExportRemoteChannelStatus     = "payable_bill.export.remote_channel_status"
+	MsgPayableBillExportRemoteChannelStatusType = "payable_bill.export.remote_channel_status_type"
+	MsgPayableBillExportRemoteChannelGroup      = "payable_bill.export.remote_channel_group"
+	MsgPayableBillLocalChannelMissing           = "payable_bill.local_channel.missing"
+	MsgPayableBillChannelEnabled                = "payable_bill.channel_status.enabled"
+	MsgPayableBillChannelDisabled               = "payable_bill.channel_status.disabled"
+	MsgPayableBillChannelStatusUnknown          = "payable_bill.channel_status.unknown"
+	MsgPayableBillChannelManuallyDisabled       = "payable_bill.channel_status_type.manually_disabled"
+	MsgPayableBillChannelAutoDisabled           = "payable_bill.channel_status_type.auto_disabled"
 )

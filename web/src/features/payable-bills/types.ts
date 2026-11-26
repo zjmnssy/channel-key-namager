@@ -98,6 +98,12 @@ export type PayableUsage = {
   site_base_url: string
   remote_channel_id: number
   remote_channel_name: string
+  // Site channel status when pulled: 1 enabled, 2 manually disabled,
+  // 3 auto disabled, anything else unknown; null on rows pulled before it was recorded.
+  remote_channel_status: number | null
+  remote_channel_group: string // comma-separated; empty when not recorded
+  local_channel_id: number // platform channel in the push marker; 0 = none
+  local_channel_name: string | null // null when the platform channel no longer exists
   used_quota: number
   delta_quota: number | null // null on the first sync
   delta_flag: PayableDeltaFlag

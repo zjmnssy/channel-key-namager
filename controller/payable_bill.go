@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -59,8 +60,10 @@ type payablePullSiteView struct {
 
 type payableUsageView struct {
 	model.PayableUsageRow
-	DeltaAmount *string `json:"delta_amount"`
-	UsedAmount  string  `json:"used_amount"`
+	DeltaAmount      *string `json:"delta_amount"`
+	UsedAmount       string  `json:"used_amount"`
+	LocalChannelId   int     `json:"local_channel_id"`   // 站点渠道名称结尾推送标记里的平台渠道 ID；没有本站点的标记时为 0
+	LocalChannelName *string `json:"local_channel_name"` // 平台渠道当前的名称；没有平台渠道 ID 或平台上已没有这个渠道时为 null
 }
 
 type payableProviderBillView struct {
@@ -74,14 +77,33 @@ type payableProviderBillView struct {
 	PayableAmount   *string  `json:"payable_amount"`
 }
 
-func newPayableUsageView(row model.PayableUsageRow) payableUsageView {
-	view := payableUsageView{PayableUsageRow: row,
-		UsedAmount: model.ReceivableAmount(row.UsedQuota, row.QuotaPerUnit).StringFixed(6)}
-	if row.DeltaQuota != nil {
-		delta := model.ReceivableAmount(*row.DeltaQuota, row.QuotaPerUnit).StringFixed(6)
-		view.DeltaAmount = &delta
+// newPayableUsageViews 把明细行转成接口视图（导出也用它确定平台渠道）：算出金额，并按站点渠道名称结尾的推送标记填上平台渠道 ID 与它在平台上当前的名称。
+// 标记里的站点必须是本行的站点，与渠道推送、提供商解析认定平台渠道的方式相同。
+func newPayableUsageViews(rows []model.PayableUsageRow) ([]payableUsageView, error) {
+	views := make([]payableUsageView, len(rows))
+	localIDs := make([]int, 0, len(rows))
+	for i, row := range rows {
+		views[i] = payableUsageView{PayableUsageRow: row,
+			UsedAmount: model.ReceivableAmount(row.UsedQuota, row.QuotaPerUnit).StringFixed(6)}
+		if row.DeltaQuota != nil {
+			delta := model.ReceivableAmount(*row.DeltaQuota, row.QuotaPerUnit).StringFixed(6)
+			views[i].DeltaAmount = &delta
+		}
+		if siteID, localID, ok := service.ParseChannelPushMarker(row.RemoteChannelName); ok && siteID == row.SiteId {
+			views[i].LocalChannelId = localID
+			localIDs = append(localIDs, localID)
+		}
 	}
-	return view
+	names, err := model.PayableLocalChannelNames(localIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range views {
+		if name, ok := names[views[i].LocalChannelId]; ok {
+			views[i].LocalChannelName = &name
+		}
+	}
+	return views, nil
 }
 
 func GetPayablePullTasks(c *gin.Context) {
@@ -136,9 +158,10 @@ func GetPayableUsages(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	views := make([]payableUsageView, len(rows))
-	for i, row := range rows {
-		views[i] = newPayableUsageView(row)
+	views, err := newPayableUsageViews(rows)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(views)
@@ -263,5 +286,10 @@ func SetPayableUsageProvider(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, newPayableUsageView(row))
+	views, err := newPayableUsageViews([]model.PayableUsageRow{row})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, views[0])
 }
