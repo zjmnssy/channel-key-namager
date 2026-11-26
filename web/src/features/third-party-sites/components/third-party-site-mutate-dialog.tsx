@@ -24,6 +24,7 @@ import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { DatePicker } from '@/components/date-picker'
 import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import {
@@ -43,6 +44,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  beijingToday,
+  billDateToLocalDate,
+  localDateToBillDate,
+} from '@/features/receivable-bills/lib/bill-date'
 import { handleServerError } from '@/lib/handle-server-error'
 import {
   createServerError,
@@ -56,6 +62,7 @@ import {
   THIRD_PARTY_SITE_TYPE_OPTIONS,
 } from '../constants'
 import {
+  earliestBillStartDate,
   getThirdPartySiteFormSchema,
   THIRD_PARTY_SITE_FORM_DEFAULTS,
   toThirdPartySiteFormValues,
@@ -87,7 +94,11 @@ export function ThirdPartySiteMutateDialog(
   const queryClient = useQueryClient()
   const mode: ThirdPartySiteFormMode = props.currentRow ? 'update' : 'create'
 
-  const schema = useMemo(() => getThirdPartySiteFormSchema(t, mode), [t, mode])
+  const storedBillStartDate = props.currentRow?.bill_start_date
+  const schema = useMemo(
+    () => getThirdPartySiteFormSchema(t, mode, storedBillStartDate),
+    [t, mode, storedBillStartDate]
+  )
   const form = useForm<ThirdPartySiteFormValues>({
     resolver: zodResolver(schema),
     defaultValues: THIRD_PARTY_SITE_FORM_DEFAULTS,
@@ -101,9 +112,11 @@ export function ThirdPartySiteMutateDialog(
     form.reset(
       props.currentRow
         ? toThirdPartySiteFormValues(props.currentRow)
-        : THIRD_PARTY_SITE_FORM_DEFAULTS
+        : { ...THIRD_PARTY_SITE_FORM_DEFAULTS, bill_start_date: beijingToday() }
     )
   }, [props.open, props.currentRow, form])
+
+  const today = beijingToday()
 
   const typeItems = THIRD_PARTY_SITE_TYPE_OPTIONS.map((option) => ({
     value: option.value,
@@ -289,6 +302,35 @@ export function ThirdPartySiteMutateDialog(
                 <FormDescription>
                   {t(
                     'Between 0 and 1. For example, 0.85 means 85% of the list price'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name='bill_start_date'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Bill Start Date')}</FormLabel>
+                <FormControl>
+                  <DatePicker
+                    selected={
+                      field.value > 0
+                        ? billDateToLocalDate(field.value)
+                        : undefined
+                    }
+                    onSelect={(date) =>
+                      date && field.onChange(localDateToBillDate(date))
+                    }
+                    minDate={billDateToLocalDate(earliestBillStartDate(today))}
+                    maxDate={billDateToLocalDate(today)}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Daily bills start on this day. Moving it earlier fetches the missing days in the background; existing bills are not overwritten'
                   )}
                 </FormDescription>
                 <FormMessage />

@@ -19,8 +19,6 @@ const (
 	receivableBillMaxConcurrentSites = 4
 	// receivableBillRowsPerSite bounds the attempts one site gets in a scan.
 	receivableBillRowsPerSite = 60
-	// receivableBillIssueTime is how long after Beijing midnight yesterday's bill falls due.
-	receivableBillIssueTime = time.Hour
 	// receivableBillHourDelay is how long after an hour ends it is read, leaving the
 	// site time to write the hour's logs: a successful hour is never read again.
 	receivableBillHourDelay  = 5 * time.Minute
@@ -102,21 +100,24 @@ func syncReceivableBillSite(ctx context.Context, now time.Time, site *model.Thir
 		createdDay = receivableBeijingDay(time.Unix(site.CreatedTime, 0))
 	}
 
-	lastDay := receivableLatestBillDay(now)
-	// Bills start with the site's first bill. A site without one starts with the later
-	// of its creation day and the latest day due, so days before this feature are not
-	// filled in.
-	firstDay := lastDay
-	if createdDay.After(lastDay) {
-		firstDay = createdDay
-	}
-	if daily.PeriodCount > 0 {
-		start, ok := model.ReceivableBillDayStart(int(daily.FirstPeriod))
-		if !ok {
-			turn.fail(fmt.Errorf("invalid bill date %d", daily.FirstPeriod))
-			return
+	lastDay := model.ReceivableLatestBillDay(now)
+	// Bills start on the site's bill start date. A site without one, saved before start
+	// dates existed and not upgraded yet, starts as it did then: with its first bill, or
+	// else with the later of its creation day and the latest day due.
+	firstDay, hasStartDate := model.ReceivableBillDayStart(site.BillStartDate)
+	if !hasStartDate {
+		firstDay = lastDay
+		if createdDay.After(lastDay) {
+			firstDay = createdDay
 		}
-		firstDay = start
+		if daily.PeriodCount > 0 {
+			start, ok := model.ReceivableBillDayStart(int(daily.FirstPeriod))
+			if !ok {
+				turn.fail(fmt.Errorf("invalid bill date %d", daily.FirstPeriod))
+				return
+			}
+			firstDay = start
+		}
 	}
 
 	// Hours run from the site's first hour, or else from the later of its creation day
@@ -130,20 +131,9 @@ func syncReceivableBillSite(ctx context.Context, now time.Time, site *model.Thir
 		firstHour = time.Unix(hourly.FirstPeriod, 0)
 	}
 
-	if turn.syncDays(firstDay, lastDay, daily.PeriodCount) {
+	if turn.syncDays(firstDay, lastDay, daily) {
 		turn.syncHours(firstHour, lastHour, hourly.PeriodCount)
 	}
-}
-
-// receivableLatestBillDay returns the latest day whose bill is due at now. Yesterday's
-// bill falls due at 1:00; before that the latest due is the day before's.
-func receivableLatestBillDay(now time.Time) time.Time {
-	today := receivableBeijingDay(now)
-	lastDay := today.AddDate(0, 0, -1)
-	if now.Before(today.Add(receivableBillIssueTime)) {
-		lastDay = lastDay.AddDate(0, 0, -1)
-	}
-	return lastDay
 }
 
 // receivableLatestBillHour returns the latest hour that ended at least
@@ -159,11 +149,14 @@ func receivableBeijingDay(t time.Time) time.Time {
 }
 
 // syncDays inserts the bills of the days from firstDay to lastDay that have none yet,
-// then retries the due bills. rows is how many bills the site has. It reports
-// whether the turn goes on.
-func (turn *receivableSiteTurn) syncDays(firstDay, lastDay time.Time, rows int64) bool {
-	// A site with a bill for every day from its first one has none missing.
-	if !firstDay.After(lastDay) && rows != int64(lastDay.Sub(firstDay)/receivableBillDay)+1 {
+// then retries the due bills. daily is the site's bill coverage. It reports whether
+// the turn goes on.
+func (turn *receivableSiteTurn) syncDays(firstDay, lastDay time.Time, daily model.ReceivableCoverage) bool {
+	// A site whose bills start no earlier than firstDay, one for every day up to lastDay,
+	// has none missing. Bills kept from an earlier start date leave the count no clue.
+	complete := daily.FirstPeriod >= int64(model.ReceivableBillDate(firstDay)) &&
+		daily.PeriodCount == int64(lastDay.Sub(firstDay)/receivableBillDay)+1
+	if !firstDay.After(lastDay) && !complete {
 		dates, err := model.ReceivableRowPeriods[model.ReceivableBill](turn.site.Id,
 			int64(model.ReceivableBillDate(firstDay)), int64(model.ReceivableBillDate(lastDay)))
 		if err != nil {

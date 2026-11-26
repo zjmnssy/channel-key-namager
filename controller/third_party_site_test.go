@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -117,7 +118,9 @@ func TestThirdPartySiteCreateValidation(t *testing.T) {
 	const (
 		urlKey      = "Base URL must be an http or https address without credentials, query or fragment"
 		discountKey = "Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places"
+		startKey    = "Bill start date must be a valid date"
 	)
+	beijingNow := time.Now().In(model.ReceivableBillLocation)
 	type validationCase struct {
 		name      string
 		overrides map[string]any
@@ -136,6 +139,13 @@ func TestThirdPartySiteCreateValidation(t *testing.T) {
 		{name: "blank api key", overrides: map[string]any{"api_key": "   "}, key: "ApiKey is required", field: "api_key"},
 		{name: "missing api key", overrides: map[string]any{"api_key": nil}, key: "ApiKey is required", field: "api_key"},
 		{name: "long api key", overrides: map[string]any{"api_key": strings.Repeat("k", 4097)}, key: "ApiKey must not exceed 4096 characters", field: "api_key"},
+		{name: "start date not a day", overrides: map[string]any{"bill_start_date": 20261131}, key: startKey, field: "bill_start_date"},
+		{name: "start date too short", overrides: map[string]any{"bill_start_date": 2026113}, key: startKey, field: "bill_start_date"},
+		{name: "start date negative", overrides: map[string]any{"bill_start_date": -1}, key: startKey, field: "bill_start_date"},
+		{name: "start date tomorrow", overrides: map[string]any{"bill_start_date": model.ReceivableBillDate(beijingNow.AddDate(0, 0, 1))},
+			key: "Bill start date cannot be later than today", field: "bill_start_date"},
+		{name: "start date a year and a day ago", overrides: map[string]any{"bill_start_date": model.ReceivableBillDate(beijingNow.AddDate(-1, 0, -1))},
+			key: "Bill start date cannot be earlier than one year ago", field: "bill_start_date"},
 		{name: "malformed body", rawBody: "{", key: "Invalid parameters", field: ""},
 	}
 	for _, baseURL := range []string{"", "example.com", "ftp://example.com", "https://", "https://user:pass@example.com",
@@ -326,6 +336,75 @@ func TestThirdPartySiteUpdate(t *testing.T) {
 		assert.False(t, r.Success)
 		assert.Equal(t, "Invalid ID", r.MessageKey)
 	}
+}
+
+func TestThirdPartySiteBillStartDate(t *testing.T) {
+	db := setupThirdPartySiteTest(t)
+	beijingNow := time.Now().In(model.ReceivableBillLocation)
+	day := func(years, days int) int { return model.ReceivableBillDate(beijingNow.AddDate(years, 0, days)) }
+	storedStart := func(id int) int {
+		var site model.ThirdPartySite
+		require.NoError(t, db.First(&site, id).Error)
+		return site.BillStartDate
+	}
+
+	// 新建：不传或传 0 从北京时间今天开始；传了就用传的，最早一年前的今天，最晚今天
+	for _, tc := range []struct {
+		name      string
+		startDate any
+		want      int
+	}{
+		{"Omitted", nil, day(0, 0)},
+		{"Zero", 0, day(0, 0)},
+		{"Today", day(0, 0), day(0, 0)},
+		{"Yesterday", day(0, -1), day(0, -1)},
+		{"YearAgo", day(-1, 0), day(-1, 0)},
+	} {
+		_, created := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+			thirdPartySiteBody(t, map[string]any{"name": tc.name, "bill_start_date": tc.startDate}), nil, CreateThirdPartySite)
+		require.True(t, created.Success, created.Message)
+		assert.Equal(t, tc.want, created.Data.BillStartDate, tc.name)
+		assert.Equal(t, tc.want, storedStart(created.Data.Id), tc.name)
+	}
+
+	_, site := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPost, "/api/third_party_site/",
+		thirdPartySiteBody(t, map[string]any{"name": "Edited", "bill_start_date": day(0, -3)}), nil, CreateThirdPartySite)
+	require.True(t, site.Success, site.Message)
+	update := func(startDate any) thirdPartySiteResult[model.ThirdPartySite] {
+		_, updated := thirdPartySiteCall[model.ThirdPartySite](t, http.MethodPut, fmt.Sprintf("/api/third_party_site/%d", site.Data.Id),
+			thirdPartySiteBody(t, map[string]any{"name": "Edited", "api_key": nil, "bill_start_date": startDate}),
+			gin.Params{{Key: "id", Value: strconv.Itoa(site.Data.Id)}}, UpdateThirdPartySite)
+		return updated
+	}
+
+	// 编辑：不传或传 0 不改
+	for _, startDate := range []any{nil, 0} {
+		kept := update(startDate)
+		require.True(t, kept.Success, kept.Message)
+		assert.Equal(t, day(0, -3), kept.Data.BillStartDate)
+		assert.Equal(t, day(0, -3), storedStart(site.Data.Id))
+	}
+
+	moved := update(day(0, -10))
+	require.True(t, moved.Success, moved.Message)
+	assert.Equal(t, day(0, -10), storedStart(site.Data.Id))
+
+	future := update(day(0, 1))
+	assert.False(t, future.Success)
+	assert.Equal(t, "Bill start date cannot be later than today", future.MessageKey)
+	assert.Equal(t, "bill_start_date", future.Field)
+	assert.Equal(t, day(0, -10), storedStart(site.Data.Id))
+
+	// 已经早于一年前的开始日期原样提交可以保存，换成另一个早于一年前的日期不行
+	require.NoError(t, db.Model(&model.ThirdPartySite{}).Where("id = ?", site.Data.Id).Update("bill_start_date", day(-2, 0)).Error)
+	unchanged := update(day(-2, 0))
+	require.True(t, unchanged.Success, unchanged.Message)
+	assert.Equal(t, day(-2, 0), storedStart(site.Data.Id))
+	tooEarly := update(day(-2, 1))
+	assert.False(t, tooEarly.Success)
+	assert.Equal(t, "Bill start date cannot be earlier than one year ago", tooEarly.MessageKey)
+	assert.Equal(t, "bill_start_date", tooEarly.Field)
+	assert.Equal(t, day(-2, 0), storedStart(site.Data.Id))
 }
 
 func TestThirdPartySiteDelete(t *testing.T) {

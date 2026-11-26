@@ -48,15 +48,25 @@ type DatePickerProps = {
   selected: Date | undefined
   onSelect: (date: Date | undefined) => void
   placeholder?: string
+  /** Earliest selectable date; defaults to 1900-01-01 */
+  minDate?: Date
   /** Latest selectable date; defaults to now */
   maxDate?: Date
+  /** Set by FormControl, so the field's label and messages describe the trigger */
+  id?: string
+  'aria-describedby'?: string
+  'aria-invalid'?: boolean
 }
 
 export function DatePicker({
   selected,
   onSelect,
   placeholder,
+  minDate,
   maxDate,
+  id,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
 }: DatePickerProps) {
   const { t, i18n } = useTranslation()
   const placeholderText = placeholder ?? t('Pick a date')
@@ -66,6 +76,9 @@ export function DatePicker({
       <PopoverTrigger
         render={
           <Button
+            id={id}
+            aria-describedby={ariaDescribedBy}
+            aria-invalid={ariaInvalid}
             variant='outline'
             data-empty={!selected}
             className='data-[empty=true]:text-muted-foreground w-[240px] justify-start text-start font-normal'
@@ -87,7 +100,8 @@ export function DatePicker({
           onSelect={onSelect}
           locale={calendarLocale}
           disabled={(date: Date) =>
-            date > (maxDate ?? new Date()) || date < new Date('1900-01-01')
+            date > (maxDate ?? new Date()) ||
+            date < (minDate ?? new Date('1900-01-01'))
           }
         />
       </PopoverContent>

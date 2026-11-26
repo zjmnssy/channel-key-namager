@@ -17,16 +17,20 @@ const ThirdPartySiteTypeNewAPI = "newapi"
 var ErrThirdPartySiteNotFound = errors.New("Site does not exist")
 
 type ThirdPartySite struct {
-	Id                 int            `json:"id"`
-	Name               string         `json:"name" gorm:"size:128;not null"`
-	Type               string         `json:"type" gorm:"size:32;not null"`
-	BaseURL            string         `json:"base_url" gorm:"column:base_url;size:1024;not null"`
-	RemoteUserID       int            `json:"remote_user_id" gorm:"column:remote_user_id;not null"`
-	ApiKey             string         `json:"-" gorm:"column:api_key;type:text;not null"`
-	ReceivableDiscount float64        `json:"receivable_discount" gorm:"not null"`
-	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
-	UpdatedTime        int64          `json:"updated_time" gorm:"bigint"`
-	DeletedAt          gorm.DeletedAt `json:"-" gorm:"index"`
+	Id                 int     `json:"id"`
+	Name               string  `json:"name" gorm:"size:128;not null"`
+	Type               string  `json:"type" gorm:"size:32;not null"`
+	BaseURL            string  `json:"base_url" gorm:"column:base_url;size:1024;not null"`
+	RemoteUserID       int     `json:"remote_user_id" gorm:"column:remote_user_id;not null"`
+	ApiKey             string  `json:"-" gorm:"column:api_key;type:text;not null"`
+	ReceivableDiscount float64 `json:"receivable_discount" gorm:"not null"`
+	// BillStartDate is the Beijing date (YYYYMMDD) daily receivable bills start on.
+	// Only a site saved before the column existed has 0, until
+	// InitializeThirdPartySiteBillStartDates fills it in.
+	BillStartDate int            `json:"bill_start_date" gorm:"not null;default:0"`
+	CreatedTime   int64          `json:"created_time" gorm:"bigint"`
+	UpdatedTime   int64          `json:"updated_time" gorm:"bigint"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 type ThirdPartySiteInput struct {
@@ -36,6 +40,59 @@ type ThirdPartySiteInput struct {
 	RemoteUserID       int     `json:"remote_user_id"`
 	ApiKey             string  `json:"api_key"`
 	ReceivableDiscount float64 `json:"receivable_discount"`
+	// BillStartDate is a Beijing date (YYYYMMDD); 0 means today when creating and the
+	// stored date when editing.
+	BillStartDate int `json:"bill_start_date"`
+}
+
+// InitializeThirdPartySiteBillStartDates gives each site saved before bill start dates
+// existed the day the bill scan already starts it on, so upgrading reads no earlier
+// bill: the date of its first bill, or else the later of the Beijing day it was
+// created (today when that is unknown) and the latest day due. Sites that have a
+// start date are left alone, so it can run on every start.
+func InitializeThirdPartySiteBillStartDates(now time.Time) error {
+	var sites []ThirdPartySite
+	// Reading only the id and creation time keeps the ApiKey out of a debug SQL log.
+	if err := DB.Unscoped().Select("id", "created_time").Where("bill_start_date = ?", 0).Find(&sites).Error; err != nil {
+		return err
+	}
+	if len(sites) == 0 {
+		return nil
+	}
+	daily, err := ReceivableRowCoverage[ReceivableBill]()
+	if err != nil {
+		return err
+	}
+	latestDue := ReceivableBillDate(ReceivableLatestBillDay(now))
+	for _, site := range sites {
+		startDate := ReceivableBillDate(now)
+		if site.CreatedTime > 0 {
+			startDate = ReceivableBillDate(time.Unix(site.CreatedTime, 0))
+		}
+		startDate = max(startDate, latestDue)
+		if cover, found := daily[site.Id]; found {
+			startDate = int(cover.FirstPeriod)
+		}
+		err := DB.Unscoped().Model(&ThirdPartySite{}).Where("id = ? AND bill_start_date = ?", site.Id, 0).
+			Update("bill_start_date", startDate).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkThirdPartySiteBillStartDate rejects a bill start date being set that is later
+// than today or earlier than the same day a year ago, both in Beijing time.
+func checkThirdPartySiteBillStartDate(date int, now time.Time) error {
+	beijingNow := now.In(ReceivableBillLocation)
+	if date > ReceivableBillDate(beijingNow) {
+		return &ThirdPartySiteFieldError{Field: "bill_start_date", Message: "Bill start date cannot be later than today"}
+	}
+	if date < ReceivableBillDate(beijingNow.AddDate(-1, 0, 0)) {
+		return &ThirdPartySiteFieldError{Field: "bill_start_date", Message: "Bill start date cannot be earlier than one year ago"}
+	}
+	return nil
 }
 
 // ThirdPartySiteFieldError reports the request field that failed validation.
@@ -96,6 +153,11 @@ func normalizeThirdPartySiteInput(input ThirdPartySiteInput, editing bool) (Thir
 	if !ok {
 		return ThirdPartySiteInput{}, false, &ThirdPartySiteFieldError{Field: "receivable_discount", Message: thirdPartySiteDiscountMessage}
 	}
+	if input.BillStartDate != 0 {
+		if _, ok := ReceivableBillDayStart(input.BillStartDate); !ok {
+			return ThirdPartySiteInput{}, false, &ThirdPartySiteFieldError{Field: "bill_start_date", Message: "Bill start date must be a valid date"}
+		}
+	}
 	return ThirdPartySiteInput{
 		Name:               name,
 		Type:               input.Type,
@@ -103,6 +165,7 @@ func normalizeThirdPartySiteInput(input ThirdPartySiteInput, editing bool) (Thir
 		RemoteUserID:       input.RemoteUserID,
 		ApiKey:             apiKey,
 		ReceivableDiscount: discount,
+		BillStartDate:      input.BillStartDate,
 	}, keepApiKey, nil
 }
 
@@ -139,6 +202,13 @@ func CreateThirdPartySite(input ThirdPartySiteInput) (*ThirdPartySite, error) {
 		return nil, err
 	}
 	now := common.GetTimestamp()
+	billStartDate := ReceivableBillDate(time.Unix(now, 0))
+	if normalized.BillStartDate != 0 {
+		if err := checkThirdPartySiteBillStartDate(normalized.BillStartDate, time.Unix(now, 0)); err != nil {
+			return nil, err
+		}
+		billStartDate = normalized.BillStartDate
+	}
 	site := &ThirdPartySite{
 		Name:               normalized.Name,
 		Type:               normalized.Type,
@@ -146,6 +216,7 @@ func CreateThirdPartySite(input ThirdPartySiteInput) (*ThirdPartySite, error) {
 		RemoteUserID:       normalized.RemoteUserID,
 		ApiKey:             normalized.ApiKey,
 		ReceivableDiscount: normalized.ReceivableDiscount,
+		BillStartDate:      billStartDate,
 		CreatedTime:        now,
 		UpdatedTime:        now,
 	}
@@ -179,6 +250,14 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 		if err := ensureThirdPartySiteNameFree(tx, normalized.Name, id); err != nil {
 			return err
 		}
+		// A date already stored passes again unchecked, so a site whose start date is more
+		// than a year old can still be saved.
+		if normalized.BillStartDate != 0 && normalized.BillStartDate != site.BillStartDate {
+			if err := checkThirdPartySiteBillStartDate(normalized.BillStartDate, time.Now()); err != nil {
+				return err
+			}
+			site.BillStartDate = normalized.BillStartDate
+		}
 		site.Name = normalized.Name
 		site.Type = normalized.Type
 		oldBaseURL := site.BaseURL
@@ -186,7 +265,7 @@ func UpdateThirdPartySite(id int, input ThirdPartySiteInput) (*ThirdPartySite, e
 		site.RemoteUserID = normalized.RemoteUserID
 		site.ReceivableDiscount = normalized.ReceivableDiscount
 		site.UpdatedTime = common.GetTimestamp()
-		columns := []string{"name", "type", "base_url", "remote_user_id", "receivable_discount", "updated_time"}
+		columns := []string{"name", "type", "base_url", "remote_user_id", "receivable_discount", "bill_start_date", "updated_time"}
 		if !keepApiKey {
 			site.ApiKey = normalized.ApiKey
 			columns = append(columns, "api_key")
