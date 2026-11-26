@@ -170,3 +170,61 @@ func settlePayableUsageDay(tx *gorm.DB, siteID, billDate int, quota, quotaPerUni
 	}
 	return nil
 }
+
+// payableUsageSettled 是“按使用明细结算的站点天”（设计 5.4）：使用明细结算记录 s 连上同站点同日期、当前状态为成功的每日账单 b。
+// 每日账单当前不是成功（重新同步后在重试中或失败）的记录不算，这一天回到渠道明细结算。不带 Select，由调用方选列；
+// 提供商账单的两部分、渠道消费明细的“不计入”标记与导出都从这里判断，保证口径一致。
+func payableUsageSettled() *gorm.DB {
+	return DB.Table("payable_usage_settlements AS s").
+		Joins("JOIN receivable_bills AS b ON b.site_id = s.site_id AND b.bill_date = s.bill_date AND b.status = ?", ReceivableBillStatusSuccess)
+}
+
+// payableUsageSettledDays 返回 siteIDs 与 dates 组合中按使用明细结算的站点天，以 [站点 ID, 账单日期] 为键。
+// 调用方传入去重后的站点和日期，绑定参数个数不随明细行数增长。
+func payableUsageSettledDays(siteIDs, dates []int) (map[[2]int]bool, error) {
+	var days []struct {
+		SiteId   int
+		BillDate int
+	}
+	err := payableUsageSettled().Select("s.site_id, s.bill_date").Where("s.site_id IN ? AND s.bill_date IN ?", siteIDs, dates).Scan(&days).Error
+	if err != nil {
+		return nil, err
+	}
+	settled := make(map[[2]int]bool, len(days))
+	for _, day := range days {
+		settled[[2]int{day.SiteId, day.BillDate}] = true
+	}
+	return settled, nil
+}
+
+// CountPayableUnsyncedUsageSites 返回设计 5.5 的 N：筛选日期、筛选站点内，按此刻的规则与结算方式应按使用明细结算（整站站点、没有冲突、
+// 规则的提供商按使用明细结算），但每日账单存在且不是成功（重试中或失败）的站点天数，这些站点天暂按渠道明细结算。
+// 每日账单行还没有生成的日期、已删除的站点不计；与 CountPayablePullGaps 一样不看提供商筛选。
+func CountPayableUnsyncedUsageSites(filter PayableUsageFilter) (int64, error) {
+	wholeSites, err := payableWholeSites(DB, filter.SiteIDs)
+	if err != nil {
+		return 0, err
+	}
+	providerIDs := make([]int, 0, len(wholeSites))
+	for _, site := range wholeSites {
+		providerIDs = append(providerIDs, site.Provider.Id)
+	}
+	methods, err := payableSettlementMethods(DB, providerIDs)
+	if err != nil {
+		return 0, err
+	}
+	siteIDs := make([]int, 0, len(wholeSites))
+	for _, site := range wholeSites {
+		if !site.Conflict && methods[site.Provider.Id] == PayableSettlementUsage {
+			siteIDs = append(siteIDs, site.SiteID)
+		}
+	}
+	if len(siteIDs) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err = DB.Model(&ReceivableBill{}).
+		Where("site_id IN ? AND bill_date >= ? AND bill_date <= ? AND status <> ?", siteIDs, filter.StartDate, filter.EndDate, ReceivableBillStatusSuccess).
+		Count(&count).Error
+	return count, err
+}

@@ -1,18 +1,23 @@
 package controller
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
 )
 
@@ -374,4 +379,224 @@ func TestPayableSettlementOnScanAndResync(t *testing.T) {
 	assert.EqualValues(t, 2500000, record.Quota)
 	require.NotNil(t, record.PayableDiscount)
 	assert.Equal(t, 0.9, *record.PayableDiscount)
+}
+
+// payableSettlementFixture 是提供商账单合并用的数据：owner 折扣 0.7、按使用明细结算，A、W 是它的整站站点，B 是普通站点。
+type payableSettlementFixture struct {
+	owner, other        *model.User
+	siteA, siteW, siteB *model.ThirdPartySite
+}
+
+// payableSettlementSeedBills 建 11-23 到 11-25 的日账单、使用明细结算记录与渠道明细。日账单和记录直接写库、不经结算逻辑，
+// 数据就是这里写的样子（例如 W 在 11-23 的记录折扣为空，虽然 owner 的折扣是 0.7）。
+//   - 11-25：A 的日账单成功、有记录；A 的两行明细（owner、other 各增量 50 万）都不计入，B 的一行 owner 明细（增量 6172839）计入。
+//   - 11-24：A 的日账单在重试中，它的旧记录（额度 999）不用；A 的一行 owner 明细（增量 100 万）计入。
+//   - 11-23：A、W 的日账单都成功，各有一条额度 50 万的记录（A 折扣 0.7、W 折扣为空）；W 当天的拉取失败。
+func payableSettlementSeedBills(t *testing.T, db *gorm.DB) payableSettlementFixture {
+	t.Helper()
+	owner := channelPushSeedSupplier(t, db, "ps-owner")
+	require.NoError(t, db.Model(owner).Update("payable_discount", 0.7).Error)
+	payableSettlementSetMethod(t, db, owner.Id, model.PayableSettlementUsage)
+	f := payableSettlementFixture{owner: owner, other: channelPushSeedSupplier(t, db, "ps-other"),
+		siteA: payableSettlementSeedWholeSite(t, db, "ps-a", owner), siteW: payableSettlementSeedWholeSite(t, db, "ps-w", owner)}
+	f.siteB = receivableSeedSite(t, db, "ps-b", "https://ps-b.example.com", 1)
+
+	d07 := payablePtr(0.7)
+	for _, bill := range []*model.ReceivableBill{
+		payableSettlementSuccessBill(f.siteA.Id, 20261125, 103889618766),
+		{SiteId: f.siteA.Id, BillDate: 20261124, Status: model.ReceivableBillStatusRetrying},
+		payableSettlementSuccessBill(f.siteA.Id, 20261123, 500000),
+		payableSettlementSuccessBill(f.siteW.Id, 20261123, 500000),
+	} {
+		require.NoError(t, db.Create(bill).Error)
+	}
+	for _, record := range []model.PayableUsageSettlement{
+		{SiteId: f.siteA.Id, BillDate: 20261125, Quota: 103889618766, PayableDiscount: d07},
+		{SiteId: f.siteA.Id, BillDate: 20261124, Quota: 999, PayableDiscount: d07},
+		{SiteId: f.siteA.Id, BillDate: 20261123, Quota: 500000, PayableDiscount: d07},
+		{SiteId: f.siteW.Id, BillDate: 20261123, Quota: 500000},
+	} {
+		record.ProviderId, record.ProviderName, record.QuotaPerUnit = owner.Id, "ps-owner", 500000
+		require.NoError(t, db.Create(&record).Error)
+	}
+
+	task := payableSeedTask(t, db, 20261125, model.PayableTaskSuccess)
+	pullA := payableSeedPull(t, db, task, f.siteA.Id, model.PayablePullSuccess)
+	payableSeedUsage(t, db, pullA, 1, 0, payablePtr(int64(500000)), owner.Id, d07)
+	payableSeedUsage(t, db, pullA, 2, 0, payablePtr(int64(500000)), f.other.Id, nil)
+	payableSeedUsage(t, db, payableSeedPull(t, db, task, f.siteB.Id, model.PayablePullSuccess), 1, 0, payablePtr(int64(6172839)), owner.Id, d07)
+	pullA = payableSeedPull(t, db, payableSeedTask(t, db, 20261124, model.PayableTaskSuccess), f.siteA.Id, model.PayablePullSuccess)
+	payableSeedUsage(t, db, pullA, 1, 0, payablePtr(int64(1000000)), owner.Id, d07)
+	payableSeedPull(t, db, payableSeedTask(t, db, 20261123, model.PayableTaskPartialFailed), f.siteW.Id, model.PayablePullFailed)
+	return f
+}
+
+// payableSettlementExportRows 以中文调用导出处理函数，返回工作表各行的单元格原值。
+func payableSettlementExportRows(t *testing.T, target string, handler gin.HandlerFunc) [][]string {
+	t.Helper()
+	header := http.Header{}
+	header.Set("Accept-Language", "zh-CN")
+	response := receivableRequest(t, http.MethodGet, target, header, nil, handler)
+	require.Equal(t, http.StatusOK, response.Code)
+	file, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
+	require.NoError(t, err)
+	defer func() { _ = file.Close() }()
+	rows, err := file.GetRows(file.GetSheetName(0), excelize.Options{RawCellValue: true})
+	require.NoError(t, err)
+	return rows
+}
+
+// 提供商账单 = 使用明细结算部分 + 渠道明细结算部分（设计 5.4）：按使用明细结算的站点天（有记录、且日账单当前成功）的明细不论提供商一律不计入；
+// 日账单当前不是成功的记录不用，这一天回到渠道明细。两部分合并后统一排序、分页，导出与页面同序、列不变。
+func TestPayableProviderBillsWithUsageSettlement(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupPayableSettlementTest(t)
+	f := payableSettlementSeedBills(t, db)
+	list := func(query string) (map[string]any, []map[string]any) {
+		t.Helper()
+		response := payableGet(t, "/api/payable_bill/providers?start_date=20261123&end_date=20261125"+query, nil, GetPayableProviderBills)
+		reply := receivableReplyOf(t, response)
+		require.True(t, reply.Success, response.Body.String())
+		var page map[string]any
+		require.NoError(t, common.Unmarshal(reply.Data, &page))
+		raw, _ := page["items"].([]any)
+		items := make([]map[string]any, len(raw))
+		for i, item := range raw {
+			items[i] = item.(map[string]any)
+		}
+		return page, items
+	}
+	type row struct {
+		date                 float64
+		method, name, amount string
+		discount             any
+		missing              bool
+		payable              any
+	}
+	rowsOf := func(items []map[string]any) []row {
+		rows := make([]row, len(items))
+		for i, item := range items {
+			rows[i].date, _ = item["bill_date"].(float64)
+			rows[i].method, _ = item["settlement_method"].(string)
+			rows[i].name, _ = item["provider_name"].(string)
+			rows[i].amount, _ = item["amount"].(string)
+			rows[i].discount, rows[i].payable = item["discount"], item["payable_amount"]
+			rows[i].missing, _ = item["discount_missing"].(bool)
+		}
+		return rows
+	}
+	ownerName := "p" + strconv.Itoa(f.owner.Id)
+	// 顺序：日期倒序、提供商升序，同一天同一提供商使用明细结算在前；other 在 A 的 11-25 的明细被排除，没有行
+	want := []row{
+		{20261125, "usage", "ps-owner", "207779.237532", 0.7, false, "145445.466272"},
+		{20261125, "channel", ownerName, "12.345678", 0.7, false, "8.641975"},
+		{20261124, "channel", ownerName, "2.000000", 0.7, false, "1.400000"},
+		{20261123, "usage", "ps-owner", "2.000000", nil, true, "0.700000"},
+	}
+
+	page, items := list("")
+	assert.EqualValues(t, 4, page["total"])
+	assert.EqualValues(t, 1, page["unsynced_usage_site_count"]) // A 的 11-24 在重试中
+	assert.EqualValues(t, 1, page["incomplete_site_count"])     // W 的 11-23 拉取失败照常计入（方案 A）
+	assert.EqualValues(t, 0, page["mismatch_site_count"])
+	assert.Equal(t, want, rowsOf(items))
+
+	// 分页拆开同一天同一提供商的两行
+	page, items = list("&p=2&page_size=1")
+	assert.EqualValues(t, 4, page["total"])
+	assert.Equal(t, want[1:2], rowsOf(items))
+
+	// 站点筛选：只有 B
+	page, items = list("&site_ids=" + strconv.Itoa(f.siteB.Id))
+	assert.EqualValues(t, 1, page["total"])
+	assert.Equal(t, want[1:2], rowsOf(items))
+	assert.EqualValues(t, 0, page["unsynced_usage_site_count"])
+
+	// 提供商筛选 0：使用明细结算部分不会有提供商 0 的行
+	page, items = list("&provider_ids=0")
+	assert.EqualValues(t, 0, page["total"])
+	assert.Empty(t, items)
+
+	// 已保存的记录不随设置变化：owner 改回渠道明细结算、删掉 A 的“全部渠道”规则后，4 行完全不变
+	payableSettlementSetMethod(t, db, f.owner.Id, model.PayableSettlementChannel)
+	require.NoError(t, db.Where("site_id = ? AND remote_channel_id = 0", f.siteA.Id).Delete(&model.PayableProviderOverride{}).Error)
+	_, items = list("")
+	assert.Equal(t, want, rowsOf(items))
+
+	// 快照：改掉 owner 的用户名、角色后，使用明细结算行的名称仍是 ps-owner
+	require.NoError(t, db.Model(f.owner).Updates(map[string]any{"username": "ps-renamed", "role": common.RoleCommonUser}).Error)
+	_, items = list("")
+	assert.Equal(t, want, rowsOf(items))
+
+	// 导出：列不变（不加结算方式），行与页面同序，同一天同一提供商仍是两行
+	rows := payableSettlementExportRows(t, "/api/payable_bill/providers/export?start_date=20261123&end_date=20261125", ExportPayableProviderBills)
+	require.NotEmpty(t, rows)
+	assert.Equal(t, []string{"账单日期", "提供商", "金额(折前)($)", "折扣(应付)", "应付金额($)", "备注"}, rows[0])
+	exported := make([][]string, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		require.GreaterOrEqual(t, len(row), 2)
+		exported = append(exported, row[:2])
+	}
+	assert.Equal(t, [][]string{{"2026-11-25", "ps-owner"}, {"2026-11-25", ownerName}, {"2026-11-24", ownerName}, {"2026-11-23", "ps-owner"}}, exported)
+}
+
+// 渠道消费明细每行带 usage_settled（设计 5.6），与提供商账单排除的站点天一致；导出的“计入账单”在拉取完整且不按使用明细结算时才为“是”。
+func TestPayableUsagesMarkUsageSettledDays(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupPayableSettlementTest(t)
+	f := payableSettlementSeedBills(t, db)
+
+	_, items := receivableListOf(t, payableGet(t, "/api/payable_bill/usages?start_date=20261124&end_date=20261125", nil, GetPayableUsages))
+	type mark struct {
+		date, siteID, channelID int
+		settled, counted        any
+	}
+	got := make([]mark, len(items))
+	for i, item := range items {
+		got[i] = mark{int(item["bill_date"].(float64)), int(item["site_id"].(float64)), int(item["remote_channel_id"].(float64)),
+			item["usage_settled"], item["counted"]}
+	}
+	// A 的 11-24 日账单在重试中、B 不是整站站点：都不按使用明细结算
+	assert.Equal(t, []mark{
+		{20261125, f.siteA.Id, 1, true, true},
+		{20261125, f.siteA.Id, 2, true, true},
+		{20261125, f.siteB.Id, 1, false, true},
+		{20261124, f.siteA.Id, 1, false, true},
+	}, got)
+
+	rows := payableSettlementExportRows(t, "/api/payable_bill/usages/export?start_date=20261124&end_date=20261125", ExportPayableUsages)
+	require.Len(t, rows, 5)
+	assert.Equal(t, "计入账单", rows[0][17])
+	counted := make([][]string, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		require.Len(t, row, 18)
+		counted = append(counted, []string{row[1], row[2], row[6], row[17]})
+	}
+	siteA, siteB := strconv.Itoa(f.siteA.Id), strconv.Itoa(f.siteB.Id)
+	assert.Equal(t, [][]string{
+		{"2026-11-25", siteA, "1", "否"},
+		{"2026-11-25", siteA, "2", "否"},
+		{"2026-11-25", siteB, "1", "是"},
+		{"2026-11-24", siteA, "1", "是"},
+	}, counted)
+
+	// 设置提供商返回的行同样带 usage_settled
+	var usage model.PayableChannelUsage
+	require.NoError(t, db.Where("site_id = ? AND bill_date = ? AND provider_id = ?", f.siteA.Id, 20261125, f.other.Id).First(&usage).Error)
+	id := strconv.Itoa(usage.Id)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/payable_bill/usages/"+id+"/provider", strings.NewReader(`{"provider_id":`+strconv.Itoa(f.owner.Id)+`}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+	c.Set("username", "root")
+	SetPayableUsageProvider(c)
+	reply := receivableReplyOf(t, response)
+	require.True(t, reply.Success, response.Body.String())
+	var view map[string]any
+	require.NoError(t, common.Unmarshal(reply.Data, &view))
+	assert.EqualValues(t, f.owner.Id, view["provider_id"])
+	assert.Equal(t, true, view["usage_settled"])
 }
