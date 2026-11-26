@@ -1,6 +1,7 @@
 package model
 
 import (
+	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
 )
 
@@ -227,4 +228,116 @@ func CountPayableUnsyncedUsageSites(filter PayableUsageFilter) (int64, error) {
 		Where("site_id IN ? AND bill_date >= ? AND bill_date <= ? AND status <> ?", siteIDs, filter.StartDate, filter.EndDate, ReceivableBillStatusSuccess).
 		Count(&count).Error
 	return count, err
+}
+
+// PayableSettlementFilter 是结算方式列表的筛选条件，字段为空表示不筛选；Methods 取 PayableSettlementChannel / PayableSettlementUsage，
+// 渠道明细结算包括从未设置过结算方式的提供商。
+type PayableSettlementFilter struct {
+	ProviderIDs []int
+	Methods     []string
+}
+
+// PayableWholeSite 是结算方式列表里提供商的一个整站站点（payableWholeSite 的接口形态）。
+type PayableWholeSite struct {
+	SiteId   int    `json:"site_id"`
+	SiteName string `json:"site_name"`
+	Conflict bool   `json:"conflict"` // 站点上有渠道被指定给其他供应商，仍按渠道明细结算
+}
+
+// PayableSettlementRow 是结算方式列表的一行：一个渠道供应商、它的结算方式与整站站点。
+type PayableSettlementRow struct {
+	ProviderId      int                `json:"provider_id"`
+	Username        string             `json:"username"`
+	Disabled        bool               `json:"disabled"`
+	PayableDiscount *float64           `json:"payable_discount"`
+	Method          string             `json:"method"`       // 没有记录时为渠道明细结算
+	UpdatedTime     int64              `json:"updated_time"` // 0 = 从未设置
+	WholeSites      []PayableWholeSite `json:"whole_sites"`  // 没有时为空数组，不是 null
+}
+
+// ListPayableSettlementMethods 按提供商 ID 升序返回渠道供应商（角色 5、未软删除，含已禁用）的结算方式，total 不受分页影响，limit <= 0 时返回全部。
+// 供应商左连 payable_settlement_methods，没有记录的按渠道明细结算，列出与筛选用同一个表达式。整站站点用一次 payableWholeSites
+// 取出后按提供商填入，不逐行查询。
+func ListPayableSettlementMethods(filter PayableSettlementFilter, offset, limit int) ([]PayableSettlementRow, int64, error) {
+	const method = "COALESCE(m.method, '" + PayableSettlementChannel + "')"
+	query := DB.Model(&User{}).Joins("LEFT JOIN payable_settlement_methods AS m ON m.provider_id = users.id").
+		Where("users.role = ?", common.RoleChannelSupplierUser)
+	if len(filter.ProviderIDs) > 0 {
+		query = query.Where("users.id IN ?", filter.ProviderIDs)
+	}
+	if len(filter.Methods) > 0 {
+		query = query.Where(method+" IN ?", filter.Methods)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	query = query.Select("users.id, users.username, users.status, users.payable_discount, " + method + " AS method, " +
+		"COALESCE(m.updated_time, 0) AS updated_time").Order("users.id")
+	if limit > 0 {
+		query = query.Offset(offset).Limit(limit)
+	}
+	var providers []struct {
+		Id              int
+		Username        string
+		Status          int
+		PayableDiscount *float64
+		Method          string
+		UpdatedTime     int64
+	}
+	if err := query.Scan(&providers).Error; err != nil {
+		return nil, 0, err
+	}
+	rows := make([]PayableSettlementRow, len(providers))
+	if len(providers) == 0 {
+		return rows, total, nil
+	}
+
+	index := make(map[int]int, len(providers))
+	for i, provider := range providers {
+		rows[i] = PayableSettlementRow{ProviderId: provider.Id, Username: provider.Username, Disabled: provider.Status != common.UserStatusEnabled,
+			PayableDiscount: provider.PayableDiscount, Method: provider.Method, UpdatedTime: provider.UpdatedTime, WholeSites: []PayableWholeSite{}}
+		index[provider.Id] = i
+	}
+	wholeSites, err := payableWholeSites(DB, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, site := range wholeSites {
+		if i, ok := index[site.Provider.Id]; ok {
+			rows[i].WholeSites = append(rows[i].WholeSites, PayableWholeSite{SiteId: site.SiteID, SiteName: site.SiteName, Conflict: site.Conflict})
+		}
+	}
+	return rows, total, nil
+}
+
+// SetPayableSettlementMethod 在一个事务里把提供商 providerID 的结算方式设为 method（调用方保证是两个取值之一），与当前相同时也保存，
+// 只更新更新时间。提供商必须此刻是渠道供应商（已禁用的也算），否则返回 ErrPayableProviderInvalid。previous 是原来的结算方式，
+// 没有记录时为渠道明细结算；provider 只有 id、username、payable_discount。只影响之后同步成功的每日账单，已保存的结算记录不变。
+// 已有记录用普通查询读出，再按主键更新、没有时新建：不用锁定读，MySQL 可重复读下它对不存在的键留下的间隙锁，
+// 会让两个提供商同时首次设置时互相等待而死锁。
+func SetPayableSettlementMethod(providerID int, method string, now int64) (previous string, provider User, err error) {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		suppliers, err := payableSuppliersIn(tx, []int{providerID})
+		if err != nil {
+			return err
+		}
+		supplier, ok := suppliers[providerID]
+		if !ok {
+			return ErrPayableProviderInvalid
+		}
+		provider = supplier
+		var existing PayableSettlementMethod
+		if err := tx.Where("provider_id = ?", providerID).Limit(1).Find(&existing).Error; err != nil {
+			return err
+		}
+		if existing.Id == 0 {
+			previous = PayableSettlementChannel
+			return tx.Create(&PayableSettlementMethod{ProviderId: providerID, Method: method, CreatedTime: now, UpdatedTime: now}).Error
+		}
+		previous = existing.Method
+		return tx.Model(&PayableSettlementMethod{}).Where("id = ?", existing.Id).
+			Updates(map[string]any{"method": method, "updated_time": now}).Error
+	})
+	return previous, provider, err
 }

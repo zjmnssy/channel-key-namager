@@ -600,3 +600,149 @@ func TestPayableUsagesMarkUsageSettledDays(t *testing.T) {
 	assert.EqualValues(t, f.owner.Id, view["provider_id"])
 	assert.Equal(t, true, view["usage_settled"])
 }
+
+// 结算方式的列表与设置接口（设计 5.1、5.8、5.10）。列表只列渠道供应商（含已禁用），从未设置的按渠道明细结算、更新时间为 0；
+// 整站站点只算未删除站点上的“全部渠道”规则，并标出冲突。设置只能给渠道供应商，与当前相同也保存；处理函数记成功与失败的审计，
+// ID 与请求体不合法的在它之前返回，留给兜底审计。
+func TestPayableSettlementMethodAPI(t *testing.T) {
+	db := setupPayableSettlementTest(t)
+	owner := channelPushSeedSupplier(t, db, "psm-owner")
+	require.NoError(t, db.Model(owner).Update("payable_discount", 0.7).Error)
+	disabled := channelPushSeedSupplier(t, db, "psm-disabled")
+	require.NoError(t, db.Model(disabled).Update("status", common.UserStatusDisabled).Error)
+	// 不该出现在列表里的：普通管理员、普通用户、已软删除的供应商
+	admin := &model.User{Username: "psm-admin", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, AffCode: "psm-admin"}
+	require.NoError(t, db.Create(admin).Error)
+	require.NoError(t, db.Create(&model.User{Username: "psm-user", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AffCode: "psm-user"}).Error)
+	deleted := channelPushSeedSupplier(t, db, "psm-deleted")
+	require.NoError(t, db.Delete(deleted).Error)
+
+	siteA := payableSettlementSeedWholeSite(t, db, "psm-a", owner)
+	siteC := payableSettlementSeedWholeSite(t, db, "psm-c", owner)
+	providerMappingSeedRule(t, db, siteC.Id, 5, disabled.Id, model.PayableRuleChannel) // 渠道指给另一个供应商（已禁用也是）：冲突
+	siteD := payableSettlementSeedWholeSite(t, db, "psm-d", owner)
+	require.NoError(t, db.Delete(siteD).Error) // 站点已删除：不是整站站点
+	siteU := receivableSeedSite(t, db, "psm-u", "https://psm-u.example.com", 1)
+	providerMappingSeedRule(t, db, siteU.Id, 0, owner.Id, model.PayableRuleUnresolved) // “不能解析的渠道”规则：不是整站站点
+
+	list := func(query string) (int, []map[string]any) {
+		t.Helper()
+		return receivableListOf(t, payableGet(t, "/api/payable_bill/settlement_methods"+query, nil, GetPayableSettlementMethods))
+	}
+	root := &model.User{Id: 1, Username: "root", Role: common.RoleRootUser}
+	setMethod := func(id, body string) receivableReply {
+		t.Helper()
+		return receivableReplyOf(t, channelSupplierRequest(t, http.MethodPut, "/api/payable_bill/settlement_methods/"+id, body, root,
+			gin.Params{{Key: "provider_id", Value: id}}, SetPayableSettlementMethod))
+	}
+	type audit struct {
+		Success bool
+		Content string
+		Params  map[string]any
+	}
+	audits := func() []audit {
+		t.Helper()
+		var logs []model.AuditLog
+		require.NoError(t, model.LOG_DB.Where("action = ?", "payable_bill.set_settlement_method").Order("id").Find(&logs).Error)
+		result := make([]audit, len(logs))
+		for i, log := range logs {
+			require.NotNil(t, log.Other.Op)
+			result[i] = audit{Success: log.Success, Content: log.Content, Params: providerMappingJSON(t, log.Other.Op.Params)}
+		}
+		return result
+	}
+
+	// 1. 按提供商 ID 升序；整站站点按站点 ID 升序，没有时是 [] 而不是 null
+	ownerRow := map[string]any{"provider_id": float64(owner.Id), "username": "psm-owner", "disabled": false, "payable_discount": 0.7,
+		"method": "channel", "updated_time": float64(0), "whole_sites": []any{
+			map[string]any{"site_id": float64(siteA.Id), "site_name": "psm-a", "conflict": false},
+			map[string]any{"site_id": float64(siteC.Id), "site_name": "psm-c", "conflict": true},
+		}}
+	disabledRow := map[string]any{"provider_id": float64(disabled.Id), "username": "psm-disabled", "disabled": true, "payable_discount": nil,
+		"method": "channel", "updated_time": float64(0), "whole_sites": []any{}}
+	total, items := list("")
+	assert.Equal(t, 2, total)
+	assert.Equal(t, []map[string]any{ownerRow, disabledRow}, items)
+
+	// 2. 设为使用明细结算：新建记录，原结算方式是渠道明细结算
+	ownerID := strconv.Itoa(owner.Id)
+	reply := setMethod(ownerID, `{"method":"usage"}`)
+	require.True(t, reply.Success, reply.MessageKey)
+	var saved map[string]any
+	require.NoError(t, common.Unmarshal(reply.Data, &saved))
+	updated, _ := saved["updated_time"].(float64)
+	assert.Positive(t, updated)
+	assert.Equal(t, map[string]any{"provider_id": float64(owner.Id), "method": "usage", "updated_time": updated}, saved)
+	logs := audits()
+	require.Len(t, logs, 1)
+	assert.Equal(t, audit{Success: true, Content: "Set the settlement method of provider #" + ownerID, Params: map[string]any{
+		"provider_id": float64(owner.Id), "method": "usage", "provider_name": "psm-owner", "previous_method": "channel"}}, logs[0])
+
+	// 3. 筛选与分页：从未设置过的 disabled 算渠道明细结算
+	ownerRow["method"], ownerRow["updated_time"] = "usage", updated
+	for _, tc := range []struct {
+		query string
+		total int
+		rows  []map[string]any
+	}{
+		{"?methods=usage", 1, []map[string]any{ownerRow}},
+		{"?methods=channel", 1, []map[string]any{disabledRow}},
+		{"?methods=channel,usage", 2, []map[string]any{ownerRow, disabledRow}},
+		{"?provider_ids=" + strconv.Itoa(disabled.Id), 1, []map[string]any{disabledRow}},
+		{"?p=2&page_size=1", 2, []map[string]any{disabledRow}},
+	} {
+		total, items = list(tc.query)
+		assert.Equal(t, tc.total, total, tc.query)
+		assert.Equal(t, tc.rows, items, tc.query)
+	}
+
+	// 4. 与当前相同也保存：更新这一条记录，原结算方式是 usage
+	reply = setMethod(ownerID, `{"method":"usage"}`)
+	require.True(t, reply.Success, reply.MessageKey)
+	logs = audits()
+	require.Len(t, logs, 2)
+	assert.True(t, logs[1].Success)
+	assert.Equal(t, "usage", logs[1].Params["previous_method"])
+
+	// 5. ID、请求体不合法：在处理函数记审计之前返回，留给兜底审计
+	for _, id := range []string{"abc", "0"} {
+		reply = setMethod(id, `{"method":"usage"}`)
+		assert.False(t, reply.Success, id)
+		assert.Equal(t, "Invalid ID", reply.MessageKey, id)
+	}
+	for _, body := range []string{`{}`, `{"method":null}`} {
+		reply = setMethod(ownerID, body)
+		assert.False(t, reply.Success, body)
+		assert.Equal(t, "Invalid parameters", reply.MessageKey, body)
+	}
+	assert.Len(t, audits(), 2)
+
+	// 结算方式不是两个取值之一，或用户不是渠道供应商（普通管理员、已软删除的供应商、不存在的用户）：处理函数记失败，数据不变
+	reply = setMethod(ownerID, `{"method":"weekly"}`)
+	assert.False(t, reply.Success)
+	assert.Equal(t, "Invalid parameters", reply.MessageKey)
+	failed := []audit{{Content: "Failed to set the settlement method",
+		Params: map[string]any{"provider_id": float64(owner.Id), "method": "weekly", "failure_reason": "invalid_method"}}}
+	for _, id := range []int{admin.Id, deleted.Id, 999999} {
+		reply = setMethod(strconv.Itoa(id), `{"method":"usage"}`)
+		assert.False(t, reply.Success, id)
+		assert.Equal(t, "The selected user is not a channel supplier", reply.MessageKey, id)
+		failed = append(failed, audit{Content: "Failed to set the settlement method",
+			Params: map[string]any{"provider_id": float64(id), "method": "usage", "failure_reason": "invalid_provider"}})
+	}
+	logs = audits()
+	require.Len(t, logs, 6)
+	assert.Equal(t, failed, logs[2:])
+	var methods []model.PayableSettlementMethod
+	require.NoError(t, db.Find(&methods).Error)
+	require.Len(t, methods, 1)
+	assert.Equal(t, owner.Id, methods[0].ProviderId)
+	assert.Equal(t, model.PayableSettlementUsage, methods[0].Method)
+
+	// 列表的筛选参数不合法
+	for _, query := range []string{"?methods=weekly", "?provider_ids=0"} {
+		reply = receivableReplyOf(t, payableGet(t, "/api/payable_bill/settlement_methods"+query, nil, GetPayableSettlementMethods))
+		assert.False(t, reply.Success, query)
+		assert.Equal(t, "Invalid parameters", reply.MessageKey, query)
+	}
+}

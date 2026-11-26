@@ -261,14 +261,16 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/receivable_bill/sites":           accessTokenSessionRule,
 
 	// router/api-router.go: /api/payable_bill
-	"GET /api/payable_bill/tasks":               accessTokenSessionRule,
-	"GET /api/payable_bill/tasks/:id/sites":     accessTokenSessionRule,
-	"GET /api/payable_bill/usages":              accessTokenSessionRule,
-	"GET /api/payable_bill/providers":           accessTokenSessionRule,
-	"GET /api/payable_bill/usages/export":       accessTokenSessionRule,
-	"GET /api/payable_bill/providers/export":    accessTokenSessionRule,
-	"GET /api/payable_bill/options":             accessTokenSessionRule,
-	"PUT /api/payable_bill/usages/:id/provider": accessTokenSessionRule,
+	"GET /api/payable_bill/tasks":                           accessTokenSessionRule,
+	"GET /api/payable_bill/tasks/:id/sites":                 accessTokenSessionRule,
+	"GET /api/payable_bill/usages":                          accessTokenSessionRule,
+	"GET /api/payable_bill/providers":                       accessTokenSessionRule,
+	"GET /api/payable_bill/usages/export":                   accessTokenSessionRule,
+	"GET /api/payable_bill/providers/export":                accessTokenSessionRule,
+	"GET /api/payable_bill/options":                         accessTokenSessionRule,
+	"PUT /api/payable_bill/usages/:id/provider":             accessTokenSessionRule,
+	"GET /api/payable_bill/settlement_methods":              accessTokenSessionRule,
+	"PUT /api/payable_bill/settlement_methods/:provider_id": accessTokenSessionRule,
 
 	// router/api-router.go: /api/provider_mapping_rule
 	"GET /api/provider_mapping_rule/":         accessTokenSessionRule,
