@@ -1032,4 +1032,7 @@ export const STATIC_I18N_KEYS = [
   'Site channel is required',
   'Start date must not be after end date',
   'Date range cannot exceed 92 days',
+  // Payable bill settlement method labels.
+  'Channel details settlement',
+  'Usage details settlement',
 ] as const

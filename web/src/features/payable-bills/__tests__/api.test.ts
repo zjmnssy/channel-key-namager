@@ -20,9 +20,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 
-import { exportPayableProviderBills, exportPayableUsages } from '../api'
+import {
+  exportPayableProviderBills,
+  exportPayableUsages,
+  listPayableSettlementMethods,
+  setPayableSettlementMethod,
+} from '../api'
 
-vi.mock('@/lib/api', () => ({ api: { get: vi.fn() } }))
+vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), put: vi.fn() } }))
 
 const file = new Blob(['xlsx'], {
   type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -78,6 +83,52 @@ describe('payable bill exports', () => {
         },
         responseType: 'blob',
       })
+    )
+  })
+})
+
+describe('payable settlement methods', () => {
+  beforeEach(() => {
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.put).mockReset()
+  })
+
+  it('lists settlement methods with the filter lists joined by commas', async () => {
+    const page = {
+      success: true,
+      data: { page: 2, page_size: 20, total: 0, items: [] },
+    }
+    vi.mocked(api.get).mockResolvedValue({ data: page })
+
+    await expect(
+      listPayableSettlementMethods({
+        p: 2,
+        page_size: 20,
+        provider_ids: [5, 6],
+        methods: ['usage'],
+      })
+    ).resolves.toBe(page)
+
+    expect(api.get).toHaveBeenCalledWith(
+      '/api/payable_bill/settlement_methods',
+      {
+        params: { p: 2, page_size: 20, provider_ids: '5,6', methods: 'usage' },
+      }
+    )
+  })
+
+  it('sends the settlement method in the request body', async () => {
+    const response = {
+      success: true,
+      data: { provider_id: 6, method: 'usage', updated_time: 1764145211 },
+    }
+    vi.mocked(api.put).mockResolvedValue({ data: response })
+
+    await expect(setPayableSettlementMethod(6, 'usage')).resolves.toBe(response)
+
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/payable_bill/settlement_methods/6',
+      { method: 'usage' }
     )
   })
 })

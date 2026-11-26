@@ -160,3 +160,32 @@ export type PayableBillOptions = {
   sites: ReceivableBillSite[]
   providers: PayableProviderOption[]
 }
+
+/** How a provider's daily consumption becomes payable bills. */
+export type PayableSettlementMethod = 'channel' | 'usage'
+
+/** A site whose "all site channels" rule points to the provider. */
+export type PayableWholeSite = {
+  site_id: number
+  site_name: string
+  // Some channels are assigned to other providers, so the site is still
+  // settled by channel details.
+  conflict: boolean
+}
+
+export type PayableSettlement = {
+  provider_id: number
+  username: string
+  disabled: boolean
+  payable_discount: number | null
+  method: PayableSettlementMethod // channel when never set
+  updated_time: number // 0 = never set
+  whole_sites: PayableWholeSite[] // empty when none
+}
+
+export type PayableSettlementQuery = {
+  p: number
+  page_size: number
+  provider_ids: number[]
+  methods: PayableSettlementMethod[]
+}

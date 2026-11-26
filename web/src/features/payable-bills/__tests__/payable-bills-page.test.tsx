@@ -60,6 +60,10 @@ async function renderPage(initialUrl = '/payable-bills/') {
       mismatch_site_count: 0,
     },
   })
+  vi.mocked(billApi.listPayableSettlementMethods).mockResolvedValue({
+    success: true,
+    data: { items: [], total: 0, page: 1, page_size: 10 },
+  })
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
     success: true,
     data: { sites: [], providers: [] },
@@ -106,6 +110,7 @@ afterEach(() => {
   vi.mocked(billApi.listPayablePullTasks).mockReset()
   vi.mocked(billApi.listPayableUsages).mockReset()
   vi.mocked(billApi.listPayableProviderBills).mockReset()
+  vi.mocked(billApi.listPayableSettlementMethods).mockReset()
   vi.mocked(billApi.getPayableBillOptions).mockReset()
 })
 
@@ -142,6 +147,42 @@ describe('PayableBills page', () => {
       expect(billApi.listPayableProviderBills).toHaveBeenCalledTimes(1)
     )
     expect(billApi.listPayableUsages).not.toHaveBeenCalled()
+  })
+
+  it('loads the settlement methods on the settlements tab', async () => {
+    await renderPage('/payable-bills/?tab=settlements')
+
+    await waitFor(() =>
+      expect(billApi.listPayableSettlementMethods).toHaveBeenCalledTimes(1)
+    )
+    expect(billApi.listPayablePullTasks).not.toHaveBeenCalled()
+    expect(billApi.listPayableUsages).not.toHaveBeenCalled()
+    expect(billApi.listPayableProviderBills).not.toHaveBeenCalled()
+  })
+
+  it('opens the settlements tab from its first page when its tab is clicked', async () => {
+    const router = await renderPage(
+      `/payable-bills/${defaultStringifySearch({
+        tab: 'providers',
+        page: 3,
+        providers: ['5'],
+      })}`
+    )
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('tab', { name: 'Settlement Methods' })
+    )
+
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        tab: 'settlements',
+        providers: ['5'],
+      })
+    )
+    await waitFor(() =>
+      expect(billApi.listPayableSettlementMethods).toHaveBeenCalledTimes(1)
+    )
   })
 
   it('starts the next tab from its first page and keeps the shared filters', async () => {
