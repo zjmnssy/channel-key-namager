@@ -20,6 +20,8 @@ import type { ColumnDef } from '@tanstack/react-table'
 import { type ReactNode, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { BadgeListCell } from '@/components/data-table'
+import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
 import { TruncatedText } from '@/components/truncated-text'
@@ -29,6 +31,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { CHANNEL_STATUS } from '@/features/channels/constants'
+import { parseGroupsList } from '@/features/channels/lib/channel-utils'
 import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
 import { formatTimestampToDate } from '@/lib/format'
 
@@ -69,8 +73,45 @@ export function useChannelUsagesColumns(
         ),
       },
       {
+        accessorKey: 'local_channel_id',
+        header: t('Platform Channel ID'),
+        cell: ({ row }) => {
+          // 0 when the site channel name has no push marker of this site.
+          const id = row.original.local_channel_id
+          return id > 0 ? <TableId value={id} /> : EMPTY
+        },
+      },
+      {
+        accessorKey: 'local_channel_name',
+        header: t('Platform Channel Name'),
+        cell: ({ row }) => {
+          const usage = row.original
+          if (usage.local_channel_id === 0) {
+            return EMPTY
+          }
+          if (usage.local_channel_name === null) {
+            return (
+              <span className='text-muted-foreground'>
+                {t('Channel does not exist')}
+              </span>
+            )
+          }
+          return (
+            <TruncatedText
+              text={usage.local_channel_name}
+              maxWidth='max-w-[220px]'
+            />
+          )
+        },
+      },
+      {
+        accessorKey: 'remote_channel_id',
+        header: t('Third-Party Site Channel ID'),
+        cell: ({ row }) => <TableId value={row.original.remote_channel_id} />,
+      },
+      {
         accessorKey: 'remote_channel_name',
-        header: t('Channel Name'),
+        header: t('Third-Party Site Channel Name'),
         meta: { mobileTitle: true },
         cell: ({ row }) => (
           <TruncatedText
@@ -78,6 +119,76 @@ export function useChannelUsagesColumns(
             maxWidth='max-w-[220px]'
           />
         ),
+      },
+      {
+        accessorKey: 'remote_channel_status',
+        header: t('Third-Party Site Channel Status'),
+        cell: ({ row }) => {
+          // The status when the row was pulled; null on rows pulled before it was recorded.
+          const status = row.original.remote_channel_status
+          if (status === null) {
+            return EMPTY
+          }
+          if (status === CHANNEL_STATUS.ENABLED) {
+            return (
+              <StatusBadge
+                label={t('Enabled')}
+                variant='success'
+                copyable={false}
+              />
+            )
+          }
+          if (
+            status === CHANNEL_STATUS.MANUAL_DISABLED ||
+            status === CHANNEL_STATUS.AUTO_DISABLED
+          ) {
+            return (
+              <StatusBadge
+                label={t('Disabled')}
+                variant='danger'
+                copyable={false}
+              />
+            )
+          }
+          return (
+            <StatusBadge
+              label={t('Unknown')}
+              variant='neutral'
+              copyable={false}
+            />
+          )
+        },
+      },
+      {
+        id: 'remote_channel_status_type',
+        header: t('Third-Party Site Channel Status Type'),
+        cell: ({ row }) => {
+          const status = row.original.remote_channel_status
+          if (status === CHANNEL_STATUS.MANUAL_DISABLED) {
+            return t('Manually disabled')
+          }
+          if (status === CHANNEL_STATUS.AUTO_DISABLED) {
+            return t('Auto disabled')
+          }
+          return EMPTY
+        },
+      },
+      {
+        accessorKey: 'remote_channel_group',
+        header: t('Third-Party Site Channel Group'),
+        cell: ({ row }) => {
+          const groups = parseGroupsList(row.original.remote_channel_group)
+          if (groups.length === 0) {
+            return EMPTY
+          }
+          return (
+            <BadgeListCell
+              items={groups.map((group) => (
+                <GroupBadge key={group} group={group} size='sm' />
+              ))}
+            />
+          )
+        },
       },
       {
         accessorKey: 'delta_amount',

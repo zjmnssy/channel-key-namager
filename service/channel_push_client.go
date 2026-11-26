@@ -463,9 +463,18 @@ func (c *ChannelPushClient) ReadLogStatQuota(ctx context.Context, start, end int
 // PayableBillClientOptions is what the payable bill pull uses to read a site.
 var PayableBillClientOptions = ChannelPushClientOptions{Pace: time.Second, Timeout: 30 * time.Second, MaxRetryAfter: 30 * time.Minute, Sleep: channelPushSleep}
 
+// PayableSiteChannel is one channel of a site's channel list as the payable bill pull reads it.
+type PayableSiteChannel struct {
+	ID        int
+	Name      string
+	UsedQuota int64
+	Status    int    // 0 when the site sent none
+	Group     string // comma-separated
+}
+
 // PayableChannelPageAttempt is the outcome of one read of a page of a site's channel list.
 type PayableChannelPageAttempt struct {
-	Items      []ChannelPushSiteChannel // every item has ID > 0 and UsedQuota >= 0
+	Items      []PayableSiteChannel // every item has ID > 0 and UsedQuota >= 0
 	Total      int
 	Failure    *common.Message // nil on success
 	Retryable  bool
@@ -505,19 +514,19 @@ func (c *ChannelPushClient) ReadChannelPage(ctx context.Context, page int) Payab
 			Name      string `json:"name"`
 			UsedQuota *int64 `json:"used_quota"`
 			Status    int    `json:"status"`
-			Models    string `json:"models"`
+			Group     string `json:"group"`
 		} `json:"items"`
 		Total *int `json:"total"`
 	}
 	if common.Unmarshal(envelope.Data, &data) != nil || data.Items == nil || data.Total == nil || *data.Total < 0 {
 		return invalid
 	}
-	items := make([]ChannelPushSiteChannel, 0, len(data.Items))
+	items := make([]PayableSiteChannel, 0, len(data.Items))
 	for _, item := range data.Items {
 		if item.ID <= 0 || item.UsedQuota == nil || *item.UsedQuota < 0 {
 			return invalid
 		}
-		items = append(items, ChannelPushSiteChannel{ID: item.ID, Name: item.Name, UsedQuota: *item.UsedQuota, Status: item.Status, Models: item.Models})
+		items = append(items, PayableSiteChannel{ID: item.ID, Name: item.Name, UsedQuota: *item.UsedQuota, Status: item.Status, Group: item.Group})
 	}
 	return PayableChannelPageAttempt{Items: items, Total: *data.Total}
 }

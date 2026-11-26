@@ -93,26 +93,28 @@ type PayablePullSite struct {
 
 // PayableChannelUsage 是某站点某天某个远端渠道的累计用量与增量明细。
 type PayableChannelUsage struct {
-	Id                int      `json:"id" gorm:"primaryKey"`
-	TaskId            int      `json:"task_id" gorm:"not null;index"`
-	PullSiteId        int      `json:"pull_site_id" gorm:"not null;uniqueIndex:idx_payable_usages_pull_channel,priority:1"`
-	BillDate          int      `json:"bill_date" gorm:"not null;index:idx_payable_usages_bill_date;index:idx_payable_usages_site_channel,priority:3"`
-	SiteId            int      `json:"site_id" gorm:"not null;index:idx_payable_usages_site_channel,priority:1"`
-	SiteName          string   `json:"site_name" gorm:"size:128"`
-	SiteBaseURL       string   `json:"site_base_url" gorm:"column:site_base_url;size:1024"`
-	RemoteChannelId   int      `json:"remote_channel_id" gorm:"not null;uniqueIndex:idx_payable_usages_pull_channel,priority:2;index:idx_payable_usages_site_channel,priority:2"`
-	RemoteChannelName string   `json:"remote_channel_name" gorm:"size:255"`
-	UsedQuota         int64    `json:"used_quota" gorm:"not null"`
-	DeltaQuota        *int64   `json:"delta_quota"` // nil = 首次同步无基线
-	DeltaFlag         string   `json:"delta_flag" gorm:"size:16"`
-	QuotaPerUnit      int64    `json:"quota_per_unit"`
-	ProviderId        int      `json:"provider_id" gorm:"not null;default:0;index"` // 0 = 未知
-	ProviderName      string   `json:"provider_name" gorm:"size:64"`
-	ProviderSource    string   `json:"provider_source" gorm:"size:16"`
-	PayableDiscount   *float64 `json:"payable_discount"`
-	SyncedAt          int64    `json:"synced_at"`
-	CreatedTime       int64    `json:"created_time"`
-	UpdatedTime       int64    `json:"updated_time"`
+	Id                  int      `json:"id" gorm:"primaryKey"`
+	TaskId              int      `json:"task_id" gorm:"not null;index"`
+	PullSiteId          int      `json:"pull_site_id" gorm:"not null;uniqueIndex:idx_payable_usages_pull_channel,priority:1"`
+	BillDate            int      `json:"bill_date" gorm:"not null;index:idx_payable_usages_bill_date;index:idx_payable_usages_site_channel,priority:3"`
+	SiteId              int      `json:"site_id" gorm:"not null;index:idx_payable_usages_site_channel,priority:1"`
+	SiteName            string   `json:"site_name" gorm:"size:128"`
+	SiteBaseURL         string   `json:"site_base_url" gorm:"column:site_base_url;size:1024"`
+	RemoteChannelId     int      `json:"remote_channel_id" gorm:"not null;uniqueIndex:idx_payable_usages_pull_channel,priority:2;index:idx_payable_usages_site_channel,priority:2"`
+	RemoteChannelName   string   `json:"remote_channel_name" gorm:"size:255"`
+	RemoteChannelStatus *int     `json:"remote_channel_status"`                // 拉取时站点渠道的状态：1 启用、2 手动禁用、3 自动禁用，其他值（含站点未返回时的 0）为未知；nil = 加这一列之前拉取的行
+	RemoteChannelGroup  string   `json:"remote_channel_group" gorm:"size:255"` // 拉取时站点渠道的分组，逗号分隔
+	UsedQuota           int64    `json:"used_quota" gorm:"not null"`
+	DeltaQuota          *int64   `json:"delta_quota"` // nil = 首次同步无基线
+	DeltaFlag           string   `json:"delta_flag" gorm:"size:16"`
+	QuotaPerUnit        int64    `json:"quota_per_unit"`
+	ProviderId          int      `json:"provider_id" gorm:"not null;default:0;index"` // 0 = 未知
+	ProviderName        string   `json:"provider_name" gorm:"size:64"`
+	ProviderSource      string   `json:"provider_source" gorm:"size:16"`
+	PayableDiscount     *float64 `json:"payable_discount"`
+	SyncedAt            int64    `json:"synced_at"`
+	CreatedTime         int64    `json:"created_time"`
+	UpdatedTime         int64    `json:"updated_time"`
 }
 
 // PayableProviderOverride 是一条提供商映射规则：一行一条规则。

@@ -378,6 +378,8 @@ type fakeChannel struct {
 	ID        int
 	UsedQuota int64
 	Name      string // 为空时是 "ch-{ID}"
+	Status    int    // 为 0 时不返回 status 字段
+	Group     string // 为空时不返回 group 字段
 }
 
 // fakeChannelSite 是假站点的渠道列表接口：把 channels 按 id 降序、每页 100 个分页返回，并记下每次请求的页码。
@@ -417,8 +419,14 @@ func (s *fakeChannelSite) reply(page int) (int, string) {
 	sorted := slices.SortedFunc(slices.Values(s.channels), func(a, b fakeChannel) int { return cmp.Compare(b.ID, a.ID) })
 	items := []map[string]any{}
 	for _, channel := range sorted[min(max(page-1, 0)*100, len(sorted)):min(max(page, 0)*100, len(sorted))] {
-		name := cmp.Or(channel.Name, "ch-"+strconv.Itoa(channel.ID))
-		items = append(items, map[string]any{"id": channel.ID, "name": name, "used_quota": channel.UsedQuota})
+		item := map[string]any{"id": channel.ID, "name": cmp.Or(channel.Name, "ch-"+strconv.Itoa(channel.ID)), "used_quota": channel.UsedQuota}
+		if channel.Status != 0 {
+			item["status"] = channel.Status
+		}
+		if channel.Group != "" {
+			item["group"] = channel.Group
+		}
+		items = append(items, item)
 	}
 	total := s.total
 	if total < 0 {
@@ -1082,6 +1090,40 @@ func TestPayableBillProviderResolution(t *testing.T) {
 	assert.Equal(t, model.PayableProvider{Source: model.PayableProviderUnknown}, providers[4])
 }
 
+// 拉取时记下站点渠道当时的状态与分组；站点没返回 status 时记为 0（未知），分组超长时按字符截断。
+func TestPayableBillRecordsSiteChannelStatusAndGroup(t *testing.T) {
+	db := setupPayableBillTest(t)
+	longGroup := strings.Repeat("组", 300)
+	fake := newFakeChannelSite(t,
+		fakeChannel{ID: 1, Status: 1, Group: "default,vip"},
+		fakeChannel{ID: 2, Status: 2, Group: "vip"},
+		fakeChannel{ID: 3, Status: 3, Group: longGroup},
+		fakeChannel{ID: 4},
+	)
+	receivableSeedSite(t, db, "pb-status", fake.server.URL, 1)
+
+	const day1 = int64(1795363800) // 账单日期 20261122
+	assert.Equal(t, []int{1}, payableScan(fake, day1))
+
+	var rows []model.PayableChannelUsage
+	require.NoError(t, db.Where("bill_date = ?", 20261122).Order("remote_channel_id").Find(&rows).Error)
+	require.Len(t, rows, 4)
+	type siteChannel struct {
+		Status *int
+		Group  string
+	}
+	got := make([]siteChannel, len(rows))
+	for i, row := range rows {
+		got[i] = siteChannel{row.RemoteChannelStatus, row.RemoteChannelGroup}
+	}
+	assert.Equal(t, []siteChannel{
+		{payablePtr(1), "default,vip"},
+		{payablePtr(2), "vip"},
+		{payablePtr(3), strings.Repeat("组", 255)},
+		{payablePtr(0), ""},
+	}, got)
+}
+
 func payablePtr[T any](value T) *T { return &value }
 
 func payableGet(t *testing.T, target string, params gin.Params, handler gin.HandlerFunc) *httptest.ResponseRecorder {
@@ -1256,6 +1298,89 @@ func TestPayableUsageList(t *testing.T) {
 	} {
 		reply := receivableReplyOf(t, payableGet(t, "/api/payable_bill/usages?"+query, nil, GetPayableUsages))
 		assert.False(t, reply.Success, query)
+	}
+}
+
+// 列表与导出按站点渠道名结尾的推送标记给出平台渠道 ID 与平台当前的渠道名称：标记里的站点不是本行站点、没有标记时 ID 为 0；
+// 平台上已没有这个渠道时名称为 null（导出写“渠道不存在”）。站点渠道状态与分组原样返回，升级前拉取的行状态为 null；
+// 导出把状态写成启用、禁用、未知，禁用时状态类型写手动或自动，没有值的格留空。
+func TestPayableUsagesShowPlatformAndSiteChannel(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupPayableBillTest(t)
+	supplier := channelPushSeedSupplier(t, db, "pc-s1")
+	local := channelPushSeedChannel(t, db, supplier, "platform-gpt", 1, "m", 1)
+	site := receivableSeedSite(t, db, "pc-site", "https://pc.example.com", 1)
+	pull := payableSeedPull(t, db, payableSeedTask(t, db, 20261122, model.PayableTaskSuccess), site.Id, model.PayablePullSuccess)
+	mark := func(siteID, channelID int) string {
+		return "renamed-dcmark-" + strconv.Itoa(siteID) + "-" + strconv.Itoa(channelID)
+	}
+	missingID := local.Id + 1000
+	usages := []model.PayableChannelUsage{
+		{RemoteChannelId: 1, RemoteChannelName: mark(site.Id, local.Id), RemoteChannelStatus: payablePtr(1), RemoteChannelGroup: "default,vip"},
+		{RemoteChannelId: 2, RemoteChannelName: mark(site.Id+100, local.Id), RemoteChannelStatus: payablePtr(2), RemoteChannelGroup: "vip"},
+		{RemoteChannelId: 3, RemoteChannelName: mark(site.Id, missingID), RemoteChannelStatus: payablePtr(3)},
+		{RemoteChannelId: 4, RemoteChannelName: "manual-channel"},
+		{RemoteChannelId: 5, RemoteChannelName: "zero-status", RemoteChannelStatus: payablePtr(0)},
+	}
+	for i := range usages {
+		usage := &usages[i]
+		usage.TaskId, usage.PullSiteId, usage.BillDate, usage.SiteId, usage.QuotaPerUnit = pull.TaskId, pull.Id, pull.BillDate, pull.SiteId, 500000
+		require.NoError(t, db.Create(usage).Error)
+	}
+
+	_, items := receivableListOf(t, payableGet(t, "/api/payable_bill/usages?start_date=20261122&end_date=20261122", nil, GetPayableUsages))
+
+	type platformView struct {
+		LocalID   any
+		LocalName any
+		Status    any
+		Group     any
+	}
+	got := make([]platformView, len(items))
+	for i, item := range items {
+		require.Contains(t, item, "local_channel_name")
+		require.Contains(t, item, "remote_channel_status")
+		got[i] = platformView{item["local_channel_id"], item["local_channel_name"], item["remote_channel_status"], item["remote_channel_group"]}
+	}
+	assert.Equal(t, []platformView{
+		{float64(local.Id), "platform-gpt", float64(1), "default,vip"},
+		{float64(0), nil, float64(2), "vip"},
+		{float64(missingID), nil, float64(3), ""},
+		{float64(0), nil, nil, ""},
+		{float64(0), nil, float64(0), ""},
+	}, got)
+
+	header := http.Header{}
+	header.Set("Accept-Language", "zh-CN")
+	response := receivableRequest(t, http.MethodGet, "/api/payable_bill/usages/export?start_date=20261122&end_date=20261122", header, nil, ExportPayableUsages)
+	require.Equal(t, http.StatusOK, response.Code)
+	file, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	sheet := file.GetSheetName(0)
+	rows, err := file.GetRows(sheet, excelize.Options{RawCellValue: true})
+	require.NoError(t, err)
+	require.Len(t, rows, 6)
+	channelCells := make([][]string, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		require.Greater(t, len(row), 10)
+		channelCells = append(channelCells, row[4:11])
+	}
+	localID, missing := strconv.Itoa(local.Id), strconv.Itoa(missingID)
+	assert.Equal(t, [][]string{
+		{localID, "platform-gpt", "1", mark(site.Id, local.Id), "已启用", "", "default,vip"},
+		{"", "", "2", mark(site.Id+100, local.Id), "已禁用", "手动禁用", "vip"},
+		{missing, "渠道不存在", "3", mark(site.Id, missingID), "已禁用", "自动禁用", ""},
+		{"", "", "4", "manual-channel", "", "", ""},
+		{"", "", "5", "zero-status", "未知", "", ""},
+	}, channelCells)
+	// 平台渠道ID、第三方站点渠道ID 与任务ID 一样是数字单元格
+	taskIDType, err := file.GetCellType(sheet, "A2")
+	require.NoError(t, err)
+	for _, cell := range []string{"E2", "G2"} {
+		cellType, err := file.GetCellType(sheet, cell)
+		require.NoError(t, err)
+		assert.Equal(t, taskIDType, cellType, cell)
 	}
 }
 
@@ -1684,33 +1809,34 @@ func TestPayableBillExport(t *testing.T) {
 	}
 
 	file, rows := export(ExportPayableUsages, "/api/payable_bill/usages/export", "start_date=20261121&end_date=20261122&site_ids="+strconv.Itoa(site.Id)+"&provider_ids=7,0", "zh-CN", "payable-channel-usages.xlsx")
-	assert.Equal(t, []string{"任务ID", "账单日期", "站点ID", "站点名称", "渠道名称", "当日金额(折前)($)", "累计金额($)",
+	assert.Equal(t, []string{"任务ID", "账单日期", "站点ID", "站点名称", "平台渠道ID", "平台渠道名称", "第三方站点渠道ID",
+		"第三方站点渠道名称", "第三方站点渠道状态", "第三方站点渠道状态类型", "第三方站点渠道分组", "当日金额(折前)($)", "累计金额($)",
 		"增量说明", "提供商", "提供商来源", "同步时间", "计入账单"}, rows[0])
 	require.Len(t, rows, 4)
 	byChannel := map[string][]string{}
 	for _, row := range rows[1:] {
-		byChannel[row[4]] = row
+		byChannel[row[7]] = row
 	}
 	firstRow := byChannel["first"]
 	require.NotNil(t, firstRow)
-	// 不导出站点URL：这一行的 site_base_url 有值，导出里也不出现
-	assert.Equal(t, []string{strconv.Itoa(task.Id), "2026-11-22", strconv.Itoa(site.Id), site.Name, "first", "", "2",
+	// 不导出站点URL：这一行的 site_base_url 有值，导出里也不出现。渠道名没有推送标记、站点渠道状态与分组没有记录，这几格留空
+	assert.Equal(t, []string{strconv.Itoa(task.Id), "2026-11-22", strconv.Itoa(site.Id), site.Name, "", "", "1", "first", "", "", "", "", "2",
 		"首次同步，无基线", "p7", "手动", "2026-11-23 01:00:05", "是"}, firstRow)
 	for _, row := range rows[1:] {
-		if row[4] == "first" {
+		if row[7] == "first" {
 			continue
 		}
 		if row[0] == strconv.Itoa(oldTask.Id) {
-			assert.Equal(t, "否", row[11])
+			assert.Equal(t, "否", row[17])
 			continue
 		}
-		assert.Equal(t, "0.12", row[5])
-		assert.Equal(t, "", row[7])
-		assert.Equal(t, "未知提供商", row[8])
-		assert.Equal(t, "未知", row[9])
+		assert.Equal(t, "0.12", row[11])
+		assert.Equal(t, "", row[13])
+		assert.Equal(t, "未知提供商", row[14])
+		assert.Equal(t, "未知", row[15])
 	}
 	sheet := file.GetSheetName(0)
-	for _, cell := range []string{"G2", "F3"} {
+	for _, cell := range []string{"M2", "L3"} {
 		styleID, err := file.GetCellStyle(sheet, cell)
 		require.NoError(t, err)
 		style, err := file.GetStyle(styleID)
@@ -1718,11 +1844,11 @@ func TestPayableBillExport(t *testing.T) {
 		require.NotNil(t, style.CustomNumFmt, cell)
 		assert.Equal(t, "0.000000", *style.CustomNumFmt)
 	}
-	// 任务ID、站点ID 与金额一样是数字单元格，不是文本
-	numberType, err := file.GetCellType(sheet, "G2")
+	// 任务ID、站点ID、第三方站点渠道ID 与金额一样是数字单元格，不是文本
+	numberType, err := file.GetCellType(sheet, "M2")
 	require.NoError(t, err)
 	require.NotEqual(t, excelize.CellTypeSharedString, numberType)
-	for _, cell := range []string{"A2", "C2"} {
+	for _, cell := range []string{"A2", "C2", "G2"} {
 		cellType, err := file.GetCellType(sheet, cell)
 		require.NoError(t, err)
 		assert.Equal(t, numberType, cellType, cell)
@@ -1754,9 +1880,9 @@ func TestPayableBillExport(t *testing.T) {
 	}
 	_, rows = export(ExportPayableUsages, "/api/payable_bill/usages/export", "start_date=20261122&end_date=20261122&provider_ids=11", "en", "payable-channel-usages.xlsx")
 	require.Len(t, rows, 3)
-	assert.Equal(t, "Provider Source", rows[0][9])
+	assert.Equal(t, "Provider Source", rows[0][15])
 	for _, row := range rows[1:] {
-		assert.Equal(t, "Rule", row[9], row[4])
+		assert.Equal(t, "Rule", row[15], row[7])
 	}
 
 	for _, handler := range []gin.HandlerFunc{ExportPayableUsages, ExportPayableProviderBills} {

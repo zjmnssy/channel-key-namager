@@ -16,8 +16,9 @@ const (
 	payableBillMaxConcurrentSites = 4
 	// payableBillPullTime 是北京时间每天开始拉取的时刻（距 0 点），拉到的记为昨天的账单。
 	payableBillPullTime = 10 * time.Minute
-	// payableChannelNameSize 是明细表 remote_channel_name 列的长度。
-	payableChannelNameSize = 255
+	// payableChannelNameSize、payableChannelGroupSize 是明细表 remote_channel_name、remote_channel_group 列的长度。
+	payableChannelNameSize  = 255
+	payableChannelGroupSize = 255
 )
 
 // PayableBillSince 量出扫描开始以来经过的时间（扫描开始时取的 time.Now() 带单调时钟读数），测试替换它来控制时间。
@@ -196,13 +197,13 @@ func pullPayablePage(ctx context.Context, clock payableScanClock, pull model.Pay
 	return saved && status == model.PayablePullPending, err
 }
 
-// newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行，同步时间与写入时间都是 now。
+// newPayableUsageRows 为本页里该进度还没有明细的渠道生成明细行，同步时间与写入时间都是 now，站点渠道的状态与分组记本次读到的值。
 // 增量以该渠道在站点（地址相同的）更早的完整拉取里最近的累计值为基线（见 model.PayableBaseline）：
 // 站点在这个地址还没有完整拉取时为空（首次同步）；渠道在更早的完整拉取里都没有记录时，若最近一次完整拉取与站点报的总数一致，
 // 它是新渠道，基线为 0，否则它可能只是那次漏拉了，同样按首次同步；累计值比基线小时记 0（累计值回退）。
 // 提供商按指定渠道规则、全部渠道规则、渠道名标记、沿用上次、不能解析的渠道规则的顺序确定，都没有时为未知
 // （见 model.ResolvePayableProviders，每页批量解析一次），并快照该用户此刻的应付折扣。
-func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
+func newPayableUsageRows(pull model.PayablePullSite, items []PayableSiteChannel, now int64) ([]*model.PayableChannelUsage, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -214,7 +215,7 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 	if err != nil {
 		return nil, err
 	}
-	fresh := make([]ChannelPushSiteChannel, 0, len(items))
+	fresh := make([]PayableSiteChannel, 0, len(items))
 	freshIDs := make([]int, 0, len(items))
 	for _, item := range items {
 		if existing[item.ID] {
@@ -248,23 +249,25 @@ func newPayableUsageRows(pull model.PayablePullSite, items []ChannelPushSiteChan
 	for _, item := range fresh {
 		provider := providers[item.ID]
 		row := &model.PayableChannelUsage{
-			TaskId:            pull.TaskId,
-			PullSiteId:        pull.Id,
-			BillDate:          pull.BillDate,
-			SiteId:            pull.SiteId,
-			SiteName:          pull.SiteName,
-			SiteBaseURL:       pull.SiteBaseURL,
-			RemoteChannelId:   item.ID,
-			RemoteChannelName: truncateText(item.Name, payableChannelNameSize),
-			UsedQuota:         item.UsedQuota,
-			QuotaPerUnit:      model.ReceivableBillQuotaPerUnit,
-			ProviderId:        provider.ID,
-			ProviderName:      provider.Name,
-			ProviderSource:    provider.Source,
-			PayableDiscount:   provider.Discount,
-			SyncedAt:          now,
-			CreatedTime:       now,
-			UpdatedTime:       now,
+			TaskId:              pull.TaskId,
+			PullSiteId:          pull.Id,
+			BillDate:            pull.BillDate,
+			SiteId:              pull.SiteId,
+			SiteName:            pull.SiteName,
+			SiteBaseURL:         pull.SiteBaseURL,
+			RemoteChannelId:     item.ID,
+			RemoteChannelName:   truncateText(item.Name, payableChannelNameSize),
+			RemoteChannelStatus: &item.Status,
+			RemoteChannelGroup:  truncateText(item.Group, payableChannelGroupSize),
+			UsedQuota:           item.UsedQuota,
+			QuotaPerUnit:        model.ReceivableBillQuotaPerUnit,
+			ProviderId:          provider.ID,
+			ProviderName:        provider.Name,
+			ProviderSource:      provider.Source,
+			PayableDiscount:     provider.Discount,
+			SyncedAt:            now,
+			CreatedTime:         now,
+			UpdatedTime:         now,
 		}
 		base, inBaseline := baseline[item.ID]
 		delta := item.UsedQuota - base // 不在基线里时 base 为 0

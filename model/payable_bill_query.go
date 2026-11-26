@@ -234,6 +234,23 @@ func ListPayableUsages(filter PayableUsageFilter, offset, limit int) ([]PayableU
 	return rows, total, nil
 }
 
+// PayableLocalChannelNames 返回 ids 中平台上仍存在的渠道的当前名称，以渠道 ID 为键。
+func PayableLocalChannelNames(ids []int) (map[int]string, error) {
+	names := make(map[int]string, len(ids))
+	if len(ids) == 0 {
+		return names, nil
+	}
+	var channels []Channel
+	err := DB.Select("id", "name").Where("id IN ?", slices.Compact(slices.Sorted(slices.Values(ids)))).Find(&channels).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, channel := range channels {
+		names[channel.Id] = channel.Name
+	}
+	return names, nil
+}
+
 // ListPayableProviderBills 返回按 (账单日期, 提供商) 汇总的账单，按账单日期倒序、提供商 id 升序，同时返回组数。
 // 只汇总完整拉取且增量非空的行。limit <= 0 时返回全部组。
 func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]PayableProviderBill, int64, error) {
