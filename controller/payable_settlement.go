@@ -60,7 +60,7 @@ func SetPayableSettlementMethod(c *gin.Context) {
 	method := *input.Method
 
 	const action = "payable_bill.set_settlement_method"
-	params := model.AuditFields{"provider_id": providerID, "method": method}
+	params := model.AuditFields{"provider_id": providerID, "settlement_method": method}
 	success := false
 	defer func() {
 		content := auditContentEN(action, params)
@@ -93,6 +93,6 @@ func SetPayableSettlementMethod(c *gin.Context) {
 	}
 	success = true
 	params["provider_name"] = provider.Username
-	params["previous_method"] = previous
+	params["previous_settlement_method"] = previous
 	common.ApiSuccess(c, gin.H{"provider_id": providerID, "method": method, "updated_time": now})
 }

@@ -676,7 +676,7 @@ func TestPayableSettlementMethodAPI(t *testing.T) {
 	logs := audits()
 	require.Len(t, logs, 1)
 	assert.Equal(t, audit{Success: true, Content: "Set the settlement method of provider #" + ownerID, Params: map[string]any{
-		"provider_id": float64(owner.Id), "method": "usage", "provider_name": "psm-owner", "previous_method": "channel"}}, logs[0])
+		"provider_id": float64(owner.Id), "settlement_method": "usage", "provider_name": "psm-owner", "previous_settlement_method": "channel"}}, logs[0])
 
 	// 3. 筛选与分页：从未设置过的 disabled 算渠道明细结算
 	ownerRow["method"], ownerRow["updated_time"] = "usage", updated
@@ -702,7 +702,7 @@ func TestPayableSettlementMethodAPI(t *testing.T) {
 	logs = audits()
 	require.Len(t, logs, 2)
 	assert.True(t, logs[1].Success)
-	assert.Equal(t, "usage", logs[1].Params["previous_method"])
+	assert.Equal(t, "usage", logs[1].Params["previous_settlement_method"])
 
 	// 5. ID、请求体不合法：在处理函数记审计之前返回，留给兜底审计
 	for _, id := range []string{"abc", "0"} {
@@ -722,13 +722,13 @@ func TestPayableSettlementMethodAPI(t *testing.T) {
 	assert.False(t, reply.Success)
 	assert.Equal(t, "Invalid parameters", reply.MessageKey)
 	failed := []audit{{Content: "Failed to set the settlement method",
-		Params: map[string]any{"provider_id": float64(owner.Id), "method": "weekly", "failure_reason": "invalid_method"}}}
+		Params: map[string]any{"provider_id": float64(owner.Id), "settlement_method": "weekly", "failure_reason": "invalid_method"}}}
 	for _, id := range []int{admin.Id, deleted.Id, 999999} {
 		reply = setMethod(strconv.Itoa(id), `{"method":"usage"}`)
 		assert.False(t, reply.Success, id)
 		assert.Equal(t, "The selected user is not a channel supplier", reply.MessageKey, id)
 		failed = append(failed, audit{Content: "Failed to set the settlement method",
-			Params: map[string]any{"provider_id": float64(id), "method": "usage", "failure_reason": "invalid_provider"}})
+			Params: map[string]any{"provider_id": float64(id), "settlement_method": "usage", "failure_reason": "invalid_provider"}})
 	}
 	logs = audits()
 	require.Len(t, logs, 6)
