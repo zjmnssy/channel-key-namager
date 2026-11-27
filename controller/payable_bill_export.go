@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -151,7 +152,16 @@ func ExportPayableUsages(c *gin.Context) {
 		}
 		rows[i] = cells
 	}
-	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, []int{12, 13})
+	// Channel suppliers get no site ID and site name columns (the 3rd and 4th), so the amount columns move two to the left.
+	amountColumns := []int{12, 13}
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		headerKeys = slices.Delete(headerKeys, 2, 4)
+		for i := range rows {
+			rows[i] = slices.Delete(rows[i], 2, 4)
+		}
+		amountColumns = []int{10, 11}
+	}
+	writePayableBillExport(c, "payable-channel-usages.xlsx", headerKeys, rows, amountColumns)
 }
 
 // ExportPayableProviderBills writes the provider bills that match the list filter into an xlsx file.
@@ -160,6 +170,8 @@ func ExportPayableProviderBills(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// As on the page, a channel supplier's bills are not split by settlement method.
+	filter.MergeMethods = c.GetInt("role") == common.RoleChannelSupplierUser
 	bills, _, err := model.ListPayableProviderBills(filter, 0, 0)
 	if err != nil {
 		common.ApiError(c, err)

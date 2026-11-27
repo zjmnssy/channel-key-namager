@@ -31,7 +31,9 @@ import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ROLE } from '@/lib/roles'
 import { payableBillsSearchSchema } from '@/routes/_authenticated/payable-bills/index'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { PayableBills } from '..'
 import * as billApi from '../api'
@@ -106,6 +108,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  useAuthStore.setState(useAuthStore.getInitialState(), true)
   clients.splice(0).forEach((client) => client.clear())
   vi.restoreAllMocks()
   vi.mocked(billApi.listPayablePullTasks).mockReset()
@@ -207,6 +210,54 @@ describe('PayableBills page', () => {
         start: 20261101,
         sites: ['2'],
       })
+    )
+  })
+})
+
+describe('PayableBills page for a channel supplier', () => {
+  beforeEach(() => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 5, username: 'alice', role: ROLE.CHANNEL_SUPPLIER })
+  })
+
+  it('offers only the channel usage details and provider bills tabs', async () => {
+    await renderPage()
+
+    await waitFor(() =>
+      expect(billApi.listPayableUsages).toHaveBeenCalledTimes(1)
+    )
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'Channel Usage Details',
+      'Provider Bills',
+    ])
+    expect(
+      screen.getByRole('tab', { name: 'Channel Usage Details' })
+    ).toHaveAttribute('aria-selected', 'true')
+    expect(billApi.listPayablePullTasks).not.toHaveBeenCalled()
+  })
+
+  it.each(['pulls', 'settlements'])(
+    'shows the channel usage details when the URL asks for the %s tab',
+    async (tab) => {
+      await renderPage(`/payable-bills/?tab=${tab}`)
+
+      await waitFor(() =>
+        expect(billApi.listPayableUsages).toHaveBeenCalledTimes(1)
+      )
+      expect(billApi.listPayablePullTasks).not.toHaveBeenCalled()
+      expect(billApi.listPayableSettlementMethods).not.toHaveBeenCalled()
+    }
+  )
+
+  it('loads the provider bills when the Provider Bills tab is clicked', async () => {
+    await renderPage()
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('tab', { name: 'Provider Bills' }))
+
+    await waitFor(() =>
+      expect(billApi.listPayableProviderBills).toHaveBeenCalledTimes(1)
     )
   })
 })

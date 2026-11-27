@@ -450,10 +450,10 @@ describe('Admin group visibility by role', () => {
     return [...list.querySelectorAll('li')].map((li) => li.textContent)
   }
 
-  it('shows a channel supplier only Channels in the Admin group', async () => {
+  it('shows a channel supplier only Channels and Payable Bills in the Admin group', async () => {
     await renderSidebarFor(5)
 
-    expect(adminItemTitles()).toEqual(['Channels'])
+    expect(adminItemTitles()).toEqual(['Channels', 'Payable Bills'])
     expect(adminItemTitles()).not.toContain('Channel Push')
   })
 

@@ -183,10 +183,10 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/receivable_bill/sites", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/tasks", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/tasks/1/sites", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/payable_bill/usages?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/payable_bill/providers?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/payable_bill/usages/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
-		{method: http.MethodGet, path: "/api/payable_bill/providers/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/payable_bill/usages?start_date=20261101&end_date=20261123", supplierStatus: http.StatusOK},
+		{method: http.MethodGet, path: "/api/payable_bill/providers?start_date=20261101&end_date=20261123", supplierStatus: http.StatusOK},
+		{method: http.MethodGet, path: "/api/payable_bill/usages/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusOK},
+		{method: http.MethodGet, path: "/api/payable_bill/providers/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusOK},
 		{method: http.MethodGet, path: "/api/payable_bill/options", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/payable_bill/usages/1/provider", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/settlement_methods", supplierStatus: http.StatusForbidden},
@@ -228,8 +228,10 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/push/channel/options":           true,
 	}
 	// Receivable and payable bills and provider mapping rules are for root users
-	// only: an administrator is refused too. The rule writes send no body, or a
-	// rule that does not exist, so the handlers refuse them and change no data.
+	// only: an administrator is refused too. Channel suppliers may also read and
+	// export their own payable channel usages and provider bills. The rule writes
+	// send no body, or a rule that does not exist, so the handlers refuse them and
+	// change no data.
 	rootRoutes := map[string]bool{
 		"GET /api/receivable_bill/daily?start_date=20261101&end_date=20261123":         true,
 		"GET /api/receivable_bill/daily/export?start_date=20261101&end_date=20261123":  true,

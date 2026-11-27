@@ -34,6 +34,13 @@ type BaseNavItem = {
    * `useSidebarView`). Route-level guards still enforce access independently.
    */
   requiredRole?: number
+  /**
+   * Roles that see this item in the sidebar, checked instead of
+   * `requiredRole` when set: for pages open to a lower role but not to the
+   * roles between it and the next one allowed. Route-level guards still
+   * enforce access independently.
+   */
+  allowedRoles?: number[]
 }
 
 /**

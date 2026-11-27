@@ -619,6 +619,157 @@ func TestPayableUsagesMarkUsageSettledDays(t *testing.T) {
 	assert.Equal(t, true, view["usage_settled"])
 }
 
+// 渠道供应商只能读、导出提供商是自己的明细和提供商账单：明细不带站点（站点 ID、名称、地址与拉取进度），不能按站点或提供商筛选；
+// 提供商账单同一天的两种结算方式合成一行、不给结算方式，也不给全平台站点的同步计数；明细导出去掉站点ID、站点名称两列。
+func TestPayableBillsForChannelSupplier(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupPayableSettlementTest(t)
+	f := payableSettlementSeedBills(t, db)
+	// 站点名称、地址有值时也不能出现在供应商的明细与导出里
+	require.NoError(t, db.Model(&model.PayableChannelUsage{}).Where("site_id = ?", f.siteB.Id).
+		Updates(map[string]any{"site_name": f.siteB.Name, "site_base_url": f.siteB.BaseURL}).Error)
+	request := func(user *model.User, target string, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+		c.Request.Header.Set("Accept-Language", "zh-CN")
+		c.Set("id", user.Id)
+		c.Set("role", common.RoleChannelSupplierUser)
+		c.Set("username", user.Username)
+		handler(c)
+		return response
+	}
+	const dates = "?start_date=20261123&end_date=20261125"
+
+	// 明细：owner 只有自己的三行（other 在 A 的 11-25 那行不在），各行都不带站点字段
+	response := request(f.owner, "/api/payable_bill/usages"+dates, GetPayableUsages)
+	total, items := receivableListOf(t, response)
+	assert.Equal(t, 3, total)
+	type usage struct {
+		date    int
+		delta   string
+		settled bool
+	}
+	got := make([]usage, len(items))
+	for i, item := range items {
+		got[i] = usage{int(item["bill_date"].(float64)), item["delta_amount"].(string), item["usage_settled"].(bool)}
+		assert.EqualValues(t, f.owner.Id, item["provider_id"])
+		for _, key := range []string{"site_id", "site_name", "site_base_url", "pull_site_id"} {
+			assert.NotContains(t, item, key)
+		}
+	}
+	assert.Equal(t, []usage{{20261125, "1.000000", true}, {20261125, "12.345678", false}, {20261124, "2.000000", false}}, got)
+	assert.NotContains(t, response.Body.String(), f.siteB.BaseURL)
+	total, items = receivableListOf(t, request(f.other, "/api/payable_bill/usages"+dates, GetPayableUsages))
+	require.Equal(t, 1, total)
+	assert.EqualValues(t, f.other.Id, items[0]["provider_id"])
+
+	// 不能按站点或提供商筛选（筛自己也不行），四个接口都一样
+	for _, query := range []string{"&site_ids=" + strconv.Itoa(f.siteB.Id), "&provider_ids=" + strconv.Itoa(f.other.Id), "&provider_ids=" + strconv.Itoa(f.owner.Id)} {
+		for _, handler := range []gin.HandlerFunc{GetPayableUsages, GetPayableProviderBills, ExportPayableUsages, ExportPayableProviderBills} {
+			reply := receivableReplyOf(t, request(f.owner, "/api/payable_bill/x"+dates+query, handler))
+			assert.False(t, reply.Success, query)
+		}
+	}
+
+	// 提供商账单：11-25 的使用明细结算与渠道明细结算合成一行，金额、应付金额相加
+	providerBills := func(user *model.User, query string) (map[string]any, []map[string]any) {
+		t.Helper()
+		response := request(user, "/api/payable_bill/providers"+dates+query, GetPayableProviderBills)
+		reply := receivableReplyOf(t, response)
+		require.True(t, reply.Success, response.Body.String())
+		var page map[string]any
+		require.NoError(t, common.Unmarshal(reply.Data, &page))
+		raw, _ := page["items"].([]any)
+		items := make([]map[string]any, len(raw))
+		for i, item := range raw {
+			items[i] = item.(map[string]any)
+		}
+		return page, items
+	}
+	type bill struct {
+		date          float64
+		name, amount  string
+		discount      any
+		missing       bool
+		payable       any
+		hasSettlement bool
+	}
+	billsOf := func(items []map[string]any) []bill {
+		bills := make([]bill, len(items))
+		for i, item := range items {
+			bills[i].date, _ = item["bill_date"].(float64)
+			bills[i].name, _ = item["provider_name"].(string)
+			bills[i].amount, _ = item["amount"].(string)
+			bills[i].discount, bills[i].payable = item["discount"], item["payable_amount"]
+			bills[i].missing, _ = item["discount_missing"].(bool)
+			_, bills[i].hasSettlement = item["settlement_method"]
+		}
+		return bills
+	}
+	ownerName := "p" + strconv.Itoa(f.owner.Id)
+	want := []bill{
+		{20261125, ownerName, "207791.583210", 0.7, false, "145454.108247", false},
+		{20261124, ownerName, "2.000000", 0.7, false, "1.400000", false},
+		{20261123, "ps-owner", "2.000000", nil, true, "0.700000", false},
+	}
+	page, items := providerBills(f.owner, "")
+	assert.EqualValues(t, 3, page["total"])
+	assert.Equal(t, want, billsOf(items))
+	for _, key := range []string{"incomplete_site_count", "mismatch_site_count", "unsynced_usage_site_count"} {
+		assert.NotContains(t, page, key)
+	}
+	// 先合并再分页
+	page, items = providerBills(f.owner, "&p=2&page_size=1")
+	assert.EqualValues(t, 3, page["total"])
+	assert.Equal(t, want[1:2], billsOf(items))
+	// other 唯一的一行在按使用明细结算的站点天里，不计入，没有账单
+	page, items = providerBills(f.other, "")
+	assert.EqualValues(t, 0, page["total"])
+	assert.Empty(t, items)
+
+	export := func(target string, handler gin.HandlerFunc) (*excelize.File, [][]string) {
+		t.Helper()
+		response := request(f.owner, target, handler)
+		require.Equal(t, http.StatusOK, response.Code)
+		file, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
+		require.NoError(t, err, response.Body.String())
+		t.Cleanup(func() { _ = file.Close() })
+		rows, err := file.GetRows(file.GetSheetName(0), excelize.Options{RawCellValue: true})
+		require.NoError(t, err)
+		return file, rows
+	}
+	// 明细导出：没有站点ID、站点名称两列，金额列随之前移、仍是六位小数格式
+	file, rows := export("/api/payable_bill/usages/export"+dates, ExportPayableUsages)
+	require.NotEmpty(t, rows)
+	assert.Equal(t, []string{"任务ID", "账单日期", "平台渠道ID", "平台渠道名称", "第三方站点渠道ID", "第三方站点渠道名称", "第三方站点渠道状态",
+		"第三方站点渠道状态类型", "第三方站点渠道分组", "当日金额(折前)($)", "累计金额($)", "增量说明", "提供商", "提供商来源", "同步时间", "计入账单"}, rows[0])
+	exported := make([][]string, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		require.Len(t, row, 16)
+		exported = append(exported, []string{row[1], row[4], row[9], row[15]})
+	}
+	assert.Equal(t, [][]string{{"2026-11-25", "1", "1", "否"}, {"2026-11-25", "1", "12.345678", "是"}, {"2026-11-24", "1", "2", "是"}}, exported)
+	sheet := file.GetSheetName(0)
+	for _, cell := range []string{"J2", "K2"} {
+		styleID, err := file.GetCellStyle(sheet, cell)
+		require.NoError(t, err)
+		style, err := file.GetStyle(styleID)
+		require.NoError(t, err)
+		require.NotNil(t, style.CustomNumFmt, cell)
+		assert.Equal(t, "0.000000", *style.CustomNumFmt, cell)
+	}
+	// 提供商账单导出：列不变，行与页面一样合并
+	_, rows = export("/api/payable_bill/providers/export"+dates, ExportPayableProviderBills)
+	assert.Equal(t, [][]string{
+		{"账单日期", "提供商", "金额(折前)($)", "折扣(应付)", "应付金额($)", "备注"},
+		{"2026-11-25", ownerName, "207791.58321", "0.7", "145454.108247"},
+		{"2026-11-24", ownerName, "2", "0.7", "1.4"},
+		{"2026-11-23", "ps-owner", "2", "未设置", "0.7", "部分行未设置折扣，未计入应付金额"},
+	}, rows)
+}
+
 // 结算方式的列表与设置接口（设计 5.1、5.8、5.10）。列表只列渠道供应商（含已禁用），从未设置的按渠道明细结算、更新时间为 0；
 // 整站站点只算未删除站点上的“全部渠道”规则，并标出冲突。设置只能给渠道供应商，与当前相同也保存；处理函数记成功与失败的审计，
 // ID 与请求体不合法的在它之前返回，留给兜底审计。

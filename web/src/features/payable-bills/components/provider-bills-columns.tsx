@@ -29,6 +29,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
+import { useIsChannelSupplier } from '@/hooks/use-admin'
 
 import { SETTLEMENT_METHOD_LABEL_KEYS } from '../constants'
 import type { PayableProviderBill } from '../types'
@@ -37,6 +38,8 @@ const EMPTY = '—'
 
 export function useProviderBillsColumns(): ColumnDef<PayableProviderBill>[] {
   const { t } = useTranslation()
+  // A channel supplier's bills are not split by settlement method.
+  const supplier = useIsChannelSupplier()
 
   return useMemo<ColumnDef<PayableProviderBill>[]>(
     () => [
@@ -66,12 +69,18 @@ export function useProviderBillsColumns(): ColumnDef<PayableProviderBill>[] {
           )
         },
       },
-      {
-        accessorKey: 'settlement_method',
-        header: t('Settlement Method'),
-        cell: ({ row }) =>
-          t(SETTLEMENT_METHOD_LABEL_KEYS[row.original.settlement_method]),
-      },
+      ...(supplier
+        ? []
+        : [
+            {
+              accessorKey: 'settlement_method',
+              header: t('Settlement Method'),
+              cell: ({ row }) => {
+                const method = row.original.settlement_method
+                return method ? t(SETTLEMENT_METHOD_LABEL_KEYS[method]) : EMPTY
+              },
+            } satisfies ColumnDef<PayableProviderBill>,
+          ]),
       {
         accessorKey: 'amount',
         header: t('Amount Before Discount ($)'),
@@ -148,6 +157,6 @@ export function useProviderBillsColumns(): ColumnDef<PayableProviderBill>[] {
         },
       },
     ],
-    [t]
+    [t, supplier]
   )
 }

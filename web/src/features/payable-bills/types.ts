@@ -91,11 +91,12 @@ export type PayableProviderSource =
 export type PayableUsage = {
   id: number
   task_id: number
-  pull_site_id: number
+  // The site and its pull are left out of a channel supplier's rows.
+  pull_site_id?: number
   bill_date: number
-  site_id: number
-  site_name: string
-  site_base_url: string
+  site_id?: number
+  site_name?: string
+  site_base_url?: string
   remote_channel_id: number
   remote_channel_name: string
   // Site channel status when pulled: 1 enabled, 2 manually disabled,
@@ -140,8 +141,9 @@ export type PayableProviderBill = {
   bill_date: number
   provider_id: number // 0 = unknown provider
   provider_name: string
-  // A provider-day settled both ways has a row for each method.
-  settlement_method: PayableSettlementMethod
+  // A provider-day settled both ways has a row for each method. A channel
+  // supplier gets one row a day with both added up, and no method.
+  settlement_method?: PayableSettlementMethod
   amount: string
   discount: number | null
   discount_mixed: boolean
@@ -149,12 +151,13 @@ export type PayableProviderBill = {
   payable_amount: string | null
 }
 
+// The site sync counts cover every site, so a channel supplier gets none.
 export type PayableProviderBillPage = Page<PayableProviderBill> & {
-  incomplete_site_count: number
-  mismatch_site_count: number // succeeded with fewer channels than the site reported
+  incomplete_site_count?: number
+  mismatch_site_count?: number // succeeded with fewer channels than the site reported
   // Site-days that would be settled by usage details but whose daily bills
   // have not synced successfully, so channel details settle them for now.
-  unsynced_usage_site_count: number
+  unsynced_usage_site_count?: number
 }
 
 export type PayableProviderOption = {

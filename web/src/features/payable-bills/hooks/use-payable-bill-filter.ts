@@ -22,6 +22,7 @@ import {
   beijingYesterday,
   monthStart,
 } from '@/features/receivable-bills/lib/bill-date'
+import { useIsChannelSupplier } from '@/hooks/use-admin'
 
 import type { PayableBillFilter } from '../types'
 
@@ -30,15 +31,18 @@ const route = getRouteApi('/_authenticated/payable-bills/')
 /**
  * The date, site and provider filters that the details and provider bills
  * tabs share in the URL; `PayableBillFilterBar` edits them. The latest bill
- * date is yesterday: a day is pulled after it ends.
+ * date is yesterday: a day is pulled after it ends. A channel supplier gets
+ * only their own rows and filters by date alone, so the site and provider
+ * filters in the URL do not apply to them.
  */
 export function usePayableBillFilter(): Required<PayableBillFilter> {
   const search = route.useSearch()
+  const supplier = useIsChannelSupplier()
   const yesterday = beijingYesterday()
   return {
     start_date: search.start ?? monthStart(yesterday),
     end_date: search.end ?? yesterday,
-    site_ids: (search.sites ?? []).map(Number),
-    provider_ids: (search.providers ?? []).map(Number),
+    site_ids: supplier ? [] : (search.sites ?? []).map(Number),
+    provider_ids: supplier ? [] : (search.providers ?? []).map(Number),
   }
 }

@@ -15,6 +15,8 @@ type PayableUsageFilter struct {
 	StartDate, EndDate int
 	SiteIDs            []int // 空 = 不筛选
 	ProviderIDs        []int // 空 = 不筛选；0 表示"未知提供商"
+	// MergeMethods 只用于提供商账单：同一天同一提供商的两种结算方式合成一行，行上没有结算方式（渠道供应商查看本人账单时）。
+	MergeMethods bool
 }
 
 // PayablePullTaskSummary 是任务加上进度和明细汇总，增量和累计和只统计完整拉取的行。
@@ -39,12 +41,12 @@ type PayableUsageRow struct {
 }
 
 // PayableProviderBill 是某天某提供商一种结算方式的账单汇总，同一天同一提供商两种结算方式都有时分两行：
-// 渠道明细结算的行汇总明细（额度是增量），使用明细结算的行汇总使用明细结算记录。
+// 渠道明细结算的行汇总明细（额度是增量），使用明细结算的行汇总使用明细结算记录。按 MergeMethods 查询时两种合成一行。
 // 折扣的统计只看额度非 0 的明细或记录：额度为 0 的不计金额，折扣也无所谓。
 type PayableProviderBill struct {
 	BillDate        int
 	ProviderId      int
-	Method          string // 结算方式：PayableSettlementChannel 或 PayableSettlementUsage
+	Method          string // 结算方式：PayableSettlementChannel 或 PayableSettlementUsage；合并结算方式的行为空
 	ProviderName    string // 组内 id 最大的一行明细（一条记录）的快照
 	DeltaQuota      int64  // 组内的额度之和
 	QuotaPerUnit    int64
@@ -314,7 +316,8 @@ func sumPayableBill(bill *PayableProviderBill, entries []payableBillEntry) {
 //   - 渠道明细结算：完整拉取、增量非空、且不按使用明细结算的明细（payableCompleteUsages），按 (账单日期, 提供商) 汇总。
 //
 // 两部分的行合并后按账单日期倒序、提供商 id 升序排列，同一天同一提供商两行时使用明细结算在前，再分页。
-// 名称、折扣与应付金额都由 sumPayableBill 汇总；渠道明细结算部分由 SQL 分组求增量之和，只取页内各组的明细来汇总。
+// filter.MergeMethods 时同一天同一提供商的两部分先合成一行（结算方式为空）再排序、分页，行内各笔使用明细结算在前、渠道明细结算在后。
+// 名称、折扣与应付金额都由 sumPayableBill 汇总；渠道明细结算部分由 SQL 分组求增量之和，只取页内各行的明细来汇总。
 func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]PayableProviderBill, int64, error) {
 	var channelBills []PayableProviderBill
 	err := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
@@ -334,75 +337,89 @@ func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]P
 	if err := settled.Order("s.id").Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
-	var bills []PayableProviderBill
-	var usageEntries [][]payableBillEntry
-	usageIndex := map[[2]int]int{}
-	for _, record := range records {
-		key := [2]int{record.BillDate, record.ProviderId}
-		i, ok := usageIndex[key]
-		if !ok {
-			i = len(bills)
-			usageIndex[key] = i
-			bills = append(bills, PayableProviderBill{BillDate: record.BillDate, ProviderId: record.ProviderId, Method: PayableSettlementUsage})
-			usageEntries = append(usageEntries, nil)
+
+	// 一行账单：使用明细结算部分的各笔在这里收齐；渠道明细结算部分先只有 SQL 求的增量之和，它的各笔分页后再取。
+	type billRow struct {
+		bill         PayableProviderBill
+		usageEntries []payableBillEntry
+		hasChannel   bool
+	}
+	type billKey struct {
+		date, providerID int
+		method           string
+	}
+	var rows []billRow
+	rowIndex := map[billKey]int{}
+	// rowOf 返回一部分所在的行；合并结算方式时结算方式为空，同一天同一提供商的两部分落到同一行。返回的指针在下一次调用前有效。
+	rowOf := func(date, providerID int, method string) *billRow {
+		if filter.MergeMethods {
+			method = ""
 		}
-		bills[i].DeltaQuota += record.Quota
-		usageEntries[i] = append(usageEntries[i], payableBillEntry{name: record.ProviderName, quota: record.Quota,
+		key := billKey{date, providerID, method}
+		i, ok := rowIndex[key]
+		if !ok {
+			i = len(rows)
+			rowIndex[key] = i
+			rows = append(rows, billRow{bill: PayableProviderBill{BillDate: date, ProviderId: providerID, Method: method}})
+		}
+		return &rows[i]
+	}
+	for _, record := range records {
+		row := rowOf(record.BillDate, record.ProviderId, PayableSettlementUsage)
+		row.bill.DeltaQuota += record.Quota
+		row.usageEntries = append(row.usageEntries, payableBillEntry{name: record.ProviderName, quota: record.Quota,
 			quotaPerUnit: record.QuotaPerUnit, discount: record.PayableDiscount})
 	}
-	for i := range bills {
-		sumPayableBill(&bills[i], usageEntries[i])
+	for _, channelBill := range channelBills {
+		row := rowOf(channelBill.BillDate, channelBill.ProviderId, PayableSettlementChannel)
+		row.bill.DeltaQuota += channelBill.DeltaQuota
+		row.hasChannel = true
 	}
-
-	for _, bill := range channelBills {
-		bill.Method = PayableSettlementChannel
-		bills = append(bills, bill)
-	}
-	slices.SortFunc(bills, func(a, b PayableProviderBill) int {
+	slices.SortFunc(rows, func(a, b billRow) int {
 		// 结算方式倒序（"usage" > "channel"）：同一天同一提供商的两行，使用明细结算在前
-		return cmp.Or(cmp.Compare(b.BillDate, a.BillDate), cmp.Compare(a.ProviderId, b.ProviderId), cmp.Compare(b.Method, a.Method))
+		return cmp.Or(cmp.Compare(b.bill.BillDate, a.bill.BillDate), cmp.Compare(a.bill.ProviderId, b.bill.ProviderId),
+			cmp.Compare(b.bill.Method, a.bill.Method))
 	})
-	total := int64(len(bills))
+	total := int64(len(rows))
 	if limit > 0 {
-		start := min(max(offset, 0), len(bills))
-		bills = bills[start:min(start+limit, len(bills))]
+		start := min(max(offset, 0), len(rows))
+		rows = rows[start:min(start+limit, len(rows))]
 	}
 
-	index := make(map[[2]int]int, len(bills))
-	dates := make([]int, 0, len(bills))
-	providerIDs := make([]int, 0, len(bills))
-	for i, bill := range bills {
-		if bill.Method != PayableSettlementChannel {
+	index := make(map[[2]int]int, len(rows))
+	dates := make([]int, 0, len(rows))
+	providerIDs := make([]int, 0, len(rows))
+	for i, row := range rows {
+		if !row.hasChannel {
 			continue
 		}
-		index[[2]int{bill.BillDate, bill.ProviderId}] = i
-		dates = append(dates, bill.BillDate)
-		providerIDs = append(providerIDs, bill.ProviderId)
+		index[[2]int{row.bill.BillDate, row.bill.ProviderId}] = i
+		dates = append(dates, row.bill.BillDate)
+		providerIDs = append(providerIDs, row.bill.ProviderId)
 	}
-	if len(index) == 0 {
-		return bills, total, nil
-	}
-	// 日期和提供商各自去重，绑定参数个数不随组数增长。
-	slices.Sort(dates)
-	slices.Sort(providerIDs)
-	dates, providerIDs = slices.Compact(dates), slices.Compact(providerIDs)
 	var usages []PayableChannelUsage
-	err = payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
-		Where("bill_date IN ? AND provider_id IN ?", dates, providerIDs).Order("id asc").Find(&usages).Error
-	if err != nil {
-		return nil, 0, err
+	if len(index) > 0 {
+		// 日期和提供商各自去重，绑定参数个数不随行数增长。
+		slices.Sort(dates)
+		slices.Sort(providerIDs)
+		dates, providerIDs = slices.Compact(dates), slices.Compact(providerIDs)
+		err = payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
+			Where("bill_date IN ? AND provider_id IN ?", dates, providerIDs).Order("id asc").Find(&usages).Error
+		if err != nil {
+			return nil, 0, err
+		}
 	}
-	channelEntries := make([][]payableBillEntry, len(bills))
+	channelEntries := make([][]payableBillEntry, len(rows))
 	for _, usage := range usages {
 		if i, ok := index[[2]int{usage.BillDate, usage.ProviderId}]; ok {
 			channelEntries[i] = append(channelEntries[i], payableBillEntry{name: usage.ProviderName, quota: *usage.DeltaQuota,
 				quotaPerUnit: usage.QuotaPerUnit, discount: usage.PayableDiscount})
 		}
 	}
-	for i := range bills {
-		if bills[i].Method == PayableSettlementChannel {
-			sumPayableBill(&bills[i], channelEntries[i])
-		}
+	bills := make([]PayableProviderBill, len(rows))
+	for i, row := range rows {
+		bills[i] = row.bill
+		sumPayableBill(&bills[i], slices.Concat(row.usageEntries, channelEntries[i]))
 	}
 	return bills, total, nil
 }

@@ -28,8 +28,10 @@ import { PAYABLE_BILL_QUERY_KEYS, UNKNOWN_PROVIDER_VALUE } from '../constants'
  * Sites and providers for the filters and the provider dialog. `sites` and
  * `providers` keep the plain records; the options mark deleted sites and
  * disabled providers, and the provider options start with the unknown one.
+ * Pass `enabled: false` where the user may not read them, such as a channel
+ * supplier.
  */
-export function usePayableBillOptions() {
+export function usePayableBillOptions(options: { enabled?: boolean } = {}) {
   const { t } = useTranslation()
   const query = useQuery({
     queryKey: PAYABLE_BILL_QUERY_KEYS.options,
@@ -38,6 +40,7 @@ export function usePayableBillOptions() {
         sites: [],
         providers: [],
       },
+    enabled: options.enabled ?? true,
   })
   const sites = query.data?.sites ?? []
   const providers = query.data?.providers ?? []

@@ -38,7 +38,9 @@ import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ROLE } from '@/lib/roles'
 import { payableBillsSearchSchema } from '@/routes/_authenticated/payable-bills/index'
+import { useAuthStore } from '@/stores/auth-store'
 
 import * as billApi from '../../api'
 import type {
@@ -113,10 +115,12 @@ async function renderBills(
     incompleteSiteCount?: number
     mismatchSiteCount?: number
     unsyncedUsageSiteCount?: number
+    /** The whole response, when it differs from the default page. */
+    page?: ApiResponse<PayableProviderBillPage>
   } = {}
 ) {
   vi.mocked(billApi.listPayableProviderBills).mockResolvedValue(
-    providerBillPage(bills, options)
+    options.page ?? providerBillPage(bills, options)
   )
   vi.mocked(billApi.getPayableBillOptions).mockResolvedValue({
     success: true,
@@ -173,6 +177,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  useAuthStore.setState(useAuthStore.getInitialState(), true)
   clients.splice(0).forEach((client) => client.clear())
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -508,5 +513,71 @@ describe('ProviderBillsTable', () => {
         provider_ids: [0, 5],
       })
     )
+  })
+})
+
+describe('ProviderBillsTable for a channel supplier', () => {
+  // A channel supplier gets one bill a day, not split by settlement method,
+  // and no site sync counts.
+  const supplierBills: PayableProviderBill[] = [
+    {
+      bill_date: 20261123,
+      provider_id: 5,
+      provider_name: 'alice',
+      amount: '220.124915',
+      discount: 0.8,
+      discount_mixed: false,
+      discount_missing: false,
+      payable_amount: '176.099932',
+    },
+    {
+      bill_date: 20261122,
+      provider_id: 5,
+      provider_name: 'alice',
+      amount: '2.000000',
+      discount: 0.8,
+      discount_mixed: false,
+      discount_missing: false,
+      payable_amount: '1.600000',
+    },
+  ]
+  const supplierPage: ApiResponse<PayableProviderBillPage> = {
+    success: true,
+    data: { items: supplierBills, total: 2, page: 1, page_size: 10 },
+  }
+
+  beforeEach(() => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 5, username: 'alice', role: ROLE.CHANNEL_SUPPLIER })
+  })
+
+  it('lists one bill a day without a settlement method column', async () => {
+    await renderBills(supplierBills, { page: supplierPage })
+    await screen.findByText('220.124915')
+
+    expect(
+      screen.getAllByRole('columnheader').map((header) => header.textContent)
+    ).toEqual([
+      'Bill Date',
+      'Provider',
+      'Amount Before Discount ($)',
+      'Discount (Payable)',
+      'Payable Amount ($)',
+    ])
+    expect(screen.getByText('2.000000')).toBeInTheDocument()
+  })
+
+  it('offers only the date filter and never loads the site and provider options', async () => {
+    await renderBills(supplierBills, { page: supplierPage })
+    await screen.findByText('220.124915')
+
+    expect(
+      screen.queryByRole('button', { name: /Site Name/ })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /^Provider/ })
+    ).not.toBeInTheDocument()
+    expect(billApi.getPayableBillOptions).not.toHaveBeenCalled()
   })
 })
