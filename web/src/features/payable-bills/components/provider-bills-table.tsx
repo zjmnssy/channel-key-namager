@@ -83,9 +83,10 @@ export function ProviderBillsTable() {
     data: data?.items ?? [],
     columns,
     // A bill is one provider on one day under one settlement method; a
-    // provider-day settled both ways has two bills.
+    // provider-day settled both ways has two bills. A channel supplier's
+    // bills have no method: one bill a day.
     getRowId: (row) =>
-      `${row.bill_date}-${row.provider_id}-${row.settlement_method}`,
+      `${row.bill_date}-${row.provider_id}-${row.settlement_method ?? ''}`,
     pagination,
     onPaginationChange,
     manualPagination: true,

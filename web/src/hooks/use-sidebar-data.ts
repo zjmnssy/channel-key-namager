@@ -125,7 +125,9 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Payable Bills'),
             url: '/payable-bills',
             icon: HandCoins,
-            requiredRole: ROLE.SUPER_ADMIN,
+            // Channel suppliers see their own channel usage details and
+            // provider bills; administrators do not see the page.
+            allowedRoles: [ROLE.CHANNEL_SUPPLIER, ROLE.SUPER_ADMIN],
           },
           {
             title: t('Provider Channel Mapping Rules'),

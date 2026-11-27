@@ -43,8 +43,11 @@ export const payableBillsSearchSchema = z.object({
 export const Route = createFileRoute('/_authenticated/payable-bills/')({
   beforeLoad: () => {
     const { auth } = useAuthStore.getState()
+    const role = auth.user?.role ?? ROLE.GUEST
 
-    if (!auth.user || auth.user.role < ROLE.SUPER_ADMIN) {
+    // Channel suppliers see their own channel usage details and provider
+    // bills; the page narrows its tabs for them.
+    if (role < ROLE.SUPER_ADMIN && role !== ROLE.CHANNEL_SUPPLIER) {
       throw redirect({
         to: '/403',
       })

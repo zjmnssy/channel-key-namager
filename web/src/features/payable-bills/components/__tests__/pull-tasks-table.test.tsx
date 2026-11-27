@@ -263,4 +263,22 @@ describe('payable bills route', () => {
 
     expect(() => beforeLoad()).not.toThrow()
   })
+
+  it('lets channel suppliers in to their own bills', () => {
+    useAuthStore.getState().auth.setUser({ id: 5, username: 'a', role: 5 })
+    const beforeLoad = PayableBillsRoute.options.beforeLoad as () => void
+
+    expect(() => beforeLoad()).not.toThrow()
+  })
+
+  it('redirects common users', () => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'a', role: 1 })
+    const beforeLoad = PayableBillsRoute.options.beforeLoad as () => void
+
+    expect(() => beforeLoad()).toThrow(
+      expect.objectContaining({
+        options: expect.objectContaining({ to: '/403' }),
+      })
+    )
+  })
 })

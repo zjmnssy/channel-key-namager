@@ -37,7 +37,9 @@ import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ROLE } from '@/lib/roles'
 import { payableBillsSearchSchema } from '@/routes/_authenticated/payable-bills/index'
+import { useAuthStore } from '@/stores/auth-store'
 
 import * as billApi from '../../api'
 import type { PayableUsage } from '../../types'
@@ -150,6 +152,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  useAuthStore.setState(useAuthStore.getInitialState(), true)
   clients.splice(0).forEach((client) => client.clear())
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -540,5 +543,103 @@ describe('ChannelUsagesTable', () => {
     expect(
       await screen.findByRole('dialog', { name: 'Set Provider' })
     ).toBeInTheDocument()
+  })
+})
+
+describe('ChannelUsagesTable for a channel supplier', () => {
+  // A channel supplier's rows come without the site ID, name, URL and pull.
+  const supplierUsage: PayableUsage = {
+    id: 101,
+    task_id: 12,
+    bill_date: 20261123,
+    remote_channel_id: 17,
+    remote_channel_name: 'gpt-dcmark-3-17',
+    remote_channel_status: 1,
+    remote_channel_group: 'default',
+    local_channel_id: 17,
+    local_channel_name: 'gpt-platform',
+    used_quota: 228394500,
+    delta_quota: 6172839,
+    delta_flag: 'normal',
+    quota_per_unit: 500000,
+    provider_id: 5,
+    provider_name: 'alice',
+    provider_source: 'parsed',
+    payable_discount: 0.8,
+    synced_at: 1763914205,
+    created_time: 1763914205,
+    updated_time: 1763914205,
+    counted: true,
+    manual: false,
+    usage_settled: false,
+    delta_amount: '12.345678',
+    used_amount: '456.789000',
+  }
+
+  beforeEach(() => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 5, username: 'alice', role: ROLE.CHANNEL_SUPPLIER })
+  })
+
+  it('lists the columns without the site and the provider action', async () => {
+    await renderUsages([supplierUsage])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    expect(
+      screen.getAllByRole('columnheader').map((header) => header.textContent)
+    ).toEqual([
+      'Task ID',
+      'Bill Date',
+      'Platform Channel ID',
+      'Platform Channel Name',
+      'Third-Party Site Channel ID',
+      'Third-Party Site Channel Name',
+      'Third-Party Site Channel Status',
+      'Third-Party Site Channel Status Type',
+      'Third-Party Site Channel Group',
+      'Daily Amount Before Discount ($)',
+      'Cumulative Amount ($)',
+      'Provider Name',
+      'Sync Time',
+    ])
+    expect(
+      screen.queryByRole('button', { name: 'Set Provider' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('requests no site or provider filter even when the URL carries them', async () => {
+    await renderUsages(
+      [supplierUsage],
+      `/payable-bills/${defaultStringifySearch({
+        tab: 'usages',
+        sites: ['3'],
+        providers: ['7'],
+      })}`
+    )
+
+    await waitFor(() =>
+      expect(billApi.listPayableUsages).toHaveBeenCalledWith({
+        p: 1,
+        page_size: 10,
+        start_date: 20261101,
+        end_date: 20261123,
+        site_ids: [],
+        provider_ids: [],
+      })
+    )
+  })
+
+  it('offers only the date filter and never loads the site and provider options', async () => {
+    await renderUsages([supplierUsage])
+    await screen.findByText('gpt-dcmark-3-17')
+
+    expect(
+      screen.queryByRole('button', { name: /Site Name/ })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /^Provider/ })
+    ).not.toBeInTheDocument()
+    expect(billApi.getPayableBillOptions).not.toHaveBeenCalled()
   })
 })

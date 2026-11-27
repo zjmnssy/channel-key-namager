@@ -453,6 +453,21 @@ func RequireAdminRole() func(c *gin.Context) {
 	}
 }
 
+// RequireRootOrChannelSupplier limits a route behind ChannelSupplierAuth to
+// root users and channel suppliers, and rejects administrators as RootAuth
+// does. It guards the payable bill reads opened to channel suppliers, whose
+// handlers confine suppliers to their own rows.
+func RequireRootOrChannelSupplier() func(c *gin.Context) {
+	return func(c *gin.Context) {
+		role := c.GetInt("role")
+		if role >= common.RoleRootUser || role == common.RoleChannelSupplierUser {
+			c.Next()
+			return
+		}
+		abortWithWebMessage(c, http.StatusForbidden, "AUTH_INSUFFICIENT_PRIVILEGE", common.NewMessage("Unauthorized, insufficient privileges"))
+	}
+}
+
 func WssAuth(c *gin.Context) {
 
 }

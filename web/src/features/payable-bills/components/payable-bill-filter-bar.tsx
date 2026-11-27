@@ -27,6 +27,7 @@ import {
 } from '@/components/data-table'
 import { BillDateRangePicker } from '@/features/receivable-bills/components/bill-date-range-picker'
 import { beijingYesterday } from '@/features/receivable-bills/lib/bill-date'
+import { useIsChannelSupplier } from '@/hooks/use-admin'
 
 import { usePayableBillFilter } from '../hooks/use-payable-bill-filter'
 import { usePayableBillOptions } from '../hooks/use-payable-bill-options'
@@ -39,14 +40,18 @@ type PayableBillFilterBarProps<TData> = {
   actions?: ReactNode
 }
 
-/** The date, site and provider filters of the details and provider bills tabs. */
+/**
+ * The date, site and provider filters of the details and provider bills tabs.
+ * A channel supplier sees only their own rows and filters by date alone.
+ */
 export function PayableBillFilterBar<TData>(
   props: PayableBillFilterBarProps<TData>
 ) {
   const { t } = useTranslation()
   const search = route.useSearch()
   const navigate = route.useNavigate()
-  const options = usePayableBillOptions()
+  const supplier = useIsChannelSupplier()
+  const options = usePayableBillOptions({ enabled: !supplier })
   const filter = usePayableBillFilter()
   const siteValues = search.sites ?? []
   const providerValues = search.providers ?? []
@@ -60,8 +65,8 @@ export function PayableBillFilterBar<TData>(
   const hasFilters =
     search.start !== undefined ||
     search.end !== undefined ||
-    siteValues.length > 0 ||
-    providerValues.length > 0
+    filter.site_ids.length > 0 ||
+    filter.provider_ids.length > 0
 
   return (
     <DataTableToolbar
@@ -85,18 +90,22 @@ export function PayableBillFilterBar<TData>(
             max={beijingYesterday()}
             onChange={(start, end) => updateFilters({ start, end })}
           />
-          <DataTableFacetedFilter
-            title={t('Site Name')}
-            options={options.siteOptions}
-            value={siteValues}
-            onValueChange={(sites) => updateFilters({ sites })}
-          />
-          <DataTableFacetedFilter
-            title={t('Provider')}
-            options={options.providerOptions}
-            value={providerValues}
-            onValueChange={(providers) => updateFilters({ providers })}
-          />
+          {!supplier && (
+            <>
+              <DataTableFacetedFilter
+                title={t('Site Name')}
+                options={options.siteOptions}
+                value={siteValues}
+                onValueChange={(sites) => updateFilters({ sites })}
+              />
+              <DataTableFacetedFilter
+                title={t('Provider')}
+                options={options.providerOptions}
+                value={providerValues}
+                onValueChange={(providers) => updateFilters({ providers })}
+              />
+            </>
+          )}
         </>
       }
     />

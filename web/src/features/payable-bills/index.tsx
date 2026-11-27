@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useIsChannelSupplier } from '@/hooks/use-admin'
 import { cn } from '@/lib/utils'
 
 import { ChannelUsagesTable } from './components/channel-usages-table'
@@ -39,7 +40,13 @@ export function PayableBills() {
   const navigate = route.useNavigate()
   const queryClient = useQueryClient()
   const fetching = useIsFetching({ queryKey: PAYABLE_BILL_QUERY_KEYS.all }) > 0
-  const tab = route.useSearch().tab ?? 'pulls'
+  const supplier = useIsChannelSupplier()
+  let tab = route.useSearch().tab ?? 'pulls'
+  // Channel suppliers have only their usage details and provider bills; a URL
+  // asking them for another tab shows the details.
+  if (supplier && tab !== 'providers') {
+    tab = 'usages'
+  }
 
   let content = <PullTasksTable />
   if (tab === 'usages') {
@@ -93,16 +100,20 @@ export function PayableBills() {
             }}
           >
             <TabsList className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'>
-              <TabsTrigger value='pulls'>
-                {t('Channel Usage Pulls')}
-              </TabsTrigger>
+              {!supplier && (
+                <TabsTrigger value='pulls'>
+                  {t('Channel Usage Pulls')}
+                </TabsTrigger>
+              )}
               <TabsTrigger value='usages'>
                 {t('Channel Usage Details')}
               </TabsTrigger>
               <TabsTrigger value='providers'>{t('Provider Bills')}</TabsTrigger>
-              <TabsTrigger value='settlements'>
-                {t('Settlement Methods')}
-              </TabsTrigger>
+              {!supplier && (
+                <TabsTrigger value='settlements'>
+                  {t('Settlement Methods')}
+                </TabsTrigger>
+              )}
             </TabsList>
           </Tabs>
           <div className='min-h-0 flex-1'>{content}</div>

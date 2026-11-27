@@ -23,7 +23,8 @@ func parsePayableMessage(raw string) *common.Message {
 }
 
 // parsePayableUsageFilter 读取明细和提供商账单共用的筛选参数，参数不合法时已回复错误并返回 false。
-// provider_ids 允许 0（未知提供商）。
+// provider_ids 允许 0（未知提供商）。渠道供应商只能看提供商是本人的行：提供商固定为本人，带站点或提供商筛选的请求一律不合法，
+// 以免按站点筛选试出各行属于哪个站点。
 func parsePayableUsageFilter(c *gin.Context) (model.PayableUsageFilter, bool) {
 	var filter model.PayableUsageFilter
 	startDate, endDate, ok := parseReceivableDateRange(c)
@@ -41,6 +42,14 @@ func parsePayableUsageFilter(c *gin.Context) (model.PayableUsageFilter, bool) {
 	if !ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return filter, false
+	}
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		if len(siteIDs) > 0 || len(providerIDs) > 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return filter, false
+		}
+		filter.ProviderIDs = []int{c.GetInt("id")}
+		return filter, true
 	}
 	filter.SiteIDs, filter.ProviderIDs = siteIDs, providerIDs
 	return filter, true
@@ -66,11 +75,60 @@ type payableUsageView struct {
 	LocalChannelName *string `json:"local_channel_name"` // 平台渠道当前的名称；没有平台渠道 ID 或平台上已没有这个渠道时为 null
 }
 
+// payableSupplierUsageView 是渠道供应商看到的一行明细：明细视图去掉站点 ID、名称、地址与拉取进度 ID（同一进度的行属于同一个站点）。
+// 字段逐个列出，明细以后新增的字段不会自动给渠道供应商。
+type payableSupplierUsageView struct {
+	Id                  int      `json:"id"`
+	TaskId              int      `json:"task_id"`
+	BillDate            int      `json:"bill_date"`
+	RemoteChannelId     int      `json:"remote_channel_id"`
+	RemoteChannelName   string   `json:"remote_channel_name"`
+	RemoteChannelStatus *int     `json:"remote_channel_status"`
+	RemoteChannelGroup  string   `json:"remote_channel_group"`
+	UsedQuota           int64    `json:"used_quota"`
+	DeltaQuota          *int64   `json:"delta_quota"`
+	DeltaFlag           string   `json:"delta_flag"`
+	QuotaPerUnit        int64    `json:"quota_per_unit"`
+	ProviderId          int      `json:"provider_id"`
+	ProviderName        string   `json:"provider_name"`
+	ProviderSource      string   `json:"provider_source"`
+	PayableDiscount     *float64 `json:"payable_discount"`
+	SyncedAt            int64    `json:"synced_at"`
+	CreatedTime         int64    `json:"created_time"`
+	UpdatedTime         int64    `json:"updated_time"`
+	Counted             bool     `json:"counted"`
+	Manual              bool     `json:"manual"`
+	UsageSettled        bool     `json:"usage_settled"`
+	DeltaAmount         *string  `json:"delta_amount"`
+	UsedAmount          string   `json:"used_amount"`
+	LocalChannelId      int      `json:"local_channel_id"`
+	LocalChannelName    *string  `json:"local_channel_name"`
+}
+
+// newPayableSupplierUsageViews 把明细视图转成渠道供应商看到的视图。
+func newPayableSupplierUsageViews(views []payableUsageView) []payableSupplierUsageView {
+	supplierViews := make([]payableSupplierUsageView, len(views))
+	for i, view := range views {
+		supplierViews[i] = payableSupplierUsageView{
+			Id: view.Id, TaskId: view.TaskId, BillDate: view.BillDate,
+			RemoteChannelId: view.RemoteChannelId, RemoteChannelName: view.RemoteChannelName,
+			RemoteChannelStatus: view.RemoteChannelStatus, RemoteChannelGroup: view.RemoteChannelGroup,
+			UsedQuota: view.UsedQuota, DeltaQuota: view.DeltaQuota, DeltaFlag: view.DeltaFlag, QuotaPerUnit: view.QuotaPerUnit,
+			ProviderId: view.ProviderId, ProviderName: view.ProviderName, ProviderSource: view.ProviderSource,
+			PayableDiscount: view.PayableDiscount, SyncedAt: view.SyncedAt, CreatedTime: view.CreatedTime, UpdatedTime: view.UpdatedTime,
+			Counted: view.Counted, Manual: view.Manual, UsageSettled: view.UsageSettled,
+			DeltaAmount: view.DeltaAmount, UsedAmount: view.UsedAmount,
+			LocalChannelId: view.LocalChannelId, LocalChannelName: view.LocalChannelName,
+		}
+	}
+	return supplierViews
+}
+
 type payableProviderBillView struct {
 	BillDate         int      `json:"bill_date"`
 	ProviderId       int      `json:"provider_id"`
 	ProviderName     string   `json:"provider_name"`
-	SettlementMethod string   `json:"settlement_method"` // 这一行的结算方式：channel 或 usage
+	SettlementMethod string   `json:"settlement_method,omitempty"` // 这一行的结算方式：channel 或 usage；渠道供应商的账单不分结算方式，没有这个字段
 	Amount           string   `json:"amount"`
 	Discount         *float64 `json:"discount"`
 	DiscountMixed    bool     `json:"discount_mixed"`
@@ -165,7 +223,11 @@ func GetPayableUsages(c *gin.Context) {
 		return
 	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(views)
+	if c.GetInt("role") == common.RoleChannelSupplierUser {
+		pageInfo.SetItems(newPayableSupplierUsageViews(views))
+	} else {
+		pageInfo.SetItems(views)
+	}
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -174,18 +236,11 @@ func GetPayableProviderBills(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// 渠道供应商的账单不分结算方式，同一天的两种合成一行；全平台站点的同步情况也不给渠道供应商。
+	supplier := c.GetInt("role") == common.RoleChannelSupplierUser
+	filter.MergeMethods = supplier
 	pageInfo := common.GetPageQuery(c)
 	bills, total, err := model.ListPayableProviderBills(filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	incomplete, mismatched, err := model.CountPayablePullGaps(filter)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	unsynced, err := model.CountPayableUnsyncedUsageSites(filter)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -202,10 +257,23 @@ func GetPayableProviderBills(c *gin.Context) {
 			views[i].PayableAmount = &payable
 		}
 	}
-	common.ApiSuccess(c, gin.H{
-		"page": pageInfo.GetPage(), "page_size": pageInfo.GetPageSize(), "total": total, "items": views,
-		"incomplete_site_count": incomplete, "mismatch_site_count": mismatched, "unsynced_usage_site_count": unsynced,
-	})
+	page := gin.H{"page": pageInfo.GetPage(), "page_size": pageInfo.GetPageSize(), "total": total, "items": views}
+	if supplier {
+		common.ApiSuccess(c, page)
+		return
+	}
+	incomplete, mismatched, err := model.CountPayablePullGaps(filter)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	unsynced, err := model.CountPayableUnsyncedUsageSites(filter)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	page["incomplete_site_count"], page["mismatch_site_count"], page["unsynced_usage_site_count"] = incomplete, mismatched, unsynced
+	common.ApiSuccess(c, page)
 }
 
 func GetPayableOptions(c *gin.Context) {

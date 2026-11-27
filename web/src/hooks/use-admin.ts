@@ -29,3 +29,13 @@ export function useIsAdmin(): boolean {
   const { user } = useAuthStore((state) => state.auth)
   return (user?.role ?? 0) >= ROLE.ADMIN
 }
+
+/**
+ * Check if the current user is a channel supplier, whose pages show only the
+ * supplier's own data
+ */
+export function useIsChannelSupplier(): boolean {
+  return (
+    useAuthStore((state) => state.auth.user?.role) === ROLE.CHANNEL_SUPPLIER
+  )
+}

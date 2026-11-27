@@ -34,6 +34,7 @@ import {
 import { CHANNEL_STATUS } from '@/features/channels/constants'
 import { parseGroupsList } from '@/features/channels/lib/channel-utils'
 import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
+import { useIsChannelSupplier } from '@/hooks/use-admin'
 import { formatTimestampToDate } from '@/lib/format'
 
 import type { PayableUsage } from '../types'
@@ -44,6 +45,9 @@ export function useChannelUsagesColumns(
   onSetProvider: (usage: PayableUsage) => void
 ): ColumnDef<PayableUsage>[] {
   const { t } = useTranslation()
+  // A channel supplier is not shown which site a row comes from, and setting
+  // the provider is for super administrators.
+  const supplier = useIsChannelSupplier()
 
   return useMemo<ColumnDef<PayableUsage>[]>(
     () => [
@@ -57,21 +61,27 @@ export function useChannelUsagesColumns(
         header: t('Bill Date'),
         cell: ({ row }) => formatBillDate(row.original.bill_date),
       },
-      {
-        accessorKey: 'site_id',
-        header: t('Site ID'),
-        cell: ({ row }) => <TableId value={row.original.site_id} />,
-      },
-      {
-        accessorKey: 'site_name',
-        header: t('Site Name'),
-        cell: ({ row }) => (
-          <TruncatedText
-            text={row.original.site_name}
-            maxWidth='max-w-[160px]'
-          />
-        ),
-      },
+      ...(supplier
+        ? []
+        : [
+            {
+              accessorKey: 'site_id',
+              header: t('Site ID'),
+              cell: ({ row }) => (
+                <TableId value={row.original.site_id ?? EMPTY} />
+              ),
+            } satisfies ColumnDef<PayableUsage>,
+            {
+              accessorKey: 'site_name',
+              header: t('Site Name'),
+              cell: ({ row }) => (
+                <TruncatedText
+                  text={row.original.site_name ?? EMPTY}
+                  maxWidth='max-w-[160px]'
+                />
+              ),
+            } satisfies ColumnDef<PayableUsage>,
+          ]),
       {
         accessorKey: 'local_channel_id',
         header: t('Platform Channel ID'),
@@ -309,21 +319,25 @@ export function useChannelUsagesColumns(
         header: t('Sync Time'),
         cell: ({ row }) => formatTimestampToDate(row.original.synced_at),
       },
-      {
-        id: 'actions',
-        header: t('Actions'),
-        cell: ({ row }) => (
-          <Button
-            variant='link'
-            size='sm'
-            className='h-auto p-0'
-            onClick={() => onSetProvider(row.original)}
-          >
-            {t('Set Provider')}
-          </Button>
-        ),
-      },
+      ...(supplier
+        ? []
+        : [
+            {
+              id: 'actions',
+              header: t('Actions'),
+              cell: ({ row }) => (
+                <Button
+                  variant='link'
+                  size='sm'
+                  className='h-auto p-0'
+                  onClick={() => onSetProvider(row.original)}
+                >
+                  {t('Set Provider')}
+                </Button>
+              ),
+            } satisfies ColumnDef<PayableUsage>,
+          ]),
     ],
-    [t, onSetProvider]
+    [t, onSetProvider, supplier]
   )
 }

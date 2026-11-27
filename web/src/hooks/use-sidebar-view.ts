@@ -64,8 +64,10 @@ export function useSidebarView(): ResolvedSidebarView {
     return configFilteredRoot
       .filter((group) => (group.id === 'admin' ? seesAdminGroup : true))
       .map((group) => {
-        const items = group.items.filter(
-          (item) => item.requiredRole === undefined || role >= item.requiredRole
+        const items = group.items.filter((item) =>
+          item.allowedRoles
+            ? item.allowedRoles.includes(role)
+            : item.requiredRole === undefined || role >= item.requiredRole
         )
         return items.length === group.items.length ? group : { ...group, items }
       })

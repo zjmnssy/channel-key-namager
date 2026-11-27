@@ -362,14 +362,19 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			payableBillRoute.GET("/tasks", controller.GetPayablePullTasks)
 			payableBillRoute.GET("/tasks/:id/sites", controller.GetPayablePullTaskSites)
-			payableBillRoute.GET("/usages", controller.GetPayableUsages)
-			payableBillRoute.GET("/providers", controller.GetPayableProviderBills)
-			payableBillRoute.GET("/usages/export", controller.ExportPayableUsages)
-			payableBillRoute.GET("/providers/export", controller.ExportPayableProviderBills)
 			payableBillRoute.GET("/options", controller.GetPayableOptions)
 			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
 			payableBillRoute.GET("/settlement_methods", controller.GetPayableSettlementMethods)
 			payableBillRoute.PUT("/settlement_methods/:provider_id", controller.SetPayableSettlementMethod)
+		}
+		// 渠道消费明细、提供商账单及其导出也向渠道供应商开放：处理函数只给提供商是本人的行、不给站点信息；普通管理员仍不能访问。
+		payableBillReadRoute := apiRouter.Group("/payable_bill")
+		payableBillReadRoute.Use(middleware.ChannelSupplierAuth(), middleware.RequireRootOrChannelSupplier())
+		{
+			payableBillReadRoute.GET("/usages", controller.GetPayableUsages)
+			payableBillReadRoute.GET("/providers", controller.GetPayableProviderBills)
+			payableBillReadRoute.GET("/usages/export", controller.ExportPayableUsages)
+			payableBillReadRoute.GET("/providers/export", controller.ExportPayableProviderBills)
 		}
 
 		providerMappingRuleRoute := apiRouter.Group("/provider_mapping_rule")
