@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"errors"
 	"slices"
 
@@ -28,24 +29,29 @@ type PayablePullTaskSummary struct {
 	UsedQuota     int64 `json:"-"`
 }
 
-// PayableUsageRow 是一行明细；Counted 表示所属进度已成功（完整拉取），Manual 表示该站点渠道有手动指定。
+// PayableUsageRow 是一行明细；Counted 表示所属进度已成功（完整拉取），Manual 表示该站点渠道有手动指定，
+// UsageSettled 表示该站点这一天按使用明细结算（payableUsageSettled），这一行不计入提供商账单。
 type PayableUsageRow struct {
 	PayableChannelUsage
-	Counted bool `json:"counted" gorm:"-"`
-	Manual  bool `json:"manual" gorm:"-"`
+	Counted      bool `json:"counted" gorm:"-"`
+	Manual       bool `json:"manual" gorm:"-"`
+	UsageSettled bool `json:"usage_settled" gorm:"-"`
 }
 
-// PayableProviderBill 是某天某提供商的账单汇总。折扣的统计只看增量非 0 的行：增量为 0 的行不计金额，折扣也无所谓。
+// PayableProviderBill 是某天某提供商一种结算方式的账单汇总，同一天同一提供商两种结算方式都有时分两行：
+// 渠道明细结算的行汇总明细（额度是增量），使用明细结算的行汇总使用明细结算记录。
+// 折扣的统计只看额度非 0 的明细或记录：额度为 0 的不计金额，折扣也无所谓。
 type PayableProviderBill struct {
 	BillDate        int
 	ProviderId      int
-	ProviderName    string // 组内 id 最大的一行的快照
-	DeltaQuota      int64
+	Method          string // 结算方式：PayableSettlementChannel 或 PayableSettlementUsage
+	ProviderName    string // 组内 id 最大的一行明细（一条记录）的快照
+	DeltaQuota      int64  // 组内的额度之和
 	QuotaPerUnit    int64
-	Discount        *float64         // 组内增量非 0 的行折扣全部相同且非空时有值
-	DiscountMixed   bool             // 组内增量非 0 的行出现 >= 2 种非空折扣
-	DiscountMissing bool             // 组内有增量非 0 而折扣为空的行
-	PayableAmount   *decimal.Decimal // 有折扣行的 金额×折扣 之和；增量全为 0 时为 0；增量非 0 的行都没有折扣时 nil
+	Discount        *float64         // 组内额度非 0 的行折扣全部相同且非空时有值
+	DiscountMixed   bool             // 组内额度非 0 的行出现 >= 2 种非空折扣
+	DiscountMissing bool             // 组内有额度非 0 而折扣为空的行
+	PayableAmount   *decimal.Decimal // 有折扣行的 金额×折扣 之和；额度全为 0 时为 0；额度非 0 的行都没有折扣时 nil
 }
 
 // PayableProviderOption 是提供商筛选和手动指定里的一个渠道供应商。
@@ -56,11 +62,14 @@ type PayableProviderOption struct {
 	PayableDiscount *float64 `json:"payable_discount"`
 }
 
-// payableCompleteUsages 返回只含完整拉取行（所属进度为 success）并按 filter 筛选的明细查询。
+// payableCompleteUsages 返回完整拉取（所属进度为 success）、且不按使用明细结算的明细行，并按 filter 筛选。
+// 按使用明细结算的站点天（payableUsageSettled）的明细不论提供商是谁，一律不计入（设计 5.4）。
 func payableCompleteUsages(filter PayableUsageFilter) *gorm.DB {
 	query := DB.Model(&PayableChannelUsage{}).
 		Where("bill_date >= ? AND bill_date <= ?", filter.StartDate, filter.EndDate).
-		Where("pull_site_id IN (?)", DB.Model(&PayablePullSite{}).Select("id").Where("status = ?", PayablePullSuccess))
+		Where("pull_site_id IN (?)", DB.Model(&PayablePullSite{}).Select("id").Where("status = ?", PayablePullSuccess)).
+		Where("NOT EXISTS (?)", payableUsageSettled().Select("1").
+			Where("s.site_id = payable_channel_usages.site_id AND s.bill_date = payable_channel_usages.bill_date"))
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("site_id IN ?", filter.SiteIDs)
 	}
@@ -198,17 +207,19 @@ func ListPayableUsages(filter PayableUsageFilter, offset, limit int) ([]PayableU
 	pullIDs := make([]int, 0, len(usages))
 	siteIDs := make([]int, 0, len(usages))
 	channelIDs := make([]int, 0, len(usages))
+	dates := make([]int, 0, len(usages))
 	for i, usage := range usages {
 		rows[i].PayableChannelUsage = usage
 		pullIDs = append(pullIDs, usage.PullSiteId)
 		siteIDs = append(siteIDs, usage.SiteId)
 		channelIDs = append(channelIDs, usage.RemoteChannelId)
+		dates = append(dates, usage.BillDate)
 	}
 	// 去重后再绑定：导出（limit <= 0）的行数可达数万，每行一个参数会超出各库的绑定参数上限。
-	for _, ids := range [][]int{pullIDs, siteIDs, channelIDs} {
+	for _, ids := range [][]int{pullIDs, siteIDs, channelIDs, dates} {
 		slices.Sort(ids)
 	}
-	pullIDs, siteIDs, channelIDs = slices.Compact(pullIDs), slices.Compact(siteIDs), slices.Compact(channelIDs)
+	pullIDs, siteIDs, channelIDs, dates = slices.Compact(pullIDs), slices.Compact(siteIDs), slices.Compact(channelIDs), slices.Compact(dates)
 	var successPulls []int
 	err := DB.Model(&PayablePullSite{}).Where("id IN ? AND status = ?", pullIDs, PayablePullSuccess).Pluck("id", &successPulls).Error
 	if err != nil {
@@ -227,9 +238,14 @@ func ListPayableUsages(filter PayableUsageFilter, offset, limit int) ([]PayableU
 	for _, override := range overrides {
 		manual[[2]int{override.SiteId, override.RemoteChannelId}] = true
 	}
+	settled, err := payableUsageSettledDays(siteIDs, dates)
+	if err != nil {
+		return nil, 0, err
+	}
 	for i := range rows {
 		rows[i].Counted = counted[rows[i].PullSiteId]
 		rows[i].Manual = manual[[2]int{rows[i].SiteId, rows[i].RemoteChannelId}]
+		rows[i].UsageSettled = settled[[2]int{rows[i].SiteId, rows[i].BillDate}]
 	}
 	return rows, total, nil
 }
@@ -251,86 +267,141 @@ func PayableLocalChannelNames(ids []int) (map[int]string, error) {
 	return names, nil
 }
 
-// ListPayableProviderBills 返回按 (账单日期, 提供商) 汇总的账单，按账单日期倒序、提供商 id 升序，同时返回组数。
-// 只汇总完整拉取且增量非空的行。limit <= 0 时返回全部组。
+// payableBillEntry 是提供商账单组内的一笔：一行渠道明细（额度是增量）或一条使用明细结算记录。
+type payableBillEntry struct {
+	name         string
+	quota        int64
+	quotaPerUnit int64
+	discount     *float64
+}
+
+// sumPayableBill 按组内各笔（id 升序）定下账单的名称、换算率、折扣与应付金额，渠道明细与使用明细结算两部分共用：
+// 名称与换算率取最后一笔，即组内 id 最大的一笔；额度为 0 的笔不计金额，它的折扣也不影响“多个”“未设置”；
+// 有额度非 0 而折扣为空的笔时“未设置”，应付金额只计有折扣的笔；额度全为 0 时没有要付的钱，应付金额为 0，没有折扣可显示。
+func sumPayableBill(bill *PayableProviderBill, entries []payableBillEntry) {
+	distinct := map[float64]bool{}
+	for _, entry := range entries {
+		bill.ProviderName, bill.QuotaPerUnit = entry.name, entry.quotaPerUnit
+		if entry.quota == 0 {
+			continue
+		}
+		if entry.discount == nil {
+			bill.DiscountMissing = true
+			continue
+		}
+		distinct[*entry.discount] = true
+		amount := ReceivableAmount(entry.quota, entry.quotaPerUnit).Mul(decimal.NewFromFloat(*entry.discount))
+		if bill.PayableAmount != nil {
+			amount = bill.PayableAmount.Add(amount)
+		}
+		bill.PayableAmount = &amount
+	}
+	bill.DiscountMixed = len(distinct) >= 2
+	if len(distinct) == 1 && !bill.DiscountMissing {
+		for discount := range distinct {
+			bill.Discount = &discount
+		}
+	}
+	if bill.PayableAmount == nil && !bill.DiscountMissing {
+		zero := decimal.Zero
+		bill.PayableAmount = &zero
+	}
+}
+
+// ListPayableProviderBills 返回提供商账单，同时返回行数；limit <= 0 时返回全部行。账单在查询时汇总，分两部分（设计 5.4）：
+//   - 使用明细结算：筛选日期、站点、提供商内按使用明细结算的站点天（payableUsageSettled）的记录，按 (账单日期, 提供商) 汇总。
+//     记录的提供商不会是 0，提供商筛选含 0 时这一部分也没有提供商 0 的行。
+//   - 渠道明细结算：完整拉取、增量非空、且不按使用明细结算的明细（payableCompleteUsages），按 (账单日期, 提供商) 汇总。
+//
+// 两部分的行合并后按账单日期倒序、提供商 id 升序排列，同一天同一提供商两行时使用明细结算在前，再分页。
+// 名称、折扣与应付金额都由 sumPayableBill 汇总；渠道明细结算部分由 SQL 分组求增量之和，只取页内各组的明细来汇总。
 func ListPayableProviderBills(filter PayableUsageFilter, offset, limit int) ([]PayableProviderBill, int64, error) {
-	var total int64
-	groups := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").Select("bill_date, provider_id").Group("bill_date, provider_id")
-	if err := DB.Table("(?) AS g", groups).Count(&total).Error; err != nil {
+	var channelBills []PayableProviderBill
+	err := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
+		Select("bill_date, provider_id, SUM(delta_quota) AS delta_quota").Group("bill_date, provider_id").Scan(&channelBills).Error
+	if err != nil {
 		return nil, 0, err
 	}
 
-	pageQuery := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
-		Select("bill_date, provider_id, SUM(delta_quota) AS delta_quota").
-		Group("bill_date, provider_id").Order("bill_date desc, provider_id asc")
-	if limit > 0 {
-		pageQuery = pageQuery.Offset(offset).Limit(limit)
+	settled := payableUsageSettled().Select("s.*").Where("s.bill_date >= ? AND s.bill_date <= ?", filter.StartDate, filter.EndDate)
+	if len(filter.SiteIDs) > 0 {
+		settled = settled.Where("s.site_id IN ?", filter.SiteIDs)
 	}
-	var bills []PayableProviderBill
-	if err := pageQuery.Scan(&bills).Error; err != nil {
+	if len(filter.ProviderIDs) > 0 {
+		settled = settled.Where("s.provider_id IN ?", filter.ProviderIDs)
+	}
+	var records []PayableUsageSettlement
+	if err := settled.Order("s.id").Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
-	if len(bills) == 0 {
-		return bills, total, nil
+	var bills []PayableProviderBill
+	var usageEntries [][]payableBillEntry
+	usageIndex := map[[2]int]int{}
+	for _, record := range records {
+		key := [2]int{record.BillDate, record.ProviderId}
+		i, ok := usageIndex[key]
+		if !ok {
+			i = len(bills)
+			usageIndex[key] = i
+			bills = append(bills, PayableProviderBill{BillDate: record.BillDate, ProviderId: record.ProviderId, Method: PayableSettlementUsage})
+			usageEntries = append(usageEntries, nil)
+		}
+		bills[i].DeltaQuota += record.Quota
+		usageEntries[i] = append(usageEntries[i], payableBillEntry{name: record.ProviderName, quota: record.Quota,
+			quotaPerUnit: record.QuotaPerUnit, discount: record.PayableDiscount})
+	}
+	for i := range bills {
+		sumPayableBill(&bills[i], usageEntries[i])
+	}
+
+	for _, bill := range channelBills {
+		bill.Method = PayableSettlementChannel
+		bills = append(bills, bill)
+	}
+	slices.SortFunc(bills, func(a, b PayableProviderBill) int {
+		// 结算方式倒序（"usage" > "channel"）：同一天同一提供商的两行，使用明细结算在前
+		return cmp.Or(cmp.Compare(b.BillDate, a.BillDate), cmp.Compare(a.ProviderId, b.ProviderId), cmp.Compare(b.Method, a.Method))
+	})
+	total := int64(len(bills))
+	if limit > 0 {
+		start := min(max(offset, 0), len(bills))
+		bills = bills[start:min(start+limit, len(bills))]
 	}
 
 	index := make(map[[2]int]int, len(bills))
 	dates := make([]int, 0, len(bills))
 	providerIDs := make([]int, 0, len(bills))
 	for i, bill := range bills {
+		if bill.Method != PayableSettlementChannel {
+			continue
+		}
 		index[[2]int{bill.BillDate, bill.ProviderId}] = i
 		dates = append(dates, bill.BillDate)
 		providerIDs = append(providerIDs, bill.ProviderId)
+	}
+	if len(index) == 0 {
+		return bills, total, nil
 	}
 	// 日期和提供商各自去重，绑定参数个数不随组数增长。
 	slices.Sort(dates)
 	slices.Sort(providerIDs)
 	dates, providerIDs = slices.Compact(dates), slices.Compact(providerIDs)
 	var usages []PayableChannelUsage
-	err := payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
+	err = payableCompleteUsages(filter).Where("delta_quota IS NOT NULL").
 		Where("bill_date IN ? AND provider_id IN ?", dates, providerIDs).Order("id asc").Find(&usages).Error
 	if err != nil {
 		return nil, 0, err
 	}
-	distinct := make([]map[float64]bool, len(bills))
+	channelEntries := make([][]payableBillEntry, len(bills))
 	for _, usage := range usages {
-		i, ok := index[[2]int{usage.BillDate, usage.ProviderId}]
-		if !ok {
-			continue
+		if i, ok := index[[2]int{usage.BillDate, usage.ProviderId}]; ok {
+			channelEntries[i] = append(channelEntries[i], payableBillEntry{name: usage.ProviderName, quota: *usage.DeltaQuota,
+				quotaPerUnit: usage.QuotaPerUnit, discount: usage.PayableDiscount})
 		}
-		bill := &bills[i]
-		bill.ProviderName = usage.ProviderName // id 升序遍历，最后留下的是组内 id 最大的行
-		bill.QuotaPerUnit = usage.QuotaPerUnit
-		// 增量为 0 的行不计金额，它的折扣也不影响"多个"、"未设置"。
-		if *usage.DeltaQuota == 0 {
-			continue
-		}
-		if usage.PayableDiscount == nil {
-			bill.DiscountMissing = true
-			continue
-		}
-		if distinct[i] == nil {
-			distinct[i] = map[float64]bool{}
-		}
-		distinct[i][*usage.PayableDiscount] = true
-		amount := ReceivableAmount(*usage.DeltaQuota, usage.QuotaPerUnit).Mul(decimal.NewFromFloat(*usage.PayableDiscount))
-		if bill.PayableAmount != nil {
-			amount = bill.PayableAmount.Add(amount)
-		}
-		bill.PayableAmount = &amount
 	}
 	for i := range bills {
-		bill := &bills[i]
-		bill.DiscountMixed = len(distinct[i]) >= 2
-		if len(distinct[i]) == 1 && !bill.DiscountMissing {
-			for discount := range distinct[i] {
-				bill.Discount = &discount
-			}
-		}
-		// 组内增量全为 0：没有要付的钱，应付金额为 0，没有折扣可显示
-		if bill.PayableAmount == nil && !bill.DiscountMissing {
-			zero := decimal.Zero
-			bill.PayableAmount = &zero
+		if bills[i].Method == PayableSettlementChannel {
+			sumPayableBill(&bills[i], channelEntries[i])
 		}
 	}
 	return bills, total, nil
@@ -367,7 +438,7 @@ func ListPayableProviderOptions() ([]PayableProviderOption, error) {
 	return options, nil
 }
 
-// GetPayableUsageRow 返回一行明细及其 counted、manual 标记；明细不存在时返回 ErrPayableUsageNotFound。
+// GetPayableUsageRow 返回一行明细及其 counted、manual、usage_settled 标记；明细不存在时返回 ErrPayableUsageNotFound。
 func GetPayableUsageRow(id int) (PayableUsageRow, error) {
 	var row PayableUsageRow
 	if err := DB.First(&row.PayableChannelUsage, id).Error; err != nil {
@@ -386,6 +457,10 @@ func GetPayableUsageRow(id int) (PayableUsageRow, error) {
 	if err != nil {
 		return row, err
 	}
-	row.Counted, row.Manual = pulls > 0, overrides > 0
+	settled, err := payableUsageSettledDays([]int{row.SiteId}, []int{row.BillDate})
+	if err != nil {
+		return row, err
+	}
+	row.Counted, row.Manual, row.UsageSettled = pulls > 0, overrides > 0, settled[[2]int{row.SiteId, row.BillDate}]
 	return row, nil
 }

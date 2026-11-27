@@ -73,6 +73,7 @@ export function ProviderBillsTable() {
         total: result.data?.total ?? 0,
         incompleteSiteCount: result.data?.incomplete_site_count ?? 0,
         mismatchSiteCount: result.data?.mismatch_site_count ?? 0,
+        unsyncedUsageSiteCount: result.data?.unsynced_usage_site_count ?? 0,
       }
     },
     placeholderData: (previousData) => previousData,
@@ -81,8 +82,10 @@ export function ProviderBillsTable() {
   const { table } = useDataTable({
     data: data?.items ?? [],
     columns,
-    // A bill is one provider on one day.
-    getRowId: (row) => `${row.bill_date}-${row.provider_id}`,
+    // A bill is one provider on one day under one settlement method; a
+    // provider-day settled both ways has two bills.
+    getRowId: (row) =>
+      `${row.bill_date}-${row.provider_id}-${row.settlement_method}`,
     pagination,
     onPaginationChange,
     manualPagination: true,
@@ -98,6 +101,9 @@ export function ProviderBillsTable() {
   // A pull that succeeded with fewer channels than the site reported may
   // have missed some, so the bill may look smaller too.
   const mismatchSiteCount = data?.mismatchSiteCount ?? 0
+  // Whole sites whose daily bills have not synced successfully are settled
+  // by channel details until they do.
+  const unsyncedUsageSiteCount = data?.unsyncedUsageSiteCount ?? 0
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-3'>
@@ -119,6 +125,17 @@ export function ProviderBillsTable() {
             {t(
               '{{count}} site(s) reported more channels than were pulled in the selected dates; the bills may be incomplete',
               { count: mismatchSiteCount }
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {unsyncedUsageSiteCount > 0 && (
+        <Alert className='shrink-0'>
+          <TriangleAlert aria-hidden='true' />
+          <AlertDescription>
+            {t(
+              'In the selected dates, {{count}} sites have daily bills that have not synced successfully; they are settled by channel details for now',
+              { count: unsyncedUsageSiteCount }
             )}
           </AlertDescription>
         </Alert>

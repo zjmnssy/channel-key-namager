@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/tooltip'
 import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
 
+import { SETTLEMENT_METHOD_LABEL_KEYS } from '../constants'
 import type { PayableProviderBill } from '../types'
 
 const EMPTY = '—'
@@ -64,6 +65,12 @@ export function useProviderBillsColumns(): ColumnDef<PayableProviderBill>[] {
             />
           )
         },
+      },
+      {
+        accessorKey: 'settlement_method',
+        header: t('Settlement Method'),
+        cell: ({ row }) =>
+          t(SETTLEMENT_METHOD_LABEL_KEYS[row.original.settlement_method]),
       },
       {
         accessorKey: 'amount',

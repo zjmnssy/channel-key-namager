@@ -24,7 +24,10 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 export const payableBillsSearchSchema = z.object({
-  tab: z.enum(['pulls', 'usages', 'providers']).optional().catch('pulls'),
+  tab: z
+    .enum(['pulls', 'usages', 'providers', 'settlements'])
+    .optional()
+    .catch('pulls'),
   page: z.number().optional().catch(1),
   pageSize: z.number().optional().catch(10),
   // Shared by the usage details and provider bills tabs.
@@ -32,6 +35,9 @@ export const payableBillsSearchSchema = z.object({
   end: z.number().optional().catch(undefined),
   sites: z.array(z.string()).optional().catch([]),
   providers: z.array(z.string()).optional().catch([]), // '0' = unknown
+  // The settlement methods tab filters on its own.
+  settlementProviders: z.array(z.string()).optional().catch([]),
+  methods: z.array(z.string()).optional().catch([]),
 })
 
 export const Route = createFileRoute('/_authenticated/payable-bills/')({

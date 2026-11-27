@@ -22,6 +22,8 @@ import type {
   PayableBillQuery,
   PayablePullSiteStatus,
   PayablePullTaskStatus,
+  PayableSettlementMethod,
+  PayableSettlementQuery,
 } from './types'
 
 export const PAYABLE_BILL_QUERY_KEYS = {
@@ -30,11 +32,29 @@ export const PAYABLE_BILL_QUERY_KEYS = {
   taskSites: (id: number) => ['payable-bills', 'task-sites', id],
   usages: (query: PayableBillQuery) => ['payable-bills', 'usages', query],
   providers: (query: PayableBillQuery) => ['payable-bills', 'providers', query],
+  settlements: (query: PayableSettlementQuery) => [
+    'payable-bills',
+    'settlements',
+    query,
+  ],
   options: ['payable-bills', 'options'],
 } as const
 
 /** The provider filter value of rows whose provider is unknown. */
 export const UNKNOWN_PROVIDER_VALUE = '0'
+
+export const SETTLEMENT_METHODS: PayableSettlementMethod[] = [
+  'channel',
+  'usage',
+]
+
+export const SETTLEMENT_METHOD_LABEL_KEYS: Record<
+  PayableSettlementMethod,
+  string
+> = {
+  channel: 'Channel details settlement',
+  usage: 'Usage details settlement',
+}
 
 export const PULL_TASK_STATUS_VARIANTS: Record<
   PayablePullTaskStatus,

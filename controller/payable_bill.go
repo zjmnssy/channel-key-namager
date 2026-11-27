@@ -67,14 +67,15 @@ type payableUsageView struct {
 }
 
 type payableProviderBillView struct {
-	BillDate        int      `json:"bill_date"`
-	ProviderId      int      `json:"provider_id"`
-	ProviderName    string   `json:"provider_name"`
-	Amount          string   `json:"amount"`
-	Discount        *float64 `json:"discount"`
-	DiscountMixed   bool     `json:"discount_mixed"`
-	DiscountMissing bool     `json:"discount_missing"`
-	PayableAmount   *string  `json:"payable_amount"`
+	BillDate         int      `json:"bill_date"`
+	ProviderId       int      `json:"provider_id"`
+	ProviderName     string   `json:"provider_name"`
+	SettlementMethod string   `json:"settlement_method"` // 这一行的结算方式：channel 或 usage
+	Amount           string   `json:"amount"`
+	Discount         *float64 `json:"discount"`
+	DiscountMixed    bool     `json:"discount_mixed"`
+	DiscountMissing  bool     `json:"discount_missing"`
+	PayableAmount    *string  `json:"payable_amount"`
 }
 
 // newPayableUsageViews 把明细行转成接口视图（导出也用它确定平台渠道）：算出金额，并按站点渠道名称结尾的推送标记填上平台渠道 ID 与它在平台上当前的名称。
@@ -184,10 +185,15 @@ func GetPayableProviderBills(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	unsynced, err := model.CountPayableUnsyncedUsageSites(filter)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	views := make([]payableProviderBillView, len(bills))
 	for i, bill := range bills {
 		views[i] = payableProviderBillView{
-			BillDate: bill.BillDate, ProviderId: bill.ProviderId, ProviderName: bill.ProviderName,
+			BillDate: bill.BillDate, ProviderId: bill.ProviderId, ProviderName: bill.ProviderName, SettlementMethod: bill.Method,
 			Amount:   model.ReceivableAmount(bill.DeltaQuota, bill.QuotaPerUnit).StringFixed(6),
 			Discount: bill.Discount, DiscountMixed: bill.DiscountMixed, DiscountMissing: bill.DiscountMissing,
 		}
@@ -198,7 +204,7 @@ func GetPayableProviderBills(c *gin.Context) {
 	}
 	common.ApiSuccess(c, gin.H{
 		"page": pageInfo.GetPage(), "page_size": pageInfo.GetPageSize(), "total": total, "items": views,
-		"incomplete_site_count": incomplete, "mismatch_site_count": mismatched,
+		"incomplete_site_count": incomplete, "mismatch_site_count": mismatched, "unsynced_usage_site_count": unsynced,
 	})
 }
 

@@ -117,6 +117,9 @@ export type PayableUsage = {
   updated_time: number
   counted: boolean // false when the site pull did not complete
   manual: boolean // a manual provider setting exists for this channel
+  // The site's day is settled by its daily bill, so the row is not counted
+  // whether or not its pull completed.
+  usage_settled: boolean
   delta_amount: string | null
   used_amount: string
 }
@@ -137,6 +140,8 @@ export type PayableProviderBill = {
   bill_date: number
   provider_id: number // 0 = unknown provider
   provider_name: string
+  // A provider-day settled both ways has a row for each method.
+  settlement_method: PayableSettlementMethod
   amount: string
   discount: number | null
   discount_mixed: boolean
@@ -147,6 +152,9 @@ export type PayableProviderBill = {
 export type PayableProviderBillPage = Page<PayableProviderBill> & {
   incomplete_site_count: number
   mismatch_site_count: number // succeeded with fewer channels than the site reported
+  // Site-days that would be settled by usage details but whose daily bills
+  // have not synced successfully, so channel details settle them for now.
+  unsynced_usage_site_count: number
 }
 
 export type PayableProviderOption = {
@@ -159,4 +167,33 @@ export type PayableProviderOption = {
 export type PayableBillOptions = {
   sites: ReceivableBillSite[]
   providers: PayableProviderOption[]
+}
+
+/** How a provider's daily consumption becomes payable bills. */
+export type PayableSettlementMethod = 'channel' | 'usage'
+
+/** A site whose "all site channels" rule points to the provider. */
+export type PayableWholeSite = {
+  site_id: number
+  site_name: string
+  // Some channels are assigned to other providers, so the site is still
+  // settled by channel details.
+  conflict: boolean
+}
+
+export type PayableSettlement = {
+  provider_id: number
+  username: string
+  disabled: boolean
+  payable_discount: number | null
+  method: PayableSettlementMethod // channel when never set
+  updated_time: number // 0 = never set
+  whole_sites: PayableWholeSite[] // empty when none
+}
+
+export type PayableSettlementQuery = {
+  p: number
+  page_size: number
+  provider_ids: number[]
+  methods: PayableSettlementMethod[]
 }

@@ -144,8 +144,9 @@ func ExportPayableUsages(c *gin.Context) {
 		if usage.SyncedAt != 0 {
 			cells[16] = time.Unix(usage.SyncedAt, 0).In(model.ReceivableBillLocation).Format("2006-01-02 15:04:05")
 		}
+		// Counted only when the pull is complete and the site-day is not settled by usage details, as in the provider bills.
 		cells[17] = i18n.T(c, i18n.MsgPayableBillCountedNo)
-		if usage.Counted {
+		if usage.Counted && !usage.UsageSettled {
 			cells[17] = i18n.T(c, i18n.MsgPayableBillCountedYes)
 		}
 		rows[i] = cells

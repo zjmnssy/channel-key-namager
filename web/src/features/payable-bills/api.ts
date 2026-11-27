@@ -30,6 +30,9 @@ import type {
   PayableProviderBillPage,
   PayablePullSite,
   PayablePullTask,
+  PayableSettlement,
+  PayableSettlementMethod,
+  PayableSettlementQuery,
   PayableUsage,
 } from './types'
 
@@ -111,5 +114,30 @@ export async function getPayableBillOptions(): Promise<
   ApiResponse<PayableBillOptions>
 > {
   const res = await api.get(`${BASE}/options`)
+  return res.data
+}
+
+export async function listPayableSettlementMethods(
+  query: PayableSettlementQuery
+): Promise<ApiResponse<Page<PayableSettlement>>> {
+  const res = await api.get(`${BASE}/settlement_methods`, {
+    params: {
+      p: query.p,
+      page_size: query.page_size,
+      provider_ids: joinQueryList(query.provider_ids),
+      methods: joinQueryList(query.methods),
+    },
+  })
+  return res.data
+}
+
+/** Applies to daily bills that sync successfully from now on. */
+export async function setPayableSettlementMethod(
+  providerId: number,
+  method: PayableSettlementMethod
+): Promise<ApiResponse<unknown>> {
+  const res = await api.put(`${BASE}/settlement_methods/${providerId}`, {
+    method,
+  })
   return res.data
 }

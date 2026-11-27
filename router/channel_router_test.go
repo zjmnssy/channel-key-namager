@@ -129,7 +129,7 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		common.RedisEnabled, common.SessionSecret, common.IsMasterNode = previousRedis, previousSecret, wasMaster
 		assert.NoError(t, sqlDB.Close())
 	})
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.PayablePullTask{}, &model.PayablePullSite{}, &model.PayableChannelUsage{}, &model.PayableProviderOverride{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.PrefillGroup{}, &model.ThirdPartySite{}, &model.ChannelPushTask{}, &model.ChannelPushTaskSupplier{}, &model.ChannelPushRun{}, &model.ChannelPushRunSupplier{}, &model.ReceivableBill{}, &model.ReceivableBillHour{}, &model.PayablePullTask{}, &model.PayablePullSite{}, &model.PayableChannelUsage{}, &model.PayableProviderOverride{}, &model.PayableSettlementMethod{}, &model.PayableUsageSettlement{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	require.NoError(t, authz.Init(db))
 	require.NoError(t, i18n.Init())
 	sessions := map[int]string{}
@@ -189,6 +189,8 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		{method: http.MethodGet, path: "/api/payable_bill/providers/export?start_date=20261101&end_date=20261123", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/payable_bill/options", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/payable_bill/usages/1/provider", supplierStatus: http.StatusForbidden},
+		{method: http.MethodGet, path: "/api/payable_bill/settlement_methods", supplierStatus: http.StatusForbidden},
+		{method: http.MethodPut, path: "/api/payable_bill/settlement_methods/1", supplierStatus: http.StatusForbidden},
 		{method: http.MethodGet, path: "/api/provider_mapping_rule/", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPost, path: "/api/provider_mapping_rule/", supplierStatus: http.StatusForbidden},
 		{method: http.MethodPut, path: "/api/provider_mapping_rule/1", supplierStatus: http.StatusForbidden},
@@ -242,6 +244,8 @@ func TestChannelSupplierRouteGates(t *testing.T) {
 		"GET /api/payable_bill/providers/export?start_date=20261101&end_date=20261123": true,
 		"GET /api/payable_bill/options":                                                true,
 		"PUT /api/payable_bill/usages/1/provider":                                      true,
+		"GET /api/payable_bill/settlement_methods":                                     true,
+		"PUT /api/payable_bill/settlement_methods/1":                                   true,
 		"GET /api/provider_mapping_rule/":                                              true,
 		"POST /api/provider_mapping_rule/":                                             true,
 		"PUT /api/provider_mapping_rule/1":                                             true,

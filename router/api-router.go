@@ -368,6 +368,8 @@ func SetApiRouter(router *gin.Engine) {
 			payableBillRoute.GET("/providers/export", controller.ExportPayableProviderBills)
 			payableBillRoute.GET("/options", controller.GetPayableOptions)
 			payableBillRoute.PUT("/usages/:id/provider", controller.SetPayableUsageProvider)
+			payableBillRoute.GET("/settlement_methods", controller.GetPayableSettlementMethods)
+			payableBillRoute.PUT("/settlement_methods/:provider_id", controller.SetPayableSettlementMethod)
 		}
 
 		providerMappingRuleRoute := apiRouter.Group("/provider_mapping_rule")

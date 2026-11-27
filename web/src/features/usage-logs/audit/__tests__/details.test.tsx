@@ -1014,6 +1014,100 @@ it('keeps the previous provider of a rejected provider change without claiming a
   )
 })
 
+const settlementMethodParams = {
+  provider_id: 7,
+  provider_name: 'bob',
+  previous_settlement_method: 'channel',
+  settlement_method: 'usage',
+}
+
+it('renders a settlement method change without a provider change field', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.set_settlement_method'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      method: 'PUT',
+      route: '/api/payable_bill/settlement_methods/:provider_id',
+      success: true,
+      other: { op: { action, params: settlementMethodParams } },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Set the settlement method of provider #7')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: 'Provider ID', value: 7 },
+      { label: 'Provider Name', value: 'bob' },
+      {
+        label: 'Previous Settlement Method',
+        value: 'Channel details settlement',
+      },
+      { label: 'Settlement Method', value: 'Usage details settlement' },
+    ])
+  )
+  expect(detail.fields.map((field) => field.label)).not.toContain(
+    'Provider change'
+  )
+})
+
+it('renders a settlement method change in Chinese', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'zh', resources: { zh } })
+  const action = 'payable_bill.set_settlement_method'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: true,
+      other: { op: { action, params: settlementMethodParams } },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('设置了提供商 #7 的结算方式')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: '原结算方式', value: '渠道明细结算' },
+      { label: '结算方式', value: '使用明细结算' },
+    ])
+  )
+})
+
+it('renders a failed settlement method change with its reason', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'en', resources: {} })
+  const action = 'payable_bill.set_settlement_method'
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      action,
+      success: false,
+      other: {
+        audit_info: { success: false },
+        op: {
+          action,
+          params: {
+            provider_id: 3,
+            settlement_method: 'weekly',
+            failure_reason: 'invalid_method',
+          },
+        },
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('Failed to set the settlement method')
+  expect(detail.fields).toEqual(
+    expect.arrayContaining([
+      { label: 'Failure reason', value: 'Invalid parameters' },
+      // A rejected method is shown as it was requested.
+      { label: 'Settlement Method', value: 'weekly' },
+    ])
+  )
+})
+
 it('keeps the status of other audit actions untranslated', async () => {
   const i18n = createInstance()
   await i18n.init({ lng: 'en', resources: {} })

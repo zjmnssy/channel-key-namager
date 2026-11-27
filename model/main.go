@@ -381,6 +381,7 @@ func migrateDB() error {
 		&ChannelPushRun{}, &ChannelPushRunSupplier{},
 		&ReceivableBill{}, &ReceivableBillHour{},
 		&PayablePullTask{}, &PayablePullSite{}, &PayableChannelUsage{}, &PayableProviderOverride{},
+		&PayableSettlementMethod{}, &PayableUsageSettlement{},
 	)
 	if err != nil {
 		return err

@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils'
 import { ChannelUsagesTable } from './components/channel-usages-table'
 import { ProviderBillsTable } from './components/provider-bills-table'
 import { PullTasksTable } from './components/pull-tasks-table'
+import { SettlementMethodsTable } from './components/settlement-methods-table'
 import { PAYABLE_BILL_QUERY_KEYS } from './constants'
 
 const route = getRouteApi('/_authenticated/payable-bills/')
@@ -45,6 +46,8 @@ export function PayableBills() {
     content = <ChannelUsagesTable />
   } else if (tab === 'providers') {
     content = <ProviderBillsTable />
+  } else if (tab === 'settlements') {
+    content = <SettlementMethodsTable />
   }
 
   return (
@@ -78,7 +81,8 @@ export function PayableBills() {
               if (
                 value === 'pulls' ||
                 value === 'usages' ||
-                value === 'providers'
+                value === 'providers' ||
+                value === 'settlements'
               ) {
                 // Each tab pages on its own; the date, site and provider
                 // filters stay shared between details and provider bills.
@@ -96,6 +100,9 @@ export function PayableBills() {
                 {t('Channel Usage Details')}
               </TabsTrigger>
               <TabsTrigger value='providers'>{t('Provider Bills')}</TabsTrigger>
+              <TabsTrigger value='settlements'>
+                {t('Settlement Methods')}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
           <div className='min-h-0 flex-1'>{content}</div>

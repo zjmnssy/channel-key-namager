@@ -148,21 +148,57 @@ func ClaimDueReceivableRow[T ReceivableRow](id int, now int64) (lease int64, ok 
 }
 
 // FinishReceivableRow 在仍持有租约时写入 updates 并释放租约，返回是否写入。
+// 日账单写成成功时同一事务结算（settlePayableUsageDay）：租约已失效、什么都没写时不结算；结算失败时这次写入一起回滚，
+// 日账单保持原状、租约不释放：重试中的行在租约到期后由原有的重试逻辑接着处理；手动重新同步原本成功或失败的行时，
+// 接口直接报错，约 5 分钟后租约过期，可以再手动同步。
 func FinishReceivableRow[T ReceivableRow](id int, lease int64, updates map[string]any) (bool, error) {
+	now := common.GetTimestamp()
 	values := make(map[string]any, len(updates)+2)
 	maps.Copy(values, updates)
 	values["lease_until"] = int64(0)
-	values["updated_time"] = common.GetTimestamp()
-	result := DB.Model(new(T)).Where("id = ? AND lease_until = ?", id, lease).Updates(values)
-	if result.Error != nil {
-		return false, result.Error
+	values["updated_time"] = now
+	_, isDaily := any(new(T)).(*ReceivableBill)
+	if !isDaily || updates["status"] != ReceivableBillStatusSuccess {
+		result := DB.Model(new(T)).Where("id = ? AND lease_until = ?", id, lease).Updates(values)
+		if result.Error != nil {
+			return false, result.Error
+		}
+		return result.RowsAffected == 1, nil
 	}
-	return result.RowsAffected == 1, nil
+	finished := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&ReceivableBill{}).Where("id = ? AND lease_until = ?", id, lease).Updates(values)
+		if result.Error != nil || result.RowsAffected != 1 {
+			return result.Error
+		}
+		var bill ReceivableBill
+		if err := tx.Select("site_id", "bill_date", "quota", "quota_per_unit").Where("id = ?", id).First(&bill).Error; err != nil {
+			return err
+		}
+		finished = true
+		return settlePayableUsageDay(tx, bill.SiteId, bill.BillDate, bill.Quota, bill.QuotaPerUnit, now)
+	})
+	if err != nil {
+		return false, err
+	}
+	return finished, nil
 }
 
 // InsertReceivableRow 插入一行，(site_id, 周期) 已存在时什么都不做。
+// 日账单写成成功时同一事务结算（settlePayableUsageDay）：这一行已被别处插入、什么都没写时不结算，由写入的一方负责；
+// 结算失败时这一行也不插入，由之后的扫描再补。
 func InsertReceivableRow[T ReceivableRow](row *T) error {
-	return DB.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+	bill, isDaily := any(row).(*ReceivableBill)
+	if !isDaily || bill.Status != ReceivableBillStatusSuccess {
+		return DB.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(bill)
+		if result.Error != nil || result.RowsAffected != 1 {
+			return result.Error
+		}
+		return settlePayableUsageDay(tx, bill.SiteId, bill.BillDate, bill.Quota, bill.QuotaPerUnit, common.GetTimestamp())
+	})
 }
 
 // receivablePeriodColumn 返回 T 存放周期的列名。
