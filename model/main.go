@@ -395,6 +395,9 @@ func migrateDB() error {
 	if err := InitializeExternalIdentityClaims(); err != nil {
 		return err
 	}
+	if err := InitializeThirdPartySiteBillStartDates(time.Now()); err != nil {
+		return fmt.Errorf("initialize third-party site bill start dates: %w", err)
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { TFunction } from 'i18next'
 import { z } from 'zod'
 
+import { beijingToday } from '@/features/receivable-bills/lib/bill-date'
 import { isValidDiscountText, parseDiscountText } from '@/lib/discount'
 
 import type { ThirdPartySite, ThirdPartySitePayload } from '../types'
@@ -32,6 +33,8 @@ export interface ThirdPartySiteFormValues {
   remote_user_id: string
   api_key: string
   receivable_discount: string
+  /** Beijing date (YYYYMMDD); 0 until the dialog sets today or the stored date */
+  bill_start_date: number
 }
 
 export const THIRD_PARTY_SITE_FORM_DEFAULTS: ThirdPartySiteFormValues = {
@@ -41,6 +44,7 @@ export const THIRD_PARTY_SITE_FORM_DEFAULTS: ThirdPartySiteFormValues = {
   remote_user_id: '',
   api_key: '',
   receivable_discount: '1',
+  bill_start_date: 0,
 }
 
 const NAME_MAX_LENGTH = 128
@@ -66,11 +70,35 @@ function isValidRemoteUserId(value: string): boolean {
   return Number.isSafeInteger(n) && n > 0
 }
 
+/**
+ * The earliest bill start date that can be set on the Beijing date `today`: the
+ * same day a year before, with 29 February rolling over to 1 March as on the server.
+ */
+export function earliestBillStartDate(today: number): number {
+  const earliest = new Date(
+    Date.UTC(
+      Math.floor(today / 10000) - 1,
+      (Math.floor(today / 100) % 100) - 1,
+      today % 100
+    )
+  )
+  return (
+    earliest.getUTCFullYear() * 10000 +
+    (earliest.getUTCMonth() + 1) * 100 +
+    earliest.getUTCDate()
+  )
+}
+
 // Judged on the text so a long fraction is never rounded into range.
 
+/**
+ * `storedBillStartDate` is the edited site's start date, which passes again
+ * unchecked, as on the server, even once it is more than a year old.
+ */
 export function getThirdPartySiteFormSchema(
   t: TFunction,
-  mode: ThirdPartySiteFormMode
+  mode: ThirdPartySiteFormMode,
+  storedBillStartDate?: number
 ) {
   return z.object({
     name: z.string().superRefine((raw, ctx) => {
@@ -126,6 +154,21 @@ export function getThirdPartySiteFormSchema(
           'Receivable discount must be greater than 0 and at most 1, with at most 4 decimal places'
         ),
       }),
+    bill_start_date: z.number().superRefine((value, ctx) => {
+      if (value === storedBillStartDate) return
+      const today = beijingToday()
+      if (value > today) {
+        ctx.addIssue({
+          code: 'custom',
+          message: t('Bill start date cannot be later than today'),
+        })
+      } else if (value < earliestBillStartDate(today)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: t('Bill start date cannot be earlier than one year ago'),
+        })
+      }
+    }),
   })
 }
 
@@ -139,6 +182,7 @@ export function toThirdPartySiteFormValues(
     remote_user_id: String(site.remote_user_id),
     api_key: '',
     receivable_discount: String(site.receivable_discount),
+    bill_start_date: site.bill_start_date,
   }
 }
 
@@ -152,6 +196,7 @@ export function toThirdPartySitePayload(
     base_url: values.base_url.trim(),
     remote_user_id: Number(values.remote_user_id.trim()),
     receivable_discount: parseDiscountText(values.receivable_discount.trim()),
+    bill_start_date: values.bill_start_date,
   }
   const apiKey = values.api_key.trim()
   if (mode === 'create' || apiKey !== '') payload.api_key = apiKey

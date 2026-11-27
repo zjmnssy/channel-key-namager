@@ -97,7 +97,7 @@ func BuildReceivableBillTrend(query ReceivableTrendQuery, now time.Time) (*Recei
 	starts := make([]time.Time, points)
 	keys := make([]int64, points)
 	due := make([]bool, points)
-	lastHour, lastDay := receivableLatestBillHour(now), receivableLatestBillDay(now)
+	lastHour, lastDay := receivableLatestBillHour(now), model.ReceivableLatestBillDay(now)
 	for i := range points {
 		if isDay {
 			starts[i] = first.Add(time.Duration(i) * time.Hour)

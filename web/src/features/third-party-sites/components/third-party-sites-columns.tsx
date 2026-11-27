@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import { DiscountValue } from '@/components/discount-value'
 import { TruncatedText } from '@/components/truncated-text'
+import { formatBillDate } from '@/features/receivable-bills/lib/bill-date'
 
 import { THIRD_PARTY_SITE_TYPE_OPTIONS } from '../constants'
 import type { ThirdPartySite } from '../types'
@@ -60,6 +61,11 @@ export function useThirdPartySitesColumns(): ColumnDef<ThirdPartySite>[] {
       cell: ({ row }) => (
         <DiscountValue value={row.original.receivable_discount} />
       ),
+    },
+    {
+      accessorKey: 'bill_start_date',
+      header: t('Bill Start Date'),
+      cell: ({ row }) => formatBillDate(row.original.bill_start_date),
     },
     {
       accessorKey: 'remote_user_id',

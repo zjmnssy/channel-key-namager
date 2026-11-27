@@ -25,7 +25,15 @@ import {
   type InternalAxiosRequestConfig,
 } from 'axios'
 import { toast } from 'sonner'
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest'
 
 import { api } from '@/lib/api'
 
@@ -43,6 +51,7 @@ const row: ThirdPartySite = {
   base_url: 'https://alpha.example.com',
   remote_user_id: 7,
   receivable_discount: 0.85,
+  bill_start_date: 20261101,
   created_time: 1,
   updated_time: 1,
 }
@@ -99,12 +108,19 @@ async function fillCreateForm(
 }
 
 beforeEach(() => {
+  // Beijing 2026-11-26 12:00, the same day in the zones the tests run in.
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-11-26T04:00:00Z'))
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   onOpenChange = vi.fn()
 })
 
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 describe('ThirdPartySiteMutateDialog', () => {
-  it('creates a site with numeric fields and the default discount', async () => {
+  it('creates a site with numeric fields, the default discount and bills from today', async () => {
     const post = vi.spyOn(api, 'post').mockResolvedValue({
       data: { success: true, data: createdSite },
     })
@@ -112,6 +128,9 @@ describe('ThirdPartySiteMutateDialog', () => {
     render(wrap(true))
 
     expect(screen.getByLabelText('Receivable Discount')).toHaveValue('1')
+    expect(screen.getByLabelText('Bill Start Date')).toHaveTextContent(
+      '2026-11-26'
+    )
     await fillCreateForm(user)
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -122,6 +141,7 @@ describe('ThirdPartySiteMutateDialog', () => {
       base_url: 'https://alpha.example.com',
       remote_user_id: 7,
       receivable_discount: 1,
+      bill_start_date: 20261126,
       api_key: 'secret-create-key',
     })
     expect(cacheText(client)).not.toContain('secret-create-key')
@@ -195,6 +215,68 @@ describe('ThirdPartySiteMutateDialog', () => {
     )
   })
 
+  it('sends the bill start date picked in the calendar', async () => {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: createdSite },
+    })
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user)
+    await user.click(screen.getByLabelText('Bill Start Date'))
+    await user.click(
+      await screen.findByRole('button', { name: /November 20th, 2026/ })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(post).toHaveBeenCalledWith(
+      '/api/third_party_site/',
+      expect.objectContaining({ bill_start_date: 20261120 })
+    )
+  })
+
+  it('saves an edit that keeps a bill start date older than a year', async () => {
+    const put = vi.spyOn(api, 'put').mockResolvedValue({
+      data: { success: true, data: row },
+    })
+    const user = userEvent.setup()
+    render(wrap(true, { ...row, bill_start_date: 20250101 }))
+
+    expect(screen.getByLabelText('Bill Start Date')).toHaveTextContent(
+      '2025-01-01'
+    )
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0][1]).toHaveProperty('bill_start_date', 20250101)
+  })
+
+  it('shows a server bill start date error under that field', async () => {
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: {
+        success: false,
+        message: 'Bill start date cannot be later than today',
+        message_key: 'Bill start date cannot be later than today',
+        field: 'bill_start_date',
+      },
+    })
+    const user = userEvent.setup()
+    render(wrap(true))
+
+    await fillCreateForm(user)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(
+      await screen.findByText('Bill start date cannot be later than today')
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Bill Start Date')).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    )
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
   it('renders the ApiKey as a plain text field rather than a password field', () => {
     render(wrap(true))
 
@@ -224,6 +306,9 @@ describe('ThirdPartySiteMutateDialog', () => {
     ).toBeInTheDocument()
     expect(screen.getByLabelText('Remote User ID')).toHaveValue('7')
     expect(screen.getByLabelText('Receivable Discount')).toHaveValue('0.85')
+    expect(screen.getByLabelText('Bill Start Date')).toHaveTextContent(
+      '2026-11-01'
+    )
     expect(screen.getByLabelText('ApiKey')).toHaveValue('')
     expect(screen.getByLabelText('ApiKey')).toHaveAttribute(
       'placeholder',
@@ -242,6 +327,7 @@ describe('ThirdPartySiteMutateDialog', () => {
       base_url: 'https://alpha.example.com',
       remote_user_id: 7,
       receivable_discount: 0.85,
+      bill_start_date: 20261101,
     })
     expect(payload).not.toHaveProperty('api_key')
   })
@@ -401,6 +487,9 @@ describe('ThirdPartySiteMutateDialog', () => {
     )
     expect(screen.getByLabelText('Receivable Discount')).toHaveValue(
       THIRD_PARTY_SITE_FORM_DEFAULTS.receivable_discount
+    )
+    expect(screen.getByLabelText('Bill Start Date')).toHaveTextContent(
+      '2026-11-26'
     )
     expect(screen.getByLabelText('Type')).toHaveTextContent('Native NewAPI')
 

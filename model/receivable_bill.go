@@ -19,6 +19,9 @@ const (
 
 	ReceivableBillQuotaPerUnit int64 = 500000
 	ReceivableBillLeaseSeconds int64 = 300
+
+	// ReceivableBillIssueTime is how long after Beijing midnight yesterday's bill falls due.
+	ReceivableBillIssueTime = time.Hour
 )
 
 var (
@@ -93,6 +96,19 @@ func ReceivableBillDayStart(date int) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return start, true
+}
+
+// ReceivableLatestBillDay returns the Beijing midnight of the latest day whose bill is
+// due at now. Yesterday's bill falls due at 1:00; before that the latest due is the
+// day before's.
+func ReceivableLatestBillDay(now time.Time) time.Time {
+	beijing := now.In(ReceivableBillLocation)
+	today := time.Date(beijing.Year(), beijing.Month(), beijing.Day(), 0, 0, 0, 0, ReceivableBillLocation)
+	lastDay := today.AddDate(0, 0, -1)
+	if now.Before(today.Add(ReceivableBillIssueTime)) {
+		lastDay = lastDay.AddDate(0, 0, -1)
+	}
+	return lastDay
 }
 
 // ReceivableAmount 把额度换算为金额，quotaPerUnit 不为正时按 ReceivableBillQuotaPerUnit 计算。
